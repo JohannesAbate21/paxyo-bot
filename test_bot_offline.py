@@ -856,6 +856,13 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
         msg = await self._send("asdf qwer", intent_of("unclear"))
         self.assertIn("did not understand", msg.text_sent[0])
 
+    async def test_gemini_down_still_answers_with_busy_line(self):
+        # The silence fix: when Gemini failed, an unclassifiable
+        # message gets the busy line, never silence.
+        intent = {**intent_of("unclear"), "gemini_failed": True}
+        msg = await self._send("asdf qwer", intent)
+        self.assertIn("busy right now", msg.text_sent[0])
+
     async def test_extract_intent_returns_intent_field(self):
         payload = json.dumps(
             {"intent": "balance", "platform": None, "service_hint": None,
@@ -867,6 +874,50 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
             result = await bot.extract_intent("How much is my balance")
         self.assertEqual(result["intent"], "balance")
         self.assertIsNone(result["platform"])
+
+    async def test_extract_intent_falls_back_when_gemini_raises(self):
+        # The silence fix: a Gemini 429 must not crash the message —
+        # the local classifier answers instead.
+        req = bot.httpx.Request("POST", "https://example.com/gemini")
+        resp = bot.httpx.Response(429, request=req)
+        err = bot.httpx.HTTPStatusError("429", request=req, response=resp)
+        with mock.patch(
+            "bot.gemini_generate", new=mock.AsyncMock(side_effect=err)
+        ):
+            result = await bot.extract_intent("what is my balance")
+        self.assertEqual(result["intent"], "balance")
+        self.assertTrue(result["gemini_failed"])
+
+    def test_local_intent_reads_order_from_link_and_quantity(self):
+        result = bot.local_intent(
+            "I want 1000 Instagram followers https://instagram.com/p/x"
+        )
+        self.assertEqual(result["intent"], "order")
+        self.assertEqual(result["platform"], "instagram")
+        self.assertEqual(result["quantity"], 1000)
+        self.assertEqual(result["link"], "https://instagram.com/p/x")
+        self.assertTrue(result["gemini_failed"])
+
+    def test_local_intent_reads_deposit_fields(self):
+        result = bot.local_intent("deposit 500 birr by telebirr 0912345678")
+        self.assertEqual(result["intent"], "deposit")
+        self.assertEqual(result["amount"], 500.0)
+        self.assertEqual(result["method"], "telebirr")
+        self.assertEqual(result["phone"], "251912345678")
+
+    def test_local_intent_reads_recurring_interval(self):
+        result = bot.local_intent("order 1000 tiktok views every 3 hours")
+        self.assertEqual(result["intent"], "recurring")
+        self.assertEqual(result["interval_minutes"], 180)
+
+    def test_local_intent_the_usual(self):
+        result = bot.local_intent("the usual please")
+        self.assertEqual(result["intent"], "usual")
+
+    def test_local_intent_unknown_stays_unclassified(self):
+        result = bot.local_intent("asdf qwer")
+        self.assertIsNone(result["intent"])
+        self.assertTrue(result["gemini_failed"])
 
     def test_system_prompt_lists_intent_types(self):
         for word in (
@@ -2429,6 +2480,47 @@ class TestDepositApiClient(unittest.IsolatedAsyncioTestCase):
             await client._client.aclose()
 
 
+class TestServicesNormalisation(unittest.IsolatedAsyncioTestCase):
+    """PaxyoClient.services() maps the API's `id`/`price` to the
+    bot's `service`/`rate_etb_per_1000` — the live API returns no
+    `rate_etb_per_1000`, so without this every price read 0.00 ETB
+    and placing an order crashed on the missing service ID."""
+
+    async def test_api_shape_becomes_bot_shape(self):
+        client = bot.PaxyoClient()
+        try:
+            api_services = {
+                "success": True, "count": 2, "currency": "ETB",
+                "rate_multiplier": 420, "holiday_discount_percent": 0,
+                "services": [
+                    {"id": 7246, "provider_service_id": 7246,
+                     "name": "Tiktok Followers", "category": "Tiktok",
+                     "type": "Default", "price": 525, "currency": "ETB",
+                     "min": 10, "max": 5000,
+                     "average_time": "1 hour 39 minutes", "active": True},
+                    {"id": 1665, "provider_service_id": 1665,
+                     "name": "TikTok Video Views [ Max 100M ]",
+                     "category": "Tiktok Services", "type": "Default",
+                     "price": 18.9, "currency": "ETB",
+                     "min": 100, "max": 100000000,
+                     "average_time": "1 minute", "active": True},
+                ],
+            }
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=api_services),
+            ):
+                services = await client.services()
+            self.assertEqual(len(services), 2)
+            self.assertEqual(services[0]["service"], 7246)
+            self.assertEqual(services[0]["rate_etb_per_1000"], 525)
+            self.assertEqual(services[1]["service"], 1665)
+            self.assertEqual(services[1]["rate_etb_per_1000"], 18.9)
+            self.assertEqual(services[1]["name"], "TikTok Video Views [ Max 100M ]")
+        finally:
+            await client._client.aclose()
+
+
 class TestGuideMe(unittest.IsolatedAsyncioTestCase):
     """Guide-me (owner, 13 Nov 2026): a user who does not know how to
     order gets a short guide with a Start button; "mini app" gives the
@@ -2914,6 +3006,65 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         client = FakeAsyncClient(response)
         with mock.patch("bot.httpx.AsyncClient", return_value=client):
             self.assertEqual(await bot.gemini_vision(b"fake-jpeg-bytes"), "")
+
+
+class TestGeminiRetry(unittest.IsolatedAsyncioTestCase):
+    """_gemini_post retries 429/503, and gemini_* use it."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request("POST", "https://example.com/gemini")
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "candidates": [{"content": {"parts": [{"text": text}]}}]
+        })
+
+    async def test_generate_retries_429_then_succeeds(self):
+        client = FlakyClient([self._status_error(429), self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.gemini_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_generate_raises_after_three_429s(self):
+        client = FlakyClient([self._status_error(429)] * 3)
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.gemini_generate("hi")
+        self.assertEqual(len(client.posts), 3)
+
+    async def test_transcribe_retries_503_then_succeeds(self):
+        client = FlakyClient([self._status_error(503), self._ok_response("hi")])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.gemini_transcribe(b"fake-ogg"), "hi")
+        self.assertEqual(len(client.posts), 2)
+
+
+class FlakyClient:
+    """Fake client returning a queue of responses/errors per post."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.posts = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None, params=None):
+        self.posts.append(
+            {"url": url, "headers": headers, "json": json, "params": params}
+        )
+        result = self._results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class TestChosenService(unittest.IsolatedAsyncioTestCase):

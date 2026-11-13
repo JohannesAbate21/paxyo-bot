@@ -346,3 +346,23 @@ for it — `PaxyoClient.order_status()` already fetches live order
 status, and there is a TODO in `main()` where a monitor can be added
 (a background task polling recent orders). It is deliberately not in
 this version.
+
+## Reliability (added 13 Nov 2026 — the silence fix)
+
+Two bugs found live on 13 Nov, both fixed here:
+
+- **The bot went silent.** When Gemini's free-tier key hit its
+  per-minute limit (HTTP 429), the classify call raised and the
+  message got no reply at all. Now `_gemini_post` retries 429/503
+  twice (after 5s, then 15s), and `extract_intent` falls back to a
+  local classifier (`local_intent`) when Gemini is unreachable, so
+  the bot always answers — balance, orders, deposits, recurring,
+  and plain orders all work without the AI. A message it still
+  cannot classify gets a short "busy right now" line, never
+  silence.
+- **Prices showed 0.00 ETB.** The Paxyo API returns each service
+  with `id` and `price` (ETB per 1000); the bot read `service` and
+  `rate_etb_per_1000`, which the API does not send. `PaxyoClient.
+  services()` now normalises the API shape to the bot's shape in
+  one place, so prices, cheapest-first sorting, and order
+  placement all see real values.

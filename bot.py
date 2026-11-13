@@ -489,6 +489,10 @@ TEXT = {
         "am": "አልገባኝም — እባክዎ እንደገና ይሞክሩ። ለምሳሌ: “1000 Instagram followers እፈልጋለሁ” ብለው link ይላኩልኝ።",
         "en": "I did not understand — please try again. For example: “I want 1000 Instagram followers” with your link.",
     },
+    "gemini_busy": {
+        "am": "አሁን ትንሽ ተጨናንቄያለሁ — እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።",
+        "en": "I am a bit busy right now — please try again in a moment.",
+    },
     "no_service": {
         "am": "ለዚህ platform service አላገኘሁም። እባክዎ platform ይለውጡ።",
         "en": "I could not find a service for that platform. Please try another platform.",
@@ -1390,7 +1394,14 @@ class PaxyoClient:
         return response.json()
 
     async def services(self):
-        """GET /services, cached for SERVICES_CACHE_SECONDS."""
+        """GET /services, cached for SERVICES_CACHE_SECONDS.
+
+        The API returns each service with `id` and `price` (ETB per
+        1000); the bot reads `service` and `rate_etb_per_1000`.
+        Normalised here, once, so every caller sees the bot's shape
+        — without it every price reads 0 and the order placement
+        crashes on the missing service ID.
+        """
         import time
 
         now = time.monotonic()
@@ -1400,7 +1411,18 @@ class PaxyoClient:
         ):
             return self._services_cache
         data = await self._send(build_api_request("GET", "/services"))
-        services = data.get("services", data) if isinstance(data, dict) else data
+        raw = data.get("services", data) if isinstance(data, dict) else data
+        services = []
+        for s in raw or []:
+            if not isinstance(s, dict):
+                continue
+            services.append({
+                **s,
+                "service": s.get("service", s.get("id")),
+                "rate_etb_per_1000": s.get(
+                    "rate_etb_per_1000", s.get("price", 0)
+                ),
+            })
         self._services_cache = services
         self._services_cached_at = now
         return services
@@ -1631,16 +1653,40 @@ class PaxyoClient:
         return deposit if isinstance(deposit, dict) else None
 
 
+async def _gemini_post(payload: dict) -> dict:
+    """One POST to the Gemini API, with retries on rate limits.
+
+    The free-tier key trips its per-minute limit easily when several
+    messages arrive at once (429) or the model is overloaded (503),
+    so those two statuses retry after 5s then 15s. Any other error
+    raises at once — the caller decides what the user hears. The
+    client shape is kept exactly as the three callers used it
+    (timeout 120s, trust_env False, params key, json payload), so
+    tests that mock the client still pass.
+    """
+    url = GEMINI_URL.format(model=GEMINI_MODEL)
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 503) and attempt < 2:
+                log.warning("Gemini %s, retrying (attempt %d of 3)", status, attempt + 2)
+                continue
+            raise
+
+
 async def gemini_generate(prompt: str, system: str = None) -> str:
     """One Gemini text call. Returns the reply text (may be empty)."""
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     if system:
         payload["systemInstruction"] = {"parts": [{"text": system}]}
-    url = GEMINI_URL.format(model=GEMINI_MODEL)
-    async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
-        resp = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    data = await _gemini_post(payload)
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError):
@@ -1664,11 +1710,7 @@ async def gemini_transcribe(audio_bytes: bytes) -> str:
             }
         ]
     }
-    url = GEMINI_URL.format(model=GEMINI_MODEL)
-    async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
-        resp = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    data = await _gemini_post(payload)
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except (KeyError, IndexError, TypeError):
@@ -1715,11 +1757,7 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
             }
         ]
     }
-    url = GEMINI_URL.format(model=GEMINI_MODEL)
-    async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
-        resp = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    data = await _gemini_post(payload)
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except (KeyError, IndexError, TypeError):
@@ -1775,6 +1813,136 @@ def platform_from_link(link: str):
     return None
 
 
+_PLATFORMS = ("instagram", "tiktok", "telegram", "youtube", "facebook", "x")
+_METRICS = (
+    "followers", "likes", "views", "subscribers", "members", "shares",
+    "comments",
+)
+
+
+def local_intent(text: str) -> dict:
+    """Best-effort intent without Gemini — the silence fallback.
+
+    Used only when the Gemini call itself fails (rate limit, outage).
+    Reads the message with the same local helpers the order flow
+    already uses: links, phone, amount, method, interval, service ID.
+    Deliberately conservative: anything it cannot pin down stays
+    None, and the caller answers with the busy line instead of going
+    silent. Same shape as extract_intent's dict, plus
+    "gemini_failed": True.
+    """
+    intent = {
+        "intent": None, "platform": None, "service_hint": None,
+        "service_id": None, "link": None, "quantity": None,
+        "interval_minutes": None, "amount": None, "method": None,
+        "phone": None, "quantity_multiplier": None, "orders": None,
+        "split": None, "gemini_failed": True,
+    }
+    s = normalize_text(text)
+    words = set(re.findall(r"[a-z]+", s.lower()))
+    links = extract_links(text)
+    if links:
+        intent["link"] = links[0]
+        intent["platform"] = platform_from_link(links[0])
+    if intent["platform"] is None:
+        intent["platform"] = next(
+            (w for w in _PLATFORMS if w in words), None
+        )
+    metric = next((w for w in _METRICS if w in words), None)
+    if intent["platform"] or metric:
+        intent["service_hint"] = " ".join(
+            p for p in (intent["platform"], metric) if p
+        )
+    for m in re.finditer(r"\d[\d,]*", s):
+        try:
+            value = int(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if 10 <= value <= 1000000 and value % 10 == 0:
+            intent["quantity"] = value
+            break
+    intent["service_id"] = extract_service_id(text)
+    intent["amount"] = parse_deposit_amount(text)
+    intent["method"] = normalize_method(text)
+    intent["phone"] = normalize_phone(text)
+    interval = parse_interval_minutes(text)
+    if interval:
+        intent["interval_minutes"] = interval
+    if "double" in words:
+        intent["quantity_multiplier"] = 2
+    elif "triple" in words:
+        intent["quantity_multiplier"] = 3
+    if is_paid_phrase(text) or any(
+        p in s for p in (
+            "did my deposit", "my deposit go", "check my deposit",
+            "deposit failed", "deposit not",
+        )
+    ):
+        intent["intent"] = "deposit_status"
+    elif any(
+        p in s for p in (
+            "deposit", "top up", "add money", "recharge", "add balance",
+        )
+    ):
+        intent["intent"] = "deposit"
+    elif "balanc" in s:
+        intent["intent"] = "balance"
+    elif any(
+        p in s for p in (
+            "my orders", "order history", "order status", "show orders",
+            "my order", "latest order", "last order",
+        )
+    ):
+        intent["intent"] = "orders"
+    elif "the usual" in s or "same as yesterday" in s or "same as last" in s:
+        intent["intent"] = "usual"
+    elif "mini app" in s or "miniapp" in s:
+        intent["intent"] = "miniapp"
+    elif "social" in s:
+        intent["intent"] = "social"
+    elif any(
+        p in s for p in (
+            "how do i order", "how to order", "how can i order",
+            "how do i buy",
+        )
+    ):
+        intent["intent"] = "how_to_order"
+    elif "stop" in words and (
+        "repeat" in words or "recurr" in s or "every" in words
+    ):
+        intent["intent"] = "stop_schedule"
+    elif "cancel" in s:
+        intent["intent"] = "cancel"
+    elif "my schedule" in s or "my schedules" in s or "recurring orders" in s:
+        intent["intent"] = "schedules"
+    elif "every" in words and interval:
+        intent["intent"] = "recurring"
+    elif "viral" in words:
+        intent["intent"] = "goal"
+    elif (
+        intent["amount"] is not None
+        and intent["quantity"] is not None
+        and "for" in words
+    ):
+        intent["intent"] = "budget"
+    elif (
+        links
+        or intent["quantity"] is not None
+        or intent["platform"]
+        or metric
+        or intent["service_id"] is not None
+    ):
+        intent["intent"] = "order"
+    elif s.strip() in ("hi", "hello", "hey", "selam", "ሰላም") or any(
+        s.strip().startswith(prefix)
+        for prefix in ("hi ", "hello ", "hey ", "selam ")
+    ):
+        intent["intent"] = "greeting"
+    elif is_source_question(text):
+        intent["intent"] = "source_question"
+    return intent
+
+
 async def extract_intent(text: str) -> dict:
     """Ask Gemini to classify the message and extract the order intent.
 
@@ -1793,7 +1961,13 @@ async def extract_intent(text: str) -> dict:
     content_help, support_issue, cancel, off_topic, unclear — or
     None when the model output had no usable JSON.
     """
-    reply = await gemini_generate(normalize_text(text), system=SYSTEM_PROMPT)
+    try:
+        reply = await gemini_generate(normalize_text(text), system=SYSTEM_PROMPT)
+    except Exception:
+        # The AI is unreachable (rate limit, outage). Answer from the
+        # message itself instead of going silent — see local_intent.
+        log.warning("Gemini classify failed, using local fallback", exc_info=True)
+        return local_intent(text)
     intent = extract_json(reply)
     if intent is None:
         return {
@@ -4333,7 +4507,10 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         and not merged.get("quantity")
         and not merged.get("service_id")
     ):
-        await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
+        if intent.get("gemini_failed"):
+            await reply_message(update.message, t("gemini_busy", lang), lang, voice=voice)
+        else:
+            await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
         return
     # A named service implies its platform, so the bot asks for the
     # link next instead of the platform.
