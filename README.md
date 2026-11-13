@@ -1,26 +1,31 @@
 # Paxyo Order bot (@paxorder_bot)
 
 Telegram bot that lets Paxyo customers order social-media services by
-chatting — text or voice message, in Amharic or English.
+chatting — by text, in Amharic or English. (A voice message sent to
+the bot is transcribed and handled like text, but the bot does not
+claim to take orders by voice — owner, 13 Nov 2026.)
 
 - A user taps /start and their Paxyo account is created automatically.
-- They write what they want (or send a voice message). ChatGPT
-  understands the message and extracts the order intent as JSON
-  (Gemini is the fallback when no OpenAI key is set — see
-  "AI provider" below).
+- They write what they want. ChatGPT understands the message and
+  extracts the order intent as JSON (Gemini is the fallback when no
+  OpenAI key is set — see "AI provider" below).
 - The bot searches the Paxyo catalogue, ranks services in the category by
   average time (fastest first), and shows the top pick with price and
   total, plus Confirm / Cancel buttons.
 - On Confirm it checks the balance, then places the order through the
-  Paxyo Bot API. No order is ever placed without a Confirm tap.
-- /balance shows the balance. /orders shows the status of the last order.
-  /help shows how it works.
+  Paxyo Bot API. No order is ever placed without a Confirm tap —
+  EXCEPT an explicit urgent "order now" (owner override, 13 Nov
+  2026): when the user explicitly says to order now and the order is
+  fully specified, the bot places it at once and sends the full
+  order summary in text. See "Round 5".
+- /balance shows the balance. /orders shows ALL of the user's orders
+  as a table (newest first). /help shows how it works.
 
 ## How it works
 
 ```
-Telegram user --(text/voice)--> bot.py (webhook, free Render web service)
-    | ChatGPT (or Gemini): transcribe voice, extract intent JSON
+Telegram user --(text)--> bot.py (webhook, free Render web service)
+    | ChatGPT (or Gemini): transcribe voice messages, extract intent JSON
     v
 Paxyo Bot API on paxyo.et (https://paxyo.et/api/bot, X-Bot-Secret)
     | services / balance / create order / order status / create user
@@ -31,8 +36,9 @@ Paxyo MySQL + existing website order flow --> fulfilment
 Money rules: the AI only listens and talks. All totals are computed
 server-side by the Paxyo API. The bot never invents a price, never sells
 blacklisted services (5379, 5834) or inactive services, and never orders
-without Confirm. Quantity must be a multiple of 10 and inside the
-service min/max.
+without Confirm — except an explicit urgent "order now" (owner
+override, 13 Nov 2026, see "Round 5"). Quantity must be a multiple
+of 10 and inside the service min/max.
 
 ## Files
 
@@ -94,34 +100,41 @@ replacement then; no code change is needed. ChatGPT cost, when it
 is used: about $0.0004 per chat reply, so $5 of credit covers
 roughly 10,000 chats.
 
-## Voice replies
+## Voice messages
 
-A voice message in gets a voice message back; a text message in gets
-text back — never the other way round. Voice replies use **Google
-Cloud Text-to-Speech**: Amharic replies use voice `am-ET-Wavenet-A`
-(override with `GOOGLE_CLOUD_TTS_VOICE`), English replies use
-`en-US-Wavenet-D` (override with `GOOGLE_CLOUD_TTS_VOICE_EN`). Any
-other language falls back to text — the bot never guesses a voice.
-Cloud TTS returns OGG Opus directly, the format Telegram voice
-messages need, so **no ffmpeg is needed on Render**. If voice
-synthesis fails for any reason, the bot answers by text instead — it
-never breaks an order over voice.
+A voice message sent to the bot is downloaded and transcribed
+(Groq Whisper `whisper-large-v3-turbo`, via `ai_transcribe`), the
+transcription is shown back to the user ("You said: ..."), and the
+transcribed text is then handled exactly like the same typed
+message. Replies are always text. The bot does not claim to take
+orders by voice (owner, 13 Nov 2026 — the claims were removed
+until the voice path is verified working live; they can be
+re-added then). A download failure or a transcription failure gets
+one plain line, never silence; a video note gets one plain line
+too. GIFs and stickers also always get a reply — a caption is
+handled as the user's message, otherwise a short friendly steer
+back to ordering.
+
+The Google Cloud Text-to-Speech pipeline (`speak_reply`,
+`GOOGLE_CLOUD_TTS_API_KEY`, voices `am-ET-Wavenet-A` /
+`en-US-Wavenet-D`) is still in the code but is not used for replies
+right now: `on_voice` answers in text (`voice=False`). See
+"Why Cloud TTS, not Gemini TTS" below for the voice history.
 
 ## Reply rules
 
 - Text message in → text reply, always. The bot never answers a text
   message with a voice message.
-- Voice message in → voice reply (Google Cloud TTS), except:
-  - the order summary / Confirm step, which is always text (a voice
-    message cannot carry inline buttons);
-  - the post-acceptance summary, which is always text (see below).
-- After the user accepts an order — by tapping Confirm, by saying
-  "yes" / "አዎ" (or similar) in a voice message, or by typing it —
+- Voice message in → transcribed, then answered in text (see
+  "Voice messages" above). The order summary / Confirm step and the
+  post-acceptance summary are always text.
+- After the user accepts an order — by tapping Confirm, by replying
+  "yes" to a Confirm card, or by typing "yes" / "አዎ" (or similar) —
   the bot places the order and shows the full summary **in text**:
   service, quantity, link, total charge, order ID and status. So a
   voice confirmation always ends with a readable text record of what
   was ordered.
-- Orders work in Amharic and English, by text and by voice.
+- Orders work in Amharic and English, by text.
 
 The owner's voice prompt (`VOICE_STYLE_PROMPT` in `bot.py`, pasted by
 him verbatim) is kept as documentation of the desired delivery —
@@ -206,13 +219,13 @@ python3 test_bot_offline.py
 It checks average-time parsing, fastest-first ranking, blacklisted and
 inactive exclusion, quantity rules, intent-JSON extraction, language
 detection, API request URL/header building, price maths, the
-voice-reply path (Google Cloud TTS payload shape, voice selection by
-language, voice/text fallback) and the reply rules (text in never
-produces voice, voice in produces voice except the Confirm card and
-the post-acceptance text summary, Amharic and English orders) with
-the network mocked, and the webhook wiring (webhook URL/path building
-from `WEBHOOK_URL` / `RENDER_EXTERNAL_URL` / `WEBHOOK_PATH`, port
-handling, the health endpoint, the app's 8 handlers, and the webhook
+voice path (Google Cloud TTS payload shape, voice selection by
+language, transcription shown back, voice/text fallback) and the
+reply rules (text in never produces voice, voice in is transcribed
+and answered in text, Amharic and English orders) with the network
+mocked, and the webhook wiring (webhook URL/path building from
+`WEBHOOK_URL` / `RENDER_EXTERNAL_URL` / `WEBHOOK_PATH`, port
+handling, the health endpoint, the app's 12 handlers, and the webhook
 server lifecycle) with the network mocked. It also covers the durable
 last-link memory (recent orders), repeating-order plans (Confirm
 required, stop/list) and the scheduler loop (due runs once,
@@ -326,7 +339,9 @@ to return no audio for Amharic).
 
 Users type messy, incomplete, unexpected prompts. The bot handles
 them instead of breaking; every reply stays short and in the user's
-language, and nothing is ever placed without an explicit Confirm.
+language, and nothing is ever placed without an explicit Confirm —
+except an explicit urgent "order now" (owner override, 13 Nov 2026,
+see "Round 5").
 
 - **Ambiguous:** "give me the usual" replays the last order as a
   Confirm card (doubled on request, capped at the service max);
@@ -360,12 +375,20 @@ language, and nothing is ever placed without an explicit Confirm.
   balance buy?" reverse-calculates from the real balance, floored to
   a multiple of 10 and capped by the service min/max; discounts are
   refused in one line with the cheapest real option offered instead.
-- **Policy and trust:** ban risk and "real Ethiopian followers" get
-  an honest answer (gradual and widely used, no zero-risk guarantee,
-  global network, not guaranteed real Ethiopian people) plus a slower
-  service when one exists; drops/refunds are never promised — support
-  reviews them; Addis-only targeting is not available; no free likes
-  (smallest order is the service minimum, cheapest service suggested).
+- **Policy and trust:** "can my account get banned or shadow
+  banned?" gets the owner's answer — NO, anybody can buy followers
+  for you, so your account can't be banned for it without your
+  permission (owner, 13 Nov 2026; this replaces the earlier
+  no-zero-risk line for this specific question — the live Terms
+  §12 still says Paxyo is not responsible for account restrictions
+  or bans). "Real Ethiopian followers" gets an honest answer
+  (global network, not guaranteed real Ethiopian people) plus a
+  slower service when one exists; refunds follow the Terms (back
+  to Paxyo balance only, never to a bank or mobile-money account,
+  balance can't be withdrawn as cash); orders can't be cancelled
+  or changed once processing has started; Addis-only targeting is
+  not available; no free likes (smallest order is the service
+  minimum, cheapest service suggested).
 - **Adversarial:** a user-supplied price is never applied — prices
   are fixed by Paxyo, cheapest real option offered; caption/posting
   tips are brief, then back to ordering; website payment/account
@@ -451,3 +474,117 @@ Four gaps found in the live retest, plus one the owner added:
   asked kinds — so a comments request never gets Comment Likes
   (its name also says "likes") and a video-likes request never
   gets a comment-likes service.
+
+## Round 5 (13 Nov 2026 — live-test gaps + owner additions)
+
+- **Fastest fallback uses the stored metric.** "Use the fastest
+  one" in a TikTok views order offered Tiktok Comment Likes,
+  because the failed message had dropped the metric. The fallback
+  now merges the platform + metric of the order being built
+  (`PARTIAL`) before picking, so it shows a views service.
+- **Bare quantities are understood.** "1000 please" / "200 please"
+  after "How many?" are read as the quantity and complete the
+  order, instead of being misread as a service search. A bare
+  number is a quantity only when it is a multiple of 10 (so a
+  service ID like 6139 never counts).
+- **Website answers mention paxyo.et.** "Do you have a website?"
+  now answers from the local facts (`paxyo_find`), which lists
+  paxyo.et alongside the channel and the mini app.
+- **Short service names.** Confirm cards, service lists, budget
+  options and cheapest replies show the core name only
+  ("TikTok Video Views", "Tiktok Comment Likes") — bracketed tags
+  and pipe-separated descriptors are stripped by
+  `short_service_name()`. The full long name is shown only when
+  the user entered a service ID ("service 1665", "#1665") —
+  tracked across turns of the same order (`named_by_id` in
+  `PARTIAL`), not just the current message.
+- **Price questions are answered directly.** "How much are tiktok
+  views?" / "What's the price of 1000 views?" are answered from
+  the catalogue (ETB per 1000, and the total when a quantity is
+  given) without asking for the link first.
+- **Replies / quotes are read in context.** A reply to one of the
+  bot's own messages is routed by what was asked: "1000" replied
+  to "How many?" is the quantity; "yes" replied to a Confirm card
+  confirms it; "first one" replied to budget options picks the
+  first option.
+- **Orders table.** /orders (or "show my orders") shows ALL of the
+  user's orders in a monospace table — ID, short service name,
+  quantity, total in ETB, status with an icon — newest first, up
+  to 20 (the API max). When the API returns nothing but this
+  session placed an order, its status line is shown instead.
+- **No voice-order claims.** No greeting, help, start or menu text
+  claims the bot takes orders by voice (owner: "we don't now").
+  The voice transcription code stays — a voice message sent to
+  the bot is still transcribed and answered.
+- **Voice messages fixed.** The old handler lumped download and
+  transcription into one try block, so a download failure looked
+  like a transcription failure and an exception inside the order
+  flow could go silent. Download and transcription are separate
+  now, the transcription is shown ("You said: ..."), the
+  transcribed text is handled like typed text, and any failure
+  gets one plain line, never silence. Replies are text.
+- **GIFs and stickers always get a reply.** A caption is handled
+  as the user's message; otherwise a short friendly steer back to
+  ordering. Video notes get one plain line.
+- **Humor + general knowledge + off-topic steering.** A light
+  playful line (rotating, never at the user's expense) appears on
+  happy paths such as an order being placed. The first two
+  off-topic messages get a brief general answer plus a small
+  nudge toward ordering; the third (and beyond) steers back to
+  ordering with a short friendly line. An ordering message resets
+  the counter. The secrecy rule is unchanged.
+- **Offensive users.** An insult gets a firm, blunt pushback in
+  one short line (never polite, never apologetic, never a slur
+  back); a second insult refuses to continue; a third goes
+  silent. Any non-offensive message resets the count.
+- **Real delivery-time answers.** "How long would tiktok views
+  take?" now gives the fastest matching service's average time
+  ("usually starts within 5 minutes") plus the order-now nudge —
+  with a pending Confirm card and without one. The vague
+  "shown before you confirm / varies by service" line is gone:
+  when no time is on file the bot says the Confirm card will show
+  it, with the same nudge.
+- **Conversation memory.** The last ~10 exchanges per user are
+  kept in memory and included in the AI prompt, so the bot can
+  refer back ("last time you ordered TikTok views"). They persist
+  to a local `chat_history.json` (best effort) so they survive a
+  bot restart — but Render's free disk is ephemeral on redeploy,
+  so this is not permanent storage. The "the usual" / last-order
+  memory is unchanged.
+- **"Same like as usual."** "Same like as usual please order 1k
+  views" replays the last order's service and link with quantity
+  1000. The "usual" handler now accepts a new quantity in the
+  same message (it wins over the last order's quantity).
+- **Urgent "order now" skips the Confirm card.** An EXPLICIT
+  order-now phrase ("please order now", "place it now", "just
+  place it", "order it now", "do it now") with a fully specified
+  order places it immediately — from the message itself, from the
+  order being built, or from the pending Confirm card — and sends
+  the full order summary in text. A vague "I want views" still
+  goes through the Confirm card. If a detail is missing, the bot
+  asks for it instead of placing. This is an explicit owner
+  override of the old "no order without a Confirm tap" rule
+  (13 Nov 2026, urgent order-now only).
+- **Ban / shadowban answer.** "Can my social media account get
+  banned or shadow banned?" is answered NO, with the owner's
+  reasoning: anybody can buy followers for you, so your account
+  can't be banned for it without your permission. (EN + AM.)
+- **Payment methods.** The how-to-pay answer lists all four:
+  Telebirr, CBE Birr, CBE, and M-Pesa. **Follow-up still owed:**
+  deposit-by-chat only supports Telebirr/CBE today
+  (`normalize_method` + the Chapa flow have no M-Pesa path), so
+  an M-Pesa deposit by chat does NOT work yet — it needs a new
+  payment path. The payment answer lists all four anyway.
+- **Public-account reminder.** Every Confirm card says the
+  account must be public (not private) — a private account can't
+  receive the order. "Does my account need to be public?" is
+  answered the same way.
+- **Terms & Conditions.** The bot answers from Paxyo's actual
+  terms (`paxyo-terms.md`, fetched from paxyo.et/home.php, 15
+  sections, committed with this code): refunds go back to Paxyo
+  balance only (never to a bank/mobile-money account), balance
+  can't be withdrawn as cash, orders can't be cancelled or
+  modified once processing has started, accounts must be public.
+  "Show me the terms" points to paxyo.et. A terms question the
+  file does not cover says so and offers support — nothing is
+  invented.

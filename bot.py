@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Paxyo Order bot (@paxorder_bot).
 
-Users order Paxyo social-media services by text/chat or by voice message,
+Users order Paxyo social-media services by text/chat,
 in Amharic or English. The bot talks to the Paxyo Bot API on paxyo.et and
 uses ChatGPT (OpenAI) to understand what the user wants, falling back to
 Gemini when no OpenAI key is set.
@@ -22,21 +22,19 @@ The code is structured so a status monitor can be added later: see
 All configuration comes from environment variables. No secret is ever
 written to a file or a log by this program.
 
-Voice replies: a voice message in gets a voice message back (text in
-gets text back — never the other way round). The reply voice uses
-Google Cloud Text-to-Speech (am-ET voices speak real Amharic), which
-returns OGG Opus directly — no ffmpeg is needed on Render. The
-owner's voice-style prompt (VOICE_STYLE_PROMPT) is kept as
-documentation of the desired delivery (Cloud TTS takes no style
-prompt; speaking rate 1.0 and pitch 0 approximate it). The Confirm
-card is always text, because a voice message cannot carry inline
-buttons, and so is the post-acceptance order summary: a voice "yes"
-places the order and is answered with a full text summary (service,
-quantity, link, total, order id, status). Any voice failure falls
-back to text silently and never breaks an order. (Gemini TTS was
-tried first and verified 13 Nov 2026 to return no audio at all for
-Amharic, with only 10 requests/day on the free-tier key — see README,
-"Voice replies".)
+Voice input: a voice message is downloaded and transcribed (Groq
+Whisper first, then OpenAI, then Gemini) and handled exactly like the
+same typed message; the transcription is shown to the user ("You
+said: ...") so they can see what the bot heard. The bot answers in
+text and does NOT claim to take orders by voice (owner, 13 Nov 2026)
+— the Cloud TTS voice-reply code stays in the file but no TTS key is
+configured, so every reply is text. The Confirm card is always text,
+because a voice message cannot carry inline buttons, and so is the
+post-acceptance order summary. Any voice failure is answered with
+one plain line and never breaks an order. (Gemini TTS was tried first
+and verified 13 Nov 2026 to return no audio at all for Amharic, with
+only 10 requests/day on the free-tier key — see README, "Voice
+replies".)
 
 Runs as a FREE Render web service, not a paid background worker: Telegram
 sends updates to a webhook instead of the bot polling. On startup the bot
@@ -47,6 +45,7 @@ sleep after ~15 minutes idle and wake in ~30-50s on the first message.
 
 import asyncio
 import base64
+import contextvars
 import io
 import json
 import logging
@@ -367,18 +366,26 @@ PAXYO_KNOWLEDGE = """Facts about Paxyo:
   Customer bot: @paxyo_bot. Mini app: https://miniapp-one-1.onrender.com/
 - Support: support@paxyo.et (email), or this bot.
 - Orders are paid in ETB from your Paxyo balance. Add money by
-  depositing with Telebirr or CBE Birr through Chapa.
+  depositing with Telebirr, CBE Birr, CBE or M-Pesa.
 - First deposit bonus: invite code REF3723FB335 gives 20% bonus on
   your first deposit.
 - Prices are in ETB per 1000 and are shown before the user confirms.
 - The customer pays from their Paxyo balance; they deposit at paxyo.et
-  with Telebirr or CBE Birr through Chapa.
+  with Telebirr, CBE Birr, CBE or M-Pesa.
 - The bot picks the fastest available service for the order automatically
   and shows the estimated total before confirming. If the customer
   names a specific service (by ID or by name), the bot uses that
   service instead of the fastest one.
-- The average delivery time of the picked service is shown before
-  confirming; exact delivery time depends on the service.
+- Delivery times come from the fastest service's average time — for
+  example TikTok views usually start within 1 minute. Never say the
+  time is only shown before confirming: give the real time and nudge
+  the user to order now.
+- Banned or shadowbanned? No — anybody can buy followers for you, so
+  your account can't be banned for it without your permission.
+- Terms: refunds go back to Paxyo balance only, never to a bank
+  account or mobile money; Paxyo balance can't be withdrawn as cash;
+  orders can't be cancelled or changed once processing has started;
+  accounts must be public; full terms at paxyo.et.
 - An order is placed only after the customer taps Confirm.
 - How to order: tell the bot the platform, send the link, say how
   many, then tap Confirm.
@@ -430,15 +437,17 @@ TEXT = {
     "greeting": {
         "am": (
             "ሰላም! እኔ Paxyo Order bot ነኝ።\n"
-            "የሚፈልጉትን service በchat ወይም በvoice ይዘዙልኝ — ለምሳሌ "
+            "የሚፈልጉትን service በchat ይዘዙልኝ — ለምሳሌ "
             "“1000 views እፈልጋለሁ” ብለው link ይላኩልኝ።\n"
-            "Balance ለማየት /balance ይጠቀሙ።"
+            "Balance ለማየት /balance ይጠቀሙ።\n"
+            "እንዘዝ! 😄"
         ),
         "en": (
             "Hello! I am the Paxyo Order bot.\n"
-            "Tell me the service you want by chat or voice — for example "
+            "Tell me the service you want by chat — for example "
             "“I want 1000 views” with your link.\n"
-            "Use /balance to check your balance."
+            "Use /balance to check your balance.\n"
+            "Let's get you ordered! 😄"
         ),
     },
     "help": {
@@ -745,13 +754,13 @@ TEXT = {
     },
     "paxyo_pay": {
         "am": (
-            "በPaxyo balanceዎ ይከፍላሉ — በቴሌብር ወይም በCBE Birr በChapa "
-            "deposit ያድርጉ። የመጀመሪያ depositዎ በREF3723FB335 invite code "
-            "20% bonus ያገኛል።"
+            "በPaxyo balanceዎ ይከፍላሉ — በቴሌብር፣ በCBE Birr፣ በCBE ወይም "
+            "በM-Pesa deposit ያድርጉ። የመጀመሪያ depositዎ በREF3723FB335 "
+            "invite code 20% bonus ያገኛል።"
         ),
         "en": (
             "You pay from your Paxyo balance — add money by depositing "
-            "with Telebirr or CBE Birr through Chapa. Your first "
+            "with Telebirr, CBE Birr, CBE or M-Pesa. Your first "
             "deposit gets a 20% bonus with invite code REF3723FB335."
         ),
     },
@@ -941,8 +950,14 @@ TEXT = {
     # "send the link" line: the link is already given and the Confirm
     # card is still up (13 Nov 2026).
     "confirm_speed": {
-        "am": "{service} በአብዛኛው በ {avg} ውስጥ ይጀምራል።",
-        "en": "{service} usually starts within {avg}.",
+        "am": (
+            "{service} በአብዛኛው በ {avg} ውስጥ ይጀምራል። orderን በፍጥነት "
+            "ብናስገባ በፍጥነት ይጠናቀቃል — አሁን እንዘዝ።"
+        ),
+        "en": (
+            "{service} usually starts within {avg}. The sooner we place "
+            "the order, the sooner it will be completed — let's order now."
+        ),
     },
     "confirm_speed_unknown": {
         "am": "{service} — እስካሁን የመላኪያ ሰዓት የለኝም።",
@@ -1062,6 +1077,148 @@ TEXT = {
     "ask_which_schedule": {
         "am": "የትኛውን repeating order ማቆም ይፈልጋሉ?",
         "en": "Which repeating order do you want to stop?",
+    },
+    # --- round 5 (13 Nov 2026) ---
+    # Voice messages: the transcription is shown to the user, so a
+    # wrong transcript is visible instead of looking like silence.
+    "voice_heard": {
+        "am": "🎙 ያልከው: \"{text}\"",
+        "en": "🎙 You said: \"{text}\"",
+    },
+    "voice_download_failed": {
+        "am": "Voice መልዕክቱን ማውረድ አልቻልኩም — እባክዎ እንደገና ይሞክሩ ወይም በጽሑፍ ይላኩልኝ።",
+        "en": "I couldn't download that voice message — please try again or send it as text.",
+    },
+    "voice_video_note": {
+        "am": "የቪዲዮ መልዕክት ማዳመጥ አልችልም — እባክዎ orderዎን በጽሑፍ ይላኩልኝ።",
+        "en": "I can't listen to video messages — please type your order instead.",
+    },
+    # GIFs and stickers: never silent, never "I did not understand" —
+    # a short playful line steering back to ordering.
+    "sticker_reply": {
+        "am": "😄 ጥሩ ነው! ምን ማዘዝ ይፈልጋሉ?",
+        "en": "😄 Nice one! What would you like to order?",
+    },
+    "gif_reply": {
+        "am": "😄 አዝናኝ ነው! ምን ማዘዝ ይፈልጋሉ?",
+        "en": "😄 Haha, good one! What would you like to order?",
+    },
+    # Delivery times: a REAL time from the catalogue, never the vague
+    # "shown before you confirm" line (owner, 13 Nov 2026).
+    "speed_answer": {
+        "am": (
+            "{service} በአብዛኛው በ {avg} ውስጥ ይጀምራል። orderን በፍጥነት "
+            "ብናስገባ በፍጥነት ይጠናቀቃል — አሁን እንዘዝ።"
+        ),
+        "en": (
+            "{service} usually starts within {avg}. The sooner we place "
+            "the order, the sooner it will be completed — let's order now."
+        ),
+    },
+    "speed_unknown": {
+        "am": (
+            "ለዚህ service እስካሁን የመላኪያ ሰዓት የለኝም — በConfirm card ላይ "
+            "ከማስገባትዎ በፊት ያያሉ። orderን በፍጥነት ብናስገባ በፍጥነት "
+            "ይጠናቀቃል — አሁን እንዘዝ።"
+        ),
+        "en": (
+            "I don't have a delivery time on file for that service yet — "
+            "the Confirm card will show it before you place the order. "
+            "The sooner we place the order, the sooner it will be "
+            "completed — let's order now."
+        ),
+    },
+    # Price questions: answered straight from the catalogue, never
+    # "send the link first" (owner, 13 Nov 2026).
+    "price_per_1000": {
+        "am": "{service}: {rate} ETB ለ 1000 ነው።",
+        "en": "{service}: {rate} ETB per 1000.",
+    },
+    "price_total": {
+        "am": "{service}: {quantity} ዋጋው {total} ETB ነው ({rate} ETB ለ 1000)።",
+        "en": "{service}: {total} ETB for {quantity} ({rate} ETB per 1000).",
+    },
+    "price_ask_service": {
+        "am": "የትኛው service ነው? Platform እና metric ይንገሩኝ — ለምሳሌ “TikTok views” — ዋጋውን እነግርዎታለሁ።",
+        "en": "Which service? Tell me the platform and what you want — for example “TikTok views” — and I'll tell you the price.",
+    },
+    # Public account reminder (owner, 13 Nov 2026): an order can only
+    # land on a public account.
+    "public_reminder": {
+        "am": "⚠️ account public መሆኑን ያረጋግጡ (private አይደለም) — private account order መቀበል አይችልም።",
+        "en": "⚠️ Make sure the account is public (not private) — a private account can't receive the order.",
+    },
+    "public_answer": {
+        "am": "አዎ — accountዎ public መሆን አለበት፣ private አይደለም። Private account order መቀበል አይችልም።",
+        "en": "Yes — your account must be public, not private. A private account can't receive the order.",
+    },
+    # Ban / shadowban (owner, 13 Nov 2026): the answer is NO, with his
+    # reasoning. This replaces the old "no zero-risk guarantee" line
+    # for this specific question.
+    "ban_no": {
+        "am": "አይ — ማንም ሰው ለእርስዎ followers መግዛት ይችላል፣ ስለዚህ ያለእርስዎ ፈቃድ accountዎ ሊታገድ አይችልም።",
+        "en": "No — anybody can buy followers for you, so your account can't be banned for it without your permission.",
+    },
+    # Terms & Conditions (paxyo-terms.md, fetched from paxyo.et
+    # 13 Nov 2026): answers from the actual terms, never invented.
+    "terms_refund": {
+        "am": "order በከፊል ከተጠናቀቀ፣ ከተሰረዘ ወይም ካልተሳካ፣ የቀረው ገንዘብ ወደ Paxyo balanceዎ ይመለሳል — ወደ bank account ወይም mobile money በጭራሽ አይመለስም። Paxyo balance እንደ cash ማውጣት አይቻልም።",
+        "en": "If an order is partially completed, canceled or fails, the remaining amount goes back to your Paxyo balance — never to a bank account or mobile money. Paxyo balance can't be withdrawn as cash.",
+    },
+    "terms_cancel": {
+        "am": "processing ከተጀመረ በኋላ order መሰረዝ ወይም መቀየር አይቻልም።",
+        "en": "Once processing has started, an order can't be canceled or changed.",
+    },
+    "terms_full": {
+        "am": "ሙሉውን Terms & Conditions በpaxyo.et ያገኛሉ — paxyo.et ይክፈቱ እና Terms & Conditions ይምረጡ።",
+        "en": "You can read the full Terms & Conditions at paxyo.et — open paxyo.et and tap Terms & Conditions.",
+    },
+    "terms_not_covered": {
+        "am": "Terms ላይ ስለዚህ ነገር አልተጻፈም — support እንዲረዳዎት ልጠይቅ? ምን መጠየቅ ይፈልጋሉ?",
+        "en": "The terms don't cover that — I can get support to help. What would you like to ask them?",
+    },
+    "terms_privacy": {
+        "am": "Paxyo dataዎን ለሶስተኛ ወገን አይሸጥም፣ አያከራይም ወይም አያጋራም — ደህንነቱ በተጠበቀ ስርዓት ይቀመጣል።",
+        "en": "Paxyo doesn't sell, rent or share your data with third parties — it's kept on secure systems.",
+    },
+    "terms_suspension": {
+        "am": "Terms የሚጥስ account ሊታገድ ወይም ሊዘጋ ይችላል — በዚህ ሁኔታ refund አይሰጥም።",
+        "en": "An account that breaks the terms can be suspended or closed — and no refund is given in that case.",
+    },
+    # Offensive users (owner, 13 Nov 2026): firm and blunt, one short
+    # line — no politeness, no apology, and the bot never swears back.
+    "offensive_pushback": {
+        "am": "ይህ ቋንቋ እዚህ አይሰራም። በትክክል አናግሩኝ እና orderዎን እረዳለሁ።",
+        "en": "That language doesn't work here. Talk to me properly and I'll help you order.",
+    },
+    "offensive_refusal": {
+        "am": "በዚህ ቋንቋ እየተነጋገርክ መቀጠል አልችልም። በትክክል ስትጠይቅ ተመልሰህ ና።",
+        "en": "I'm not continuing this while you talk like that. Come back when you can ask properly.",
+    },
+    # Off-topic steering (owner, 13 Nov 2026): the first two
+    # off-topic turns get a brief general answer plus a nudge; from
+    # the third, the bot steers back to ordering.
+    "off_topic_steer": {
+        "am": "ወደ ordering እንመለስ — ምን ማዘዝ ይፈልጋሉ? Followers, likes, views እና ሌሎች እረዳለሁ።",
+        "en": "Let's get back to ordering — what would you like to order? I can help with followers, likes, views and more.",
+    },
+    "off_topic_nudge": {
+        "am": "\nበነገራችን ላይ — ምን ማዘዝ ይፈልጋሉ?",
+        "en": "\nBy the way — what would you like to order?",
+    },
+    # Conversation memory (owner, 13 Nov 2026): the bot remembers
+    # earlier chats with this user.
+    "history_none": {
+        "am": "ገና ቀደም ያለ chat የለኝም — ይህ የመጀመሪያችን ነው። ምን ማዘዝ ይፈልጋሉ?",
+        "en": "I don't have any earlier chats with you yet — this is our first one. What would you like to order?",
+    },
+    "history_summary": {
+        "am": "ስለተነጋገርንበት: {summary}",
+        "en": "Here's what we've talked about: {summary}",
+    },
+    "orders_history_title": {
+        "am": "Ordersዎ:",
+        "en": "Your orders:",
     },
 }
 
@@ -1391,6 +1548,21 @@ def clean_service_name(name):
         s = re.sub(pattern, "", s, flags=re.IGNORECASE)
     parts = [p.strip() for p in s.split("|")]
     s = " | ".join(p for p in parts if p)
+    s = re.sub(r"\s+", " ", s).strip(" -–—")
+    return s or "service"
+
+
+def short_service_name(name):
+    """The SHORT display name of a service (owner, 13 Nov 2026): the
+    core name only — bracketed tags ("[ Max 100M ]") and pipe-separated
+    descriptors ("| No Drop Since 30 Days | ...") are stripped. The
+    full long name is shown only when the user entered a service ID.
+    Supply-chain words are stripped first, like clean_service_name."""
+    s = clean_service_name(name)
+    if not s:
+        return ""
+    s = re.sub(r"\[[^\]]*\]", "", s)
+    s = s.split("|")[0]
     s = re.sub(r"\s+", " ", s).strip(" -–—")
     return s or "service"
 
@@ -2328,7 +2500,7 @@ def local_intent(text: str) -> dict:
         )
     ):
         intent["intent"] = "orders"
-    elif "the usual" in s or "same as yesterday" in s or "same as last" in s:
+    elif "the usual" in s or "same as yesterday" in s or "same as last" in s or "as usual" in s:
         intent["intent"] = "usual"
     elif "mini app" in s or "miniapp" in s:
         intent["intent"] = "miniapp"
@@ -2392,7 +2564,7 @@ def local_intent(text: str) -> dict:
     return intent
 
 
-async def extract_intent(text: str) -> dict:
+async def extract_intent(text: str, user_id: int = None) -> dict:
     """Ask the AI (Groq when configured, else ChatGPT, else Gemini)
     to classify the message and extract the order intent.
 
@@ -2411,8 +2583,16 @@ async def extract_intent(text: str) -> dict:
     content_help, support_issue, cancel, off_topic, unclear — or
     None when the model output had no usable JSON.
     """
+    prompt = normalize_text(text)
+    if user_id is not None:
+        history = chat_history_lines(user_id)
+        if history:
+            prompt += (
+                "\n\nRecent conversation with this user (most recent last):\n"
+                + "\n".join(history)
+            )
     try:
-        reply = await ai_generate(normalize_text(text), system=SYSTEM_PROMPT)
+        reply = await ai_generate(prompt, system=SYSTEM_PROMPT)
     except Exception as exc:
         # The AI is unreachable (rate limit, outage). Answer from the
         # message itself instead of going silent — see local_intent.
@@ -2516,7 +2696,7 @@ async def extract_intent(text: str) -> dict:
     }
 
 
-async def answer_paxyo_question(text: str, lang: str) -> str:
+async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> str:
     """Answer a question about Paxyo itself (paxyo_info intent).
 
     The AI answers from PAXYO_KNOWLEDGE only, in the user's language,
@@ -2535,10 +2715,20 @@ async def answer_paxyo_question(text: str, lang: str) -> str:
         "Paxyo, answer in one short line steering back to ordering. "
         "Never say where Paxyo's services come from, and never talk "
         "about what Paxyo pays for them. Never quote a price; say "
-        "prices are shown in ETB per 1000 before confirming."
+        "prices are shown in ETB per 1000 before confirming. If the "
+        "question is how long delivery takes, never say the time is "
+        "only shown before confirming."
     )
+    prompt = text
+    if user_id is not None:
+        history = chat_history_lines(user_id)
+        if history:
+            prompt += (
+                "\n\nRecent conversation with this user (most recent last):\n"
+                + "\n".join(history)
+            )
     try:
-        reply = await ai_generate(text, system=system)
+        reply = await ai_generate(prompt, system=system)
     except Exception as exc:
         _log_ai_failure("paxyo_info answer failed", exc)
         return paxyo_facts_answer(text, lang) or t("paxyo_info_fallback", lang)
@@ -2680,10 +2870,12 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
                 await message.reply_voice(
                     voice=InputFile(io.BytesIO(ogg), filename="reply.ogg")
                 )
+                _record_bot_reply(text)
                 return
             except Exception as exc:
                 log.warning("reply_voice failed, falling back to text: %s", exc)
     await message.reply_text(text, reply_markup=reply_markup)
+    _record_bot_reply(text)
 
 
 # ------------------------------------------------------------ bot state ----
@@ -2770,6 +2962,515 @@ def _update_seen(update) -> bool:
         SEEN_UPDATES.clear()
     SEEN_UPDATES.add(update_id)
     return False
+# ------------------------------------------------------- round 5 ------
+# Round-5 helpers (13 Nov 2026): short names, bare quantities,
+# price questions, reply/quote context, order history, voice fixes,
+# GIFs/stickers, humor, off-topic steering, offensive users,
+# conversation memory, order-now, delivery times, terms, ban answers.
+
+# --- conversation memory: last ~10 exchanges per user ---------------
+# Persisted to a local JSON file (best effort) so it survives a bot
+# restart. Render's free disk is ephemeral on redeploy, so this is
+# not permanent storage — see README, "Conversation memory".
+CHAT_HISTORY_FILE = os.environ.get("CHAT_HISTORY_FILE", "chat_history.json")
+MAX_HISTORY_EXCHANGES = 10
+MAX_HISTORY_USERS = 500
+CHAT_HISTORY = {}
+_CHAT_HISTORY_LOADED = False
+_LAST_HISTORY_SAVE = 0.0
+_CURRENT_USER_ID = contextvars.ContextVar("paxyo_current_user", default=None)
+_LAST_USER_TEXT = contextvars.ContextVar("paxyo_last_user_text", default=None)
+
+
+def load_chat_history() -> None:
+    """Load saved conversation memory (best effort)."""
+    global _CHAT_HISTORY_LOADED
+    if _CHAT_HISTORY_LOADED:
+        return
+    _CHAT_HISTORY_LOADED = True
+    try:
+        with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    for key, exchanges in data.items():
+        try:
+            user_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(exchanges, list):
+            CHAT_HISTORY[user_id] = [
+                e for e in exchanges
+                if isinstance(e, dict) and e.get("user") and e.get("bot")
+            ][-MAX_HISTORY_EXCHANGES:]
+
+
+def save_chat_history() -> None:
+    """Persist conversation memory (best effort — never raises).
+    Throttled to one write per 5 seconds: the in-memory copy is
+    always current, so a crash loses at most a few seconds."""
+    global _LAST_HISTORY_SAVE
+    import time
+
+    now = time.monotonic()
+    if now - _LAST_HISTORY_SAVE < 5:
+        return
+    _LAST_HISTORY_SAVE = now
+    try:
+        data = {
+            str(uid): exchanges[-MAX_HISTORY_EXCHANGES:]
+            for uid, exchanges in list(CHAT_HISTORY.items())[-MAX_HISTORY_USERS:]
+        }
+        with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def record_exchange(user_id: int, user_text: str, bot_text: str) -> None:
+    """Remember one user/bot exchange, capped at the last 10."""
+    if not user_id or not (user_text or "").strip() or not (bot_text or "").strip():
+        return
+    load_chat_history()
+    exchanges = CHAT_HISTORY.setdefault(int(user_id), [])
+    exchanges.append({"user": user_text.strip()[:500], "bot": bot_text.strip()[:500]})
+    del exchanges[:-MAX_HISTORY_EXCHANGES]
+    if len(CHAT_HISTORY) > MAX_HISTORY_USERS:
+        CHAT_HISTORY.pop(next(iter(CHAT_HISTORY)))
+    save_chat_history()
+
+
+def chat_history_lines(user_id: int):
+    """'User: ... / Bot: ...' lines for the AI prompt, or []."""
+    load_chat_history()
+    lines = []
+    for e in CHAT_HISTORY.get(int(user_id), []):
+        lines.append(f"User: {e.get('user', '')}")
+        lines.append(f"Bot: {e.get('bot', '')}")
+    return lines
+
+
+def history_summary_text(user_id: int, lang: str):
+    """What this user talked about before, or None when there is
+    nothing to remember."""
+    load_chat_history()
+    user_texts = [
+        e.get("user", "") for e in CHAT_HISTORY.get(int(user_id), [])
+        if e.get("user")
+    ]
+    if not user_texts:
+        return None
+    summary = "; ".join(user_texts[-3:])
+    return t("history_summary", lang, summary=summary)
+
+
+def _record_bot_reply(bot_text: str) -> None:
+    """Record the bot's reply against the user message that caused
+    this turn (set by handle_order_text). Only the first reply of a
+    turn is recorded, so one turn is one exchange."""
+    user_id = _CURRENT_USER_ID.get()
+    if user_id is None:
+        return
+    user_text = _LAST_USER_TEXT.get()
+    if not user_text:
+        return
+    _LAST_USER_TEXT.set(None)
+    record_exchange(user_id, user_text, bot_text)
+
+
+# --- off-topic steering: first two get a general answer + nudge -----
+OFF_TOPIC_COUNT = {}  # telegram_id -> consecutive off-topic turns
+
+
+async def answer_general_question(text: str, lang: str):
+    """A brief general-knowledge answer (1-2 short sentences) from
+    the AI, or None when the AI is down. Never about Paxyo's supplier
+    or costs — the system prompt says so, and the caller steers back
+    to ordering right after."""
+    system = (
+        "Answer briefly (1-2 short sentences) from your own general "
+        "knowledge, in "
+        + ("Amharic (Ethiopic fidels mixed with English)" if lang == "am" else "English")
+        + ". Never mention where Paxyo's services come from, what "
+        "Paxyo pays for them, or any supplier. Never quote a price."
+    )
+    try:
+        reply = await ai_generate(text, system=system)
+    except Exception as exc:
+        _log_ai_failure("general answer failed", exc)
+        return None
+    return (reply or "").strip() or None
+
+
+# --- offensive users: firm and blunt, never polite -------------------
+_OFFENSIVE_RE = re.compile(
+    r"\b(fuck\w*|shit\w*|bitch\w*|bastard\w*|asshole\w*|dickhead\w*|moron\w*|idiot\w*)\b"
+    r"|shut up|stupid bot|dumb bot|hate you|useless bot",
+    re.IGNORECASE,
+)
+OFFENSE_COUNT = {}  # telegram_id -> consecutive offensive messages
+
+
+def is_offensive(text: str) -> bool:
+    """True when the message insults or swears at the bot."""
+    return bool(_OFFENSIVE_RE.search(normalize_text(text or "")))
+
+
+# --- humor: a light line on happy paths ------------------------------
+HUMOR_LINES = {
+    "en": [
+        "🎉 Order in — nice choice!",
+        "Done! Your order is on its way. 🚀",
+        "Nice — that's ordered! 🎉",
+        "All set — enjoy! 🚀",
+    ],
+    "am": [
+        "🎉 Order ገብቷል — ጥሩ ምርጫ!",
+        "ተጠናቋል! Orderዎ በመንገድ ላይ ነው። 🚀",
+        "ጥሩ ነው — ተዘዟል! 🎉",
+        "ሁሉም ተዘጋጅቷል — ይደሰቱ! 🚀",
+    ],
+}
+HUMOR_INDEX = {}
+
+
+def humor_line(user_id: int, lang: str) -> str:
+    """A rotating light line, so the same joke is not repeated
+    every time."""
+    lines = HUMOR_LINES.get(lang) or HUMOR_LINES["en"]
+    idx = HUMOR_INDEX.get(user_id, 0)
+    HUMOR_INDEX[user_id] = idx + 1
+    return lines[idx % len(lines)]
+
+
+# --- bare quantities, order-now, price/ban/public/terms/history ------
+_BARE_QUANTITY_FILLERS = {"please", "pls", "just", "only", "thanks", "thank", "you"}
+
+
+def bare_quantity(text: str):
+    """A message that is essentially just a number ('1000 please',
+    '200') as a quantity, or None. Quantities must be multiples of
+    10, so a bare service ID (6139) never counts."""
+    words = [
+        w.strip(".,!?") for w in normalize_text(text or "").split()
+    ]
+    words = [w for w in words if w not in _BARE_QUANTITY_FILLERS]
+    if len(words) == 1 and re.fullmatch(r"\d[\d,]*", words[0]):
+        try:
+            value = int(words[0].replace(",", ""))
+        except ValueError:
+            return None
+        if 10 <= value <= 1000000 and value % 10 == 0:
+            return value
+    return None
+
+
+_ORDER_NOW_PHRASES = (
+    "order now", "order it now", "place it now", "place the order now",
+    "just place it", "do it now", "order right now",
+    "place it right now", "now please", "right now",
+)
+
+
+def is_order_now(text: str) -> bool:
+    """True when the user explicitly says to order NOW (owner
+    override, 13 Nov 2026): the order is placed at once, no Confirm
+    card. A vague 'I want views' is never order-now."""
+    s = " ".join((text or "").strip().lower().split())
+    return any(p in s for p in _ORDER_NOW_PHRASES)
+
+
+def _empty_intent(intent_type, **fields):
+    out = {
+        "intent": intent_type, "platform": None, "service_hint": None,
+        "service_id": None, "link": None, "quantity": None,
+        "interval_minutes": None, "amount": None, "method": None,
+        "phone": None, "quantity_multiplier": None, "orders": None,
+        "split": None,
+    }
+    out.update(fields)
+    return out
+
+
+def reply_or_bare_intent(text: str, quoted_text, user_id: int):
+    """An intent from a bare-quantity answer or a reply/quote, or
+    None. Runs before the classifier, so '1000 please' after 'How
+    many?' and '1000' replied TO the bot's 'How many?' message both
+    complete the order instead of being misread as a service search.
+    A reply only counts when it answers the bot's quantity question;
+    a plain message only counts while an order is waiting for its
+    quantity. Never fires while a deposit amount or split links are
+    awaited."""
+    if user_id in DEPOSIT_DRAFT and not (PARTIAL.get(user_id) or {}).get("link"):
+        return None
+    if user_id in SPLIT_DRAFT:
+        return None
+    qty = bare_quantity(text)
+    if qty is None:
+        return None
+    stored = PARTIAL.get(user_id) or {}
+    if quoted_text is not None:
+        q = " ".join(str(quoted_text).strip().lower().split())
+        if ("how many" in q or "quantity" in q) and (
+            stored.get("link") or stored.get("platform") or stored.get("service_hint")
+        ):
+            return _empty_intent("order", quantity=qty)
+        return None
+    if stored.get("quantity"):
+        return None
+    if stored.get("link") or stored.get("platform") or stored.get("service_hint"):
+        return _empty_intent("order", quantity=qty)
+    return None
+
+
+def is_price_question(text: str) -> bool:
+    """True when the user asks the price of a service ('how much are
+    tiktok views?', "what's the price of 1000 views?"). A budget
+    ('how much views can 10 br get me') carries a currency amount
+    and is not a price question; neither is a link, a balance or a
+    deposit question."""
+    s = " ".join(normalize_text(text or "").split())
+    if extract_links(text):
+        return False
+    if parse_money_amount(s) is not None:
+        return False
+    if "deposit" in s or "balance" in s:
+        return False
+    if "price" in s or "cost" in s:
+        return True
+    if "how much" in s and (
+        kind_from_text(s) is not None
+        or any(p in s.split() for p in _PLATFORMS)
+    ):
+        return True
+    return False
+
+
+async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
+    """The price, straight from the catalogue: ETB per 1000, and the
+    total when a quantity was asked for. Returns None when no
+    service can be named (the caller then falls through). Never
+    asks for the link first."""
+    platform = (intent.get("platform") or "").strip().lower() or None
+    hint = intent.get("service_hint")
+    quantity = intent.get("quantity")
+    if not platform and not hint:
+        platform, hint = _conversation_context(user_id)
+    if not platform and not hint:
+        words = set(re.findall(r"[a-z]+", normalize_text(text).lower()))
+        platform = next((p for p in _PLATFORMS if p in words), None)
+        metric = kind_from_text(text)
+        hint = " ".join(p for p in (platform, metric) if p) or None
+    if not platform and not hint:
+        return t("price_ask_service", lang)
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("price lookup failed: %s", exc)
+        return None
+    picks = pick_services(services, platform=platform, service_hint=hint, limit=100)
+    if not picks:
+        return None
+    service = picks[0]
+    rate = float(service.get("rate_etb_per_1000", 0) or 0)
+    name = short_service_name(service.get("name"))
+    if quantity is not None:
+        try:
+            qty = int(quantity)
+        except (TypeError, ValueError):
+            qty = None
+        if qty:
+            return t(
+                "price_total", lang, service=name, quantity=f"{qty:,}",
+                rate=format_money(rate),
+                total=format_money(estimated_total_etb(rate, qty)),
+            )
+    return t("price_per_1000", lang, service=name, rate=format_money(rate))
+
+
+def is_ban_question(text: str) -> bool:
+    """True when the user asks about bans / shadowbans."""
+    words = set(re.findall(r"[a-z]+", (text or "").lower()))
+    return bool(
+        words & {"ban", "banned", "banning", "shadowban", "shadowbanned"}
+        or ("shadow" in words and "ban" in words)
+    )
+
+
+def is_public_question(text: str) -> bool:
+    """True when the user asks whether their account must be public."""
+    s = " ".join((text or "").strip().lower().split())
+    return ("public" in s or "private" in s) and (
+        "account" in s or "profile" in s or "need" in s or "must" in s
+        or "have to" in s
+    )
+
+
+def is_history_question(text: str) -> bool:
+    """True when the user asks what they talked about before."""
+    s = " ".join((text or "").strip().lower().split())
+    return any(p in s for p in (
+        "what did i ask", "what did i say", "what did we talk about",
+        "what was my last", "do you remember", "what did i order before",
+        "what did i ask about before", "what did i talk about",
+    ))
+
+
+async def speed_answer_text(user_id: int, text: str, intent: dict, lang: str):
+    """A REAL delivery-time answer for a speed question (owner,
+    13 Nov 2026): the pending Confirm card's service first (round
+    4), else the fastest service for the platform+metric in the
+    message, else the no-time line with the order-now nudge. The
+    vague 'shown before you confirm / varies by service' line is
+    never used."""
+    _cid, pending = pending_for_user(user_id)
+    if pending is not None:
+        answer = pending_confirm_answer(pending.get("service"), "speed", lang)
+        if answer is not None:
+            return answer
+    platform = (intent.get("platform") or "").strip().lower() or None
+    hint = intent.get("service_hint")
+    if not platform and not hint:
+        platform, hint = _conversation_context(user_id)
+    if not platform and not hint:
+        words = set(re.findall(r"[a-z]+", normalize_text(text).lower()))
+        platform = next((p for p in _PLATFORMS if p in words), None)
+        metric = kind_from_text(text)
+        hint = " ".join(p for p in (platform, metric) if p) or None
+    if not platform and not hint:
+        return t("speed_unknown", lang)
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("speed lookup failed: %s", exc)
+        return t("speed_unknown", lang)
+    picks = pick_services(services, platform=platform, service_hint=hint, limit=100)
+    if not picks:
+        return t("speed_unknown", lang)
+    service = picks[0]
+    avg = service.get("average_time")
+    if parse_average_time(avg) is not None:
+        return t(
+            "speed_answer", lang,
+            service=short_service_name(service.get("name")), avg=avg,
+        )
+    return t("speed_unknown", lang)
+
+
+_ORDER_STATUS_ICONS = {
+    "completed": "✅", "pending": "⏳", "in_progress": "⏳",
+    "processing": "⏳", "cancelled": "❌", "canceled": "❌",
+    "refunded": "❌", "failed": "❌",
+}
+
+
+async def orders_history_text(user_id: int, lang: str) -> str:
+    """ALL of the user's orders as a monospace table (owner,
+    13 Nov 2026): one row per order — ID, short service name,
+    quantity, total in ETB, status with an icon. Newest first, up
+    to 20 (the API max)."""
+    try:
+        orders = await paxyo.recent_orders(user_id, limit=20)
+    except Exception as exc:
+        log.warning("orders history failed: %s", exc)
+        return t("not_understood", lang)
+    if not orders:
+        # The API has nothing, but this session placed an order
+        # (tracked in memory): show its status line.
+        return await last_order_status_text(user_id, lang)
+    lines = [t("orders_history_title", lang), "```"]
+    lines.append(f"{'ID':<7}{'Service':<21}{'Qty':>6}  {'Total':>8}  Status")
+    for o in orders:
+        status = str(o.get("status") or "?").strip().lower()
+        icon = _ORDER_STATUS_ICONS.get(status, "ℹ️")
+        name = short_service_name(o.get("service_name") or "") or f"service {o.get('service_id')}"
+        lines.append(
+            f"{str(o.get('id') or o.get('order_id') or '?'):<7}"
+            f"{name[:20]:<21}"
+            f"{int(o.get('quantity') or 0):>6}  "
+            f"{format_money(o.get('charge', 0) or 0):>8}  "
+            f"{icon} {status}"
+        )
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def terms_answer(text: str, lang: str):
+    """An answer from Paxyo's Terms & Conditions (paxyo-terms.md),
+    or None when the message is not a terms question. Never invents
+    a term: an uncovered terms question says so and offers support."""
+    s = " ".join((text or "").strip().lower().split())
+    about_terms = "term" in s or "condition" in s
+    if any(p in s for p in ("show me the terms", "full terms", "read the terms", "terms and conditions", "terms & conditions")):
+        return t("terms_full", lang)
+    if "refund" in s or "money back" in s or "get my money back" in s:
+        return t("terms_refund", lang)
+    if "cancel" in s and any(p in s for p in ("after", "start", "processing", "placed", "begun")):
+        return t("terms_cancel", lang)
+    if any(p in s for p in ("privacy", "my data", "personal data", "sell my data")):
+        return t("terms_privacy", lang)
+    if any(p in s for p in ("suspend", "suspended", "terminat")):
+        return t("terms_suspension", lang)
+    if "public" in s and "account" in s:
+        return t("public_answer", lang)
+    if about_terms:
+        return t("terms_not_covered", lang)
+    return None
+
+
+async def place_order_now(message, user_id: int, merged: dict, lang: str,
+                          named_service_id=None, last_service_id=None,
+                          note: str = None, show_full_name: bool = False) -> bool:
+    """Place a fully-specified order at once, no Confirm card
+    (owner override, 13 Nov 2026 — explicit 'order now' only).
+    Returns True when the user got an answer (placed, or a plain
+    failure line); False when nothing could be placed yet, so the
+    caller falls through to the normal Confirm card. An ambiguous
+    metric is never guessed: False, and the normal flow asks."""
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("order-now services failed: %s", exc)
+        return False
+    service = None
+    if named_service_id is not None:
+        service, svc_error = resolve_named_service(services, named_service_id)
+        if svc_error is not None:
+            return False
+    if service is None:
+        picks = pick_services(
+            services, platform=merged.get("platform"),
+            service_hint=merged.get("service_hint"),
+        )
+        if not picks:
+            return False
+        if not merged.get("service_hint"):
+            metrics = []
+            for pick in picks:
+                hay = (str(pick.get("name") or "") + " " + str(pick.get("category") or "")).lower()
+                found = next((m for m in _METRICS if m in hay), None)
+                if found and found not in metrics:
+                    metrics.append(found)
+            if len(metrics) > 1:
+                return False
+        service = picks[0]
+    error = validate_quantity(merged.get("quantity"), service)
+    if error:
+        return False
+    quantity = int(merged["quantity"])
+    total = estimated_total_etb(float(service.get("rate_etb_per_1000", 0)), quantity)
+    pending = {
+        "user_id": user_id, "service": service, "link": merged["link"],
+        "quantity": quantity, "total": total,
+        "full_name": show_full_name,
+    }
+    PARTIAL.pop(user_id, None)
+    await send_order_result(message, lang, pending, user_id)
+    return True
+
+
 # A single deposit over this is refused in one line.
 MAX_DEPOSIT_ETB = 100000
 
@@ -2797,21 +3498,32 @@ async def resolve_last_order(user_id: int):
 # that read the in-memory order state.
 
 def confirm_card_text(lang: str, service, quantity, total, link,
-                      note: str = None) -> str:
+                      note: str = None, full_name: bool = False) -> str:
     """The Confirm card for one order: service, quantity, link and
     total, always in that order, with an optional one-line note on
-    top (a quantity change, a doubled usual, a link warning)."""
+    top (a quantity change, a doubled usual, a link warning). The
+    service name is SHORT by default (owner, 13 Nov 2026); the full
+    long name is shown only when the user entered a service ID
+    (full_name=True). A public-account reminder is always on the
+    card: a private account can't receive the order."""
+    name = (
+        clean_service_name(service.get("name"))
+        if full_name
+        else short_service_name(service.get("name"))
+    )
     lines = [t("confirm_title", lang), ""]
     if note:
         lines.append(note)
         lines.append("")
     lines.extend([
-        f"{clean_service_name(service.get('name'))} (#{service.get('service')})",
+        f"{name} (#{service.get('service')})",
         f"⏱ {service.get('average_time') or '—'}",
         f"💰 {format_money(service.get('rate_etb_per_1000', 0))} ETB / 1000",
         f"🔢 {quantity}",
         f"🧾 {format_money(total)} ETB (estimated)",
         f"🔗 {link}",
+        "",
+        t("public_reminder", lang),
     ])
     return "\n".join(lines)
 
@@ -2827,7 +3539,7 @@ def pending_note(user_id: int, lang: str) -> str:
     if pending is not None:
         return t(
             "pending_reminder", lang,
-            service=clean_service_name(pending["service"].get("name")),
+            service=short_service_name(pending["service"].get("name")),
             quantity=pending["quantity"],
         )
     partial = PARTIAL.get(user_id) or {}
@@ -3075,7 +3787,7 @@ def pending_confirm_answer(service, question: str, lang: str):
     link.)"""
     if not service:
         return None
-    name = clean_service_name(service.get("name"))
+    name = short_service_name(service.get("name"))
     if question == "speed":
         avg = service.get("average_time")
         if parse_average_time(avg) is not None:
@@ -3117,7 +3829,7 @@ def stop_schedule_keyboard(schedules):
     buttons = []
     for sched in schedules:
         label = (
-            f"🛑 {clean_service_name(sched.get('service_name')) or sched.get('service_id')} "
+            f"🛑 {short_service_name(sched.get('service_name')) or sched.get('service_id')} "
             f"every {format_interval(sched.get('interval_minutes'))}"
         )
         buttons.append(
@@ -3167,6 +3879,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as exc:  # account creation must never block /start
         log.warning("create_user failed (continuing): %s", exc)
     await update.message.reply_text(t("greeting", lang))
+    record_exchange(user.id, update.message.text or "/start", t("greeting", lang))
 
 
 async def balance_text(user_id: int, lang: str) -> str:
@@ -3217,7 +3930,7 @@ async def schedules_text(user_id: int, lang: str) -> str:
         return t("no_schedules", lang)
     lines = []
     for i, sched in enumerate(schedules, 1):
-        name = clean_service_name(sched.get("service_name")) or f"service {sched.get('service_id')}"
+        name = short_service_name(sched.get("service_name")) or f"service {sched.get('service_id')}"
         lines.append(
             f"{i}. {name} ×{sched.get('quantity')} "
             f"every {format_interval(sched.get('interval_minutes'))}"
@@ -3228,27 +3941,34 @@ async def schedules_text(user_id: int, lang: str) -> str:
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     lang = lang_of("", user.language_code)
-    await update.message.reply_text(await balance_text(user.id, lang))
+    text = await balance_text(user.id, lang)
+    await update.message.reply_text(text)
+    record_exchange(user.id, update.message.text or "/balance", text)
 
 
 async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Status of the user's last order (tracked in memory)."""
+    """ALL of the user's orders as a table (owner, 13 Nov 2026)."""
     user = update.effective_user
     lang = lang_of("", user.language_code)
-    await update.message.reply_text(await last_order_status_text(user.id, lang))
+    text = await orders_history_text(user.id, lang)
+    await update.message.reply_text(text)
+    record_exchange(user.id, update.message.text or "/orders", text)
 
 
 async def schedules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List the user's active repeating orders."""
     user = update.effective_user
     lang = lang_of("", user.language_code)
-    await update.message.reply_text(await schedules_text(user.id, lang))
+    text = await schedules_text(user.id, lang)
+    await update.message.reply_text(text)
+    record_exchange(user.id, update.message.text or "/schedules", text)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     lang = lang_of("", user.language_code)
-    await update.message.reply_text(t("help", lang))
+    text = t("help", lang)
+    await update.message.reply_text(text)
+    record_exchange(user.id, update.message.text or "/help", text)
 
 
 # ------------------------------------------------------- order accept ---
@@ -3317,7 +4037,11 @@ async def place_pending_order(pending, user_id: int):
     return {
         "order_id": order_id,
         "status": status,
-        "service": clean_service_name(service.get("name")),
+        "service": (
+            clean_service_name(service.get("name"))
+            if pending.get("full_name")
+            else short_service_name(service.get("name"))
+        ),
         "quantity": quantity,
         "link": pending["link"],
         "total": total,
@@ -3343,18 +4067,18 @@ async def send_order_result(message, lang: str, pending, user_id: int):
         else:
             await message.reply_text(t(key, lang))
         return
-    await message.reply_text(
-        t(
-            "order_summary",
-            lang,
-            service=result["service"],
-            quantity=result["quantity"],
-            link=result["link"],
-            total=format_money(result["total"]),
-            order_id=result["order_id"],
-            status=result["status"],
-        )
+    summary = t(
+        "order_summary",
+        lang,
+        service=result["service"],
+        quantity=result["quantity"],
+        link=result["link"],
+        total=format_money(result["total"]),
+        order_id=result["order_id"],
+        status=result["status"],
     )
+    await message.reply_text(summary + "\n" + humor_line(user_id, lang))
+    _record_bot_reply(summary)
 
 
 def pending_recurring_for_user(user_id: int):
@@ -3588,7 +4312,7 @@ async def stop_one_schedule(update, sched, lang, voice=False):
         log.warning("cancel_recurring failed: %s", exc)
         await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
         return
-    name = clean_service_name(sched.get("service_name")) or f"service {sched.get('service_id')}"
+    name = short_service_name(sched.get("service_name")) or f"service {sched.get('service_id')}"
     await reply_message(
         update.message, t("schedule_stopped", lang, service=name), lang, voice=voice
     )
@@ -3740,7 +4464,7 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
     lines = [
         t("confirm_title", lang),
         "",
-        f"{clean_service_name(service.get('name'))}",
+        f"{short_service_name(service.get('name'))}",
         f"🔢 {quantity}",
         f"🔁 every {format_interval(merged['interval_minutes'])}",
         f"🧾 {format_money(total)} ETB per order",
@@ -3832,7 +4556,8 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
 
 async def complete_order(message, user_id, merged, lang, voice=False,
                          named_service_id=None, last_service_id=None,
-                         note: str = None, ask_metric: bool = True):
+                         note: str = None, ask_metric: bool = True,
+                         show_full_name: bool = False):
     """Fetch services, pick/validate the service, show the Confirm card.
 
     The order being built stays in PARTIAL until the card is shown,
@@ -3956,12 +4681,13 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         "link": merged["link"],
         "quantity": quantity,
         "total": total,
+        "full_name": show_full_name,
     }
     # Confirm card: always text — a voice message cannot carry buttons.
     await reply_message(
         message,
         confirm_card_text(lang, service, quantity, total, merged["link"],
-                          note=note),
+                          note=note, full_name=show_full_name),
         lang,
         reply_markup=confirm_keyboard(confirm_id),
     )
@@ -3994,12 +4720,22 @@ async def handle_usual(update, text, intent, lang, voice=False):
     if quantity is None:
         await reply_message(update.message, t("no_usual", lang), lang, voice=voice)
         return
-    multiplier = intent.get("quantity_multiplier")
+    explicit = intent.get("quantity")
     try:
-        multiplier = float(multiplier) if multiplier is not None else 1
+        explicit = int(explicit) if explicit is not None else None
     except (TypeError, ValueError):
-        multiplier = 1
-    wanted = int(quantity * multiplier)
+        explicit = None
+    if explicit is not None:
+        # "same like as usual please order 1k views": the new
+        # quantity in the same message wins over the last order's.
+        wanted = explicit
+    else:
+        multiplier = intent.get("quantity_multiplier")
+        try:
+            multiplier = float(multiplier) if multiplier is not None else 1
+        except (TypeError, ValueError):
+            multiplier = 1
+        wanted = int(quantity * multiplier)
     service_id = last.get("service_id")
     service_name = str(last.get("service_name") or "")
     platform = None
@@ -4134,7 +4870,7 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
                 or "service"
             )
             shown.append(
-                f"{clean_service_name(s.get('name'))} — "
+                f"{short_service_name(s.get('name'))} — "
                 f"about {qty:,} {metric_word} "
                 f"({format_money(s.get('rate_etb_per_1000', 0))} ETB per 1000)"
             )
@@ -4146,7 +4882,7 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
                     "budget_too_small", lang, budget=format_money(budget),
                     minimum=int(cheapest.get("min", 0) or 0),
                     metric=metric,
-                    name=clean_service_name(cheapest.get("name")),
+                    name=short_service_name(cheapest.get("name")),
                     total=format_money(estimated_total_etb(
                         float(cheapest.get("rate_etb_per_1000", 0) or 0),
                         int(cheapest.get("min", 0) or 0),
@@ -4174,7 +4910,7 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
     )
     if cheapest_total <= budget:
         option_text = "; ".join(
-            f"{clean_service_name(s.get('name'))} — "
+            f"{short_service_name(s.get('name'))} — "
             f"{format_money(estimated_total_etb(float(s.get('rate_etb_per_1000', 0)), quantity))} ETB"
             for s in options
         )
@@ -4204,7 +4940,7 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
             t(
                 "budget_max", lang, budget=format_money(budget),
                 quantity=quantity, metric=metric, max_quantity=max_qty,
-                name=clean_service_name(cheapest.get("name")),
+                name=short_service_name(cheapest.get("name")),
                 total=format_money(
                     estimated_total_etb(rate, max_qty)
                 ),
@@ -4217,7 +4953,7 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
         t(
             "budget_too_small", lang, budget=format_money(budget),
             minimum=min_qty, metric=metric,
-            name=clean_service_name(cheapest.get("name")),
+            name=short_service_name(cheapest.get("name")),
             total=format_money(estimated_total_etb(rate, min_qty)),
         ),
         lang, voice=voice,
@@ -4288,7 +5024,7 @@ async def show_batch_confirm(message, user_id, ready, lang, voice=False):
     lines = [t("batch_title", lang, n=len(ready)), ""]
     for i, o in enumerate(ready, 1):
         lines.append(
-            f"{i}. {clean_service_name(o['service'].get('name'))} "
+            f"{i}. {short_service_name(o['service'].get('name'))} "
             f"×{o['quantity']} → {o['link']} — "
             f"{format_money(o['total'])} ETB"
         )
@@ -4346,7 +5082,7 @@ def batch_result_text(results, lang: str) -> str:
     id, or ❌ when that one could not be placed."""
     lines = []
     for draft, order_id, error in results:
-        name = clean_service_name(draft["service"].get("name"))
+        name = short_service_name(draft["service"].get("name"))
         if error is None:
             lines.append(f"✅ {draft['quantity']} {name} → Order {order_id}")
         else:
@@ -4420,7 +5156,7 @@ async def handle_split_text(update, text, split, lang, voice=False):
         return
     if missing:
         understood = "\n".join(
-            f"{clean_service_name(o['service'].get('name'))} ×{o['quantity']} → {o['link']}"
+            f"{short_service_name(o['service'].get('name'))} ×{o['quantity']} → {o['link']}"
             for o in ready
         ) or "—"
         await reply_message(
@@ -4454,7 +5190,7 @@ async def handle_batch_text(update, text, intent, lang, voice=False):
         return
     if missing:
         understood = "\n".join(
-            f"{clean_service_name(o['service'].get('name'))} ×{o['quantity']} → {o['link']}"
+            f"{short_service_name(o['service'].get('name'))} ×{o['quantity']} → {o['link']}"
             for o in ready
         ) or "—"
         await reply_message(
@@ -4548,6 +5284,7 @@ async def handle_change_order(update, text, intent, lang, voice=False):
             confirm_card_text(
                 lang, service, new_qty, pending["total"], pending["link"],
                 note=t("change_note", lang, quantity=new_qty),
+                full_name=pending.get("full_name", False),
             ),
             lang,
             reply_markup=confirm_keyboard(confirm_id),
@@ -4670,7 +5407,7 @@ async def handle_order_wait(update, text, lang, voice=False):
             update.message,
             t(
                 "order_wait", lang, order_id=order_id, status=status,
-                service=clean_service_name(service_name)
+                service=short_service_name(service_name)
                 or f"service {service_id}",
                 avg=avg,
             ),
@@ -4740,7 +5477,7 @@ async def handle_max_for_balance(update, text, intent, lang, voice=False):
             lang, voice=voice,
         )
         return
-    metric = hint or clean_service_name(service.get("name"))
+    metric = hint or short_service_name(service.get("name"))
     link = intent.get("link")
     note = t(
         "max_for_balance_offer", lang, balance=format_money(balance),
@@ -4791,7 +5528,7 @@ async def handle_cheapest_reply(update, intent, lang, voice, key):
     if service is None:
         await reply_message(update.message, t("no_service", lang), lang, voice=voice)
         return
-    metric = hint or clean_service_name(service.get("name"))
+    metric = hint or short_service_name(service.get("name"))
     if quantity is None:
         quantity = int(service.get("min", 0) or 0)
     service_max = int(service.get("max", 0) or 0)
@@ -4808,7 +5545,7 @@ async def handle_cheapest_reply(update, intent, lang, voice, key):
             user.id, lang,
             t(
                 key, lang, metric=metric,
-                service=clean_service_name(service.get("name")),
+                service=short_service_name(service.get("name")),
                 price=price,
             ),
         ),
@@ -4817,7 +5554,8 @@ async def handle_cheapest_reply(update, intent, lang, voice, key):
 
 
 async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                            text: str, voice: bool = False, intent: dict = None):
+                            text: str, voice: bool = False, intent: dict = None,
+                            quoted_text: str = None):
     """Shared flow for text messages and transcribed voice messages.
 
     Reply rules (owner, 13 Nov 2026):
@@ -4859,7 +5597,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       Paxyo API, so it survives restarts), and a repeating-order plan
       ("every 3 hours") is built the same way, then shown as a plan
       summary with Confirm — nothing repeats until confirmed.
-    - Orders work in Amharic and English, by text and by voice.
+    - Orders work in Amharic and English, by text. (Voice messages
+      are still transcribed when sent, but the bot does not claim to
+      take orders by voice — owner, 13 Nov 2026.)
+    - A user replying TO one of the bot's messages (a quote) is read
+      in that context: "1000" replied to "How many?" is the quantity;
+      "yes" replied to a Confirm card confirms it. See
+      reply_or_bare_intent, checked before the classifier.
     """
     user = update.effective_user
     # Tolerate typos and slang before anything else: the classifier,
@@ -4867,6 +5611,43 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # cleaned text. URLs are kept verbatim (case-sensitive links).
     text = normalize_text(text)
     lang = lang_of(text, user.language_code)
+    # Conversation memory: remember who is speaking and what they
+    # said, so the bot's first reply of this turn is recorded.
+    _CURRENT_USER_ID.set(user.id)
+    _LAST_USER_TEXT.set(text)
+
+    # Offensive users (owner, 13 Nov 2026): push back firmly and
+    # bluntly — never polite, never apologetic. A second insult in
+    # the same exchange refuses to continue; a third goes silent.
+    # The bot itself never uses slurs back. Any non-offensive
+    # message resets the count.
+    if is_offensive(text):
+        count = OFFENSE_COUNT.get(user.id, 0) + 1
+        OFFENSE_COUNT[user.id] = count
+        if count >= 3:
+            return
+        if count >= 2:
+            await reply_message(update.message, t("offensive_refusal", lang), lang, voice=voice)
+            return
+        await reply_message(update.message, t("offensive_pushback", lang), lang, voice=voice)
+        return
+    OFFENSE_COUNT.pop(user.id, None)
+
+    # "please order now" with a Confirm card pending (owner override,
+    # 13 Nov 2026): place the pending order at once, no second card.
+    if is_order_now(text):
+        _cid, _pending = pending_for_user(user.id)
+        if _pending is not None:
+            PENDING.pop(_cid, None)
+            await send_order_result(update.message, lang, _pending, user.id)
+            return
+
+    # Bare-quantity answers and replies to the bot's questions are
+    # read before the classifier, so "1000 please" after "How many?"
+    # (or "1000" replied TO that message) completes the order
+    # instead of being misread as a service search.
+    if intent is None:
+        intent = reply_or_bare_intent(text, quoted_text, user.id)
 
     # Bare acceptance of a pending order: place it and answer with the
     # full order summary IN TEXT. Checked before intent extraction, so
@@ -4892,7 +5673,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     "plan_started",
                     lang,
                     quantity=rec_draft["quantity"],
-                    service=clean_service_name(rec_draft["service"].get("name")),
+                    service=short_service_name(rec_draft["service"].get("name")),
                     interval=format_interval(rec_draft["interval_minutes"]),
                 )
             )
@@ -4977,8 +5758,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # classification of the bare link would be wasted and could
     # misread it). Otherwise the text is classified here.
     if intent is None:
-        intent = await extract_intent(text)
+        intent = await extract_intent(text, user_id=user.id)
     intent_type = (intent.get("intent") or "unclear").strip().lower()
+    # Off-topic steering counts consecutive off-topic turns; any
+    # Paxyo topic resets it.
+    if intent_type not in ("off_topic", "unclear"):
+        OFF_TOPIC_COUNT.pop(user.id, None)
 
     # A question about an order awaiting Confirm ("how fast would
     # those 1000 views actually arrive?") is answered from the
@@ -5004,6 +5789,36 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     )
                     return
 
+    # --- round 5: direct answers that must not fall through to the
+    # --- order flow or the generic AI line ---
+    if intent_type in ("paxyo_info", "unclear", "order", "budget") and is_price_question(text):
+        price = await price_answer_text(user.id, text, intent, lang)
+        if price is not None:
+            await reply_message(update.message, price, lang, voice=voice)
+            return
+    if is_ban_question(text):
+        await reply_message(update.message, with_pending_note(user.id, lang, t("ban_no", lang)), lang, voice=voice)
+        return
+    if is_public_question(text):
+        await reply_message(update.message, with_pending_note(user.id, lang, t("public_answer", lang)), lang, voice=voice)
+        return
+    _terms = terms_answer(text, lang)
+    if _terms is not None:
+        await reply_message(update.message, with_pending_note(user.id, lang, _terms), lang, voice=voice)
+        return
+    if is_history_question(text):
+        summary = history_summary_text(user.id, lang)
+        await reply_message(
+            update.message,
+            summary if summary is not None else t("history_none", lang),
+            lang, voice=voice,
+        )
+        return
+    if intent_type in ("paxyo_info", "unclear") and pending_order_question(text) == "speed":
+        answer = await speed_answer_text(user.id, text, intent, lang)
+        if answer is not None:
+            await reply_message(update.message, answer, lang, voice=voice)
+            return
     # "First one" / "second one" after a budget list: the user picked
     # one of the options just shown. Resolve it to that service and
     # ask for the link — the order continues from the picked service
@@ -5066,7 +5881,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 ]]
                 for sched in schedules:
                     label = (
-                        f"🛑 {clean_service_name(sched.get('service_name')) or sched.get('service_id')} "
+                        f"🛑 {short_service_name(sched.get('service_name')) or sched.get('service_id')} "
                         f"every {format_interval(sched.get('interval_minutes'))}"
                     )
                     buttons.append([InlineKeyboardButton(
@@ -5121,13 +5936,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if intent_type == "orders":
         # "Why hasn't it started yet?" gets the real status plus the
-        # service's average time; a plain status question gets the
-        # plain status line.
+        # service's average time; a plain history question gets the
+        # full table (owner, 13 Nov 2026).
         if is_wait_question(text):
             await handle_order_wait(update, text, lang, voice=voice)
             return
         await reply_message(
-            update.message, await last_order_status_text(user.id, lang),
+            update.message, await orders_history_text(user.id, lang),
             lang, voice=voice,
         )
         return
@@ -5206,7 +6021,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 if slow is not None and slow.get("average_time"):
                     safety_text += "\n" + t(
                         "safety_slow", lang,
-                        service=clean_service_name(slow.get("name")),
+                        service=short_service_name(slow.get("name")),
                         avg=slow.get("average_time"),
                     )
             except Exception as exc:
@@ -5276,14 +6091,29 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if intent_type == "paxyo_info":
         await reply_message(
-            update.message, await answer_paxyo_question(text, lang),
+            update.message, await answer_paxyo_question(text, lang, user_id=user.id),
             lang, voice=voice,
         )
         return
     if intent_type == "off_topic":
-        # One short polite line steering back to ordering — never
-        # preachy, never long, never a lecture about the topic itself.
-        await reply_message(update.message, t("off_topic", lang), lang, voice=voice)
+        # Off-topic steering (owner, 13 Nov 2026): the first two
+        # off-topic turns get a brief general answer plus a small
+        # nudge toward ordering; the third (and beyond) steers back
+        # to ordering with a short friendly line. General chat never
+        # runs forever.
+        count = OFF_TOPIC_COUNT.get(user.id, 0) + 1
+        OFF_TOPIC_COUNT[user.id] = count
+        if count >= 3:
+            await reply_message(update.message, t("off_topic_steer", lang), lang, voice=voice)
+            return
+        general = await answer_general_question(text, lang)
+        if general is None:
+            await reply_message(update.message, t("off_topic", lang), lang, voice=voice)
+            return
+        await reply_message(
+            update.message, general + "\n" + t("off_topic_nudge", lang),
+            lang, voice=voice,
+        )
         return
 
     # Mid-deposit follow-up: the user is answering the bot's deposit
@@ -5332,7 +6162,8 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if new_platform and stored_platform and new_platform != stored_platform:
         stored = {}
     merged = {}
-    for key in ("platform", "service_hint", "link", "quantity", "service_id"):
+    for key in ("platform", "service_hint", "link", "quantity", "service_id",
+                "named_by_id"):
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
 
@@ -5406,6 +6237,18 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 if last_service_id is not None:
                     named_service_id = last_service_id
                     merged["service_id"] = named_service_id
+
+    # The full long service name is shown only when the user entered
+    # a service ID (owner, 13 Nov 2026) — in this message, or in an
+    # earlier turn of this order (remembered in PARTIAL). A service
+    # from "same service as last time" is not an entered ID.
+    named_by_id = bool(
+        extract_service_id(text) is not None
+        or intent.get("service_id") is not None
+        or merged.get("named_by_id")
+    )
+    if named_by_id:
+        merged["named_by_id"] = True
 
     # A link for the wrong platform ("YouTube subscribers" to a
     # TikTok URL): point it out and wait for the correction — never
@@ -5487,6 +6330,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     lang, service, new_qty, _pending["total"],
                     _pending["link"],
                     note=t("change_note", lang, quantity=new_qty),
+                    full_name=_pending.get("full_name", False),
                 ),
                 lang,
                 reply_markup=confirm_keyboard(_cid),
@@ -5496,6 +6340,9 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Nothing to work with at all: not understood. (A bare number or a
     # bare link with no context still counts as something: it is stored
     # and the bot asks for the next missing piece below.)
+    if is_order_now(text) and intent_type != "order" and not merged.get("platform") and not merged.get("service_hint") and not merged.get("link"):
+        await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
+        return
     if (
         intent_type != "order"
         and not merged.get("platform")
@@ -5540,7 +6387,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             ) if services else []
             if picks:
                 service = picks[0]
-                name = clean_service_name(service.get("name"))
+                name = short_service_name(service.get("name"))
                 if question == "speed":
                     avg = service.get("average_time")
                     if parse_average_time(avg) is not None:
@@ -5578,11 +6425,30 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         notes.append(t("check_handle", lang, handle=str(merged["link"]).strip()))
     if link_needs_warning(text, merged.get("link")):
         notes.append(t("link_warning", lang))
+    # The full long service name is shown only when the user
+    # entered a service ID (owner, 13 Nov 2026) — tracked above,
+    # across turns of this order.
+    show_full_name = bool(merged.get("named_by_id"))
+    # Explicit "order now" (owner override, 13 Nov 2026): a fully
+    # specified order is placed at once, no Confirm card. If it
+    # cannot be placed (ambiguous metric, missing detail), fall
+    # through to the normal Confirm card below.
+    if is_order_now(text) and merged.get("link") and merged.get("quantity"):
+        placed = await place_order_now(
+            update.message, user.id, merged, lang,
+            named_service_id=named_service_id,
+            last_service_id=last_service_id,
+            note="\n".join(notes) if notes else None,
+            show_full_name=show_full_name,
+        )
+        if placed:
+            return
     await complete_order(
         update.message, user.id, merged, lang, voice=voice,
         named_service_id=named_service_id,
         last_service_id=last_service_id,
         note="\n".join(notes) if notes else None,
+        show_full_name=show_full_name,
     )
 
 
@@ -5591,10 +6457,32 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # message with a voice message (handle_order_text gets voice=False).
     if _update_seen(update):
         return
-    await handle_order_text(update, context, update.message.text or "")
+    # A reply/quote (owner, 13 Nov 2026): when the user replies to
+    # one of the bot's own messages, the quoted text is passed on so
+    # the reply is read in that context ("1000" to "How many?" is
+    # the quantity). Replies to anyone else's message are ignored.
+    quoted = getattr(update.message, "reply_to_message", None)
+    quoted_text = None
+    if quoted is not None:
+        sender = getattr(quoted, "from_user", None)
+        if sender is None or getattr(sender, "is_bot", False):
+            quoted_text = getattr(quoted, "text", None) or None
+    await handle_order_text(
+        update, context, update.message.text or "", quoted_text=quoted_text
+    )
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A voice message (owner, 13 Nov 2026): download it, transcribe
+    it with Groq Whisper, SHOW the transcription ("You said: ...")
+    so the user can see what the bot heard, then handle the
+    transcribed text exactly like the same typed message. The old
+    handler lumped download and transcription into one try block,
+    so a download failure looked like a transcription failure and
+    an exception inside handle_order_text could go silent — both
+    are separate now, and the flow is wrapped so it can never go
+    silent. Replies are text: the bot does not claim to take orders
+    by voice (owner, 13 Nov 2026), so voice=False."""
     if _update_seen(update):
         return
     user = update.effective_user
@@ -5602,15 +6490,64 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         voice_file = await update.message.voice.get_file()
         audio = bytes(await voice_file.download_as_bytearray())
+    except Exception as exc:
+        _log_ai_failure("voice download failed", exc)
+        await update.message.reply_text(t("voice_download_failed", lang))
+        return
+    try:
         text = await ai_transcribe(audio)
     except Exception as exc:
-        _log_ai_failure("voice handling failed", exc)
+        _log_ai_failure("voice transcription failed", exc)
         await update.message.reply_text(t("transcribe_failed", lang))
         return
     if not text:
         await update.message.reply_text(t("transcribe_failed", lang))
         return
-    await handle_order_text(update, context, text, voice=True)
+    await update.message.reply_text(
+        t("voice_heard", lang, text=text.strip())
+    )
+    try:
+        await handle_order_text(update, context, text, voice=False)
+    except Exception as exc:
+        log.exception("voice order flow failed: %s", exc)
+        await update.message.reply_text(t("not_understood", lang))
+
+
+async def on_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A video note (round face message) carries no transcription:
+    one plain line, never silence."""
+    if _update_seen(update):
+        return
+    lang = lang_of("", update.effective_user.language_code)
+    await update.message.reply_text(t("voice_video_note", lang))
+
+
+async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A GIF (owner, 13 Nov 2026): never silent, never
+    'I did not understand'. A caption is the user's message and is
+    handled normally; otherwise a short friendly steer back to
+    ordering."""
+    if _update_seen(update):
+        return
+    caption = (update.message.caption or "").strip()
+    if caption:
+        await handle_order_text(update, context, caption)
+        return
+    lang = lang_of("", update.effective_user.language_code)
+    await update.message.reply_text(t("gif_reply", lang))
+
+
+async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A sticker (owner, 13 Nov 2026): same as a GIF — a caption is
+    the user's message; otherwise a short friendly steer back."""
+    if _update_seen(update):
+        return
+    caption = (update.message.caption or "").strip()
+    if caption:
+        await handle_order_text(update, context, caption)
+        return
+    lang = lang_of("", update.effective_user.language_code)
+    await update.message.reply_text(t("sticker_reply", lang))
 
 
 # ------------------------------------------------------------ photos ------
@@ -5783,6 +6720,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         merged = dict(fallback["merged"])
         merged.pop("service_id", None)
+        # The stored order (PARTIAL) may still know the metric the
+        # failed message dropped ("tiktok views"): use it, so the
+        # fallback picks the fastest VIEWS service, never the
+        # globally fastest service for the platform.
+        stored = PARTIAL.get(user.id) or {}
+        if not merged.get("service_hint") and stored.get("service_hint"):
+            merged["service_hint"] = stored["service_hint"]
+        if not merged.get("platform") and stored.get("platform"):
+            merged["platform"] = stored["platform"]
         # The user already chose "the fastest one" — do not ask
         # which metric; the fastest pick is what they tapped for.
         await complete_order(query.message, user.id, merged, lang,
@@ -5809,7 +6755,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.warning("cancel_recurring failed: %s", exc)
             await query.edit_message_text(t("not_understood", lang))
             return
-        name = clean_service_name(sched.get("service_name")) or f"service {sched.get('service_id')}"
+        name = short_service_name(sched.get("service_name")) or f"service {sched.get('service_id')}"
         await query.edit_message_text(
             t("schedule_stopped", lang, service=name)
         )
@@ -5844,18 +6790,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text(t(key, lang))
             return
-        await query.edit_message_text(
-            t(
-                "order_summary",
-                lang,
-                service=result["service"],
-                quantity=result["quantity"],
-                link=result["link"],
-                total=format_money(result["total"]),
-                order_id=result["order_id"],
-                status=result["status"],
-            )
+        summary = t(
+            "order_summary",
+            lang,
+            service=result["service"],
+            quantity=result["quantity"],
+            link=result["link"],
+            total=format_money(result["total"]),
+            order_id=result["order_id"],
+            status=result["status"],
         )
+        await query.edit_message_text(summary + "\n" + humor_line(user.id, lang))
         return
 
     rec_draft = PENDING_RECURRING.pop(arg, None)
@@ -5877,7 +6822,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "plan_started",
                 lang,
                 quantity=rec_draft["quantity"],
-                service=clean_service_name(rec_draft["service"].get("name")),
+                service=short_service_name(rec_draft["service"].get("name")),
                 interval=format_interval(rec_draft["interval_minutes"]),
             )
         )
@@ -5992,7 +6937,7 @@ async def run_one_schedule(app, sched, services_by_id):
         log.warning("recurring %s: balance check failed: %s", schedule_id, exc)
         return  # retry next cycle; nothing placed, nothing sent
     balance = float(bal.get("balance", 0)) if bal.get("found") else 0.0
-    name = clean_service_name(service.get("name"))
+    name = short_service_name(service.get("name"))
     if balance < total:
         # Never place an order the user cannot pay for: pause the
         # schedule on the server and tell the user why, once.
@@ -6117,6 +7062,9 @@ def build_application():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(MessageHandler(filters.VIDEO_NOTE, on_video_note))
+    app.add_handler(MessageHandler(filters.ANIMATION, on_animation))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, on_sticker))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
     return app

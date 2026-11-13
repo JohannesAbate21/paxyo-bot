@@ -8,3 +8,6 @@ venv/
 *.ogg
 *.mp3
 *.wav
+
+# Conversation memory (best-effort local JSON, ephemeral on Render)
+chat_history.json
