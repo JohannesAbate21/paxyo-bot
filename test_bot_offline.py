@@ -4994,6 +4994,170 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
         gem.assert_awaited_once()
 
 
+class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):
+    """DeepSeek is the first AI (13 Nov 2026, evening): Groq's free
+    tier hit its daily token limit and Groq had temporarily disabled
+    paid upgrades, so the owner said "use DeepSeek". DeepSeek's API
+    is OpenAI-compatible, so the provider mirrors Groq exactly.
+    Order: DeepSeek -> Groq -> OpenAI -> Gemini. DeepSeek has no
+    voice transcription — ai_transcribe stays on Groq Whisper."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.deepseek.com/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_deepseek_default_model_is_deepseek_chat(self):
+        self.assertEqual(bot.DEEPSEEK_MODEL, "deepseek-chat")
+
+    async def test_deepseek_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"):
+            self.assertEqual(await bot.deepseek_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith("https://api.deepseek.com/v1")
+        )
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer sk-deepseek-test"
+        )
+        self.assertEqual(post["json"]["model"], "deepseek-chat")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_deepseek_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"):
+            await bot.deepseek_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_deepseek_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.deepseek_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_ai_generate_prefers_deepseek_over_groq(self):
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(return_value="d"),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.groq_generate", new=mock.AsyncMock()
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "d")
+        deepseek.assert_awaited_once()
+        groq.assert_not_called()
+        gen.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_groq_when_deepseek_raises(self):
+        # DeepSeek 429s after its own retries: Groq takes over.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("deepseek down")
+                 ),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="g"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "g")
+        deepseek.assert_awaited_once()
+        groq.assert_awaited_once()
+        gen.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_gemini_when_deepseek_and_groq_raise(self):
+        # DeepSeek and Groq both fail, no OpenAI key: Gemini, not silence.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("deepseek down")
+                 ),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("groq down")
+                 ),
+             ) as groq, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="g"),
+             ) as gem, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen:
+            self.assertEqual(await bot.ai_generate("hello"), "g")
+        deepseek.assert_awaited_once()
+        groq.assert_awaited_once()
+        gen.assert_not_called()
+        gem.assert_awaited_once()
+
+    async def test_ai_generate_deepseek_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate", new=mock.AsyncMock(return_value="hello")
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            result = await bot.ai_generate("hi")
+        self.assertEqual(result, "hello")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "DeepSeek generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("sk-deepseek-test", joined)
+        self.assertNotIn("key=", joined)
+
+
 class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
     """The 13 Nov 2026 live-test fixes: hint matching, currency-aware
     budgets, max-for-balance, 1k quantities, pending-order questions,

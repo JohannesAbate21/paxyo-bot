@@ -124,19 +124,22 @@ record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 5).
   conversation back to ordering.
 
 ## AI providers (the brain is replaceable — the lessons live here)
-- Groq is the primary AI (model openai/gpt-oss-120b), OpenAI second,
-  Gemini fallback. If all AI fails, local rules answer — the bot never
-  goes silent and never forgets these lessons, because the lessons are
-  in this repo (bot.py + this file), NOT in Groq. Groq keeps no memory
-  of the bot between chats.
+- DeepSeek is the primary AI (model deepseek-chat, V4.1 Flash) since
+  the evening of 13 Nov 2026, Groq second, OpenAI third, Gemini
+  fallback. Switching providers loses no data: all bot data lives in
+  Paxyo's database and this repo, not in the AI provider. If all AI
+  fails, local rules answer — the bot never goes silent and never
+  forgets these lessons, because the lessons are in this repo
+  (bot.py + this file), NOT in any AI provider. No provider keeps
+  any memory of the bot between chats.
 - Groq free tier: 1,000 requests/day, 200,000 tokens/day. The TOKEN limit
   binds first (~2,700 tokens per chat — each call sends the service list
   + knowledge). Paid Groq (Developer, pay-as-you-go) is $0.15/$0.60 per
   1M tokens, no monthly fee, first bill at $1 usage. (Note: on 13 Nov
   2026 Groq had temporarily disabled Developer upgrades — retry later.)
-- If Groq hits its daily limit, the bot falls back to Gemini, then to
-  local rules. It gets less clever at understanding messy language, but
-  it does NOT lose any lesson.
+- If DeepSeek fails, the bot falls back to Groq, then OpenAI, then
+  Gemini, then to local rules. It gets less clever at understanding
+  messy language, but it does NOT lose any lesson.
 
 ## Admin facts the bot relies on
 - Bot API on paxyo.et: services, balance, create order, order status,

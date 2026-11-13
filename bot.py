@@ -81,20 +81,21 @@ PAXYO_API_BASE = os.environ.get("PAXYO_API_BASE", "https://paxyo.et/api/bot").rs
 BOT_API_SECRET = os.environ.get("BOT_API_SECRET", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-# OpenAI (ChatGPT) — the second AI since 13 Nov 2026, now behind
-# Groq: the Gemini free-tier key kept hitting its per-minute limit
-# (429), so when OPENAI_API_KEY is set the bot classifies,
-# transcribes and reads pictures with OpenAI instead, and only
-# falls back to Gemini when no OpenAI key is set. The key is a
-# Render env var, never in code. gpt-4o-mini retires 2027-01-14;
-# the model is an env var on purpose, so the switch is one
-# setting, not a code change.
+# OpenAI (ChatGPT) — the third AI since 13 Nov 2026, now behind
+# DeepSeek and Groq: the Gemini free-tier key kept hitting its
+# per-minute limit (429), so when OPENAI_API_KEY is set the bot
+# classifies, transcribes and reads pictures with OpenAI instead,
+# and only falls back to Gemini when no OpenAI key is set. The key
+# is a Render env var, never in code. gpt-4o-mini retires
+# 2027-01-14; the model is an env var on purpose, so the switch
+# is one setting, not a code change.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_URL = "https://api.openai.com/v1"
-# Groq — the FIRST AI since 13 Nov 2026: OpenAI's $5 credit could
-# not be bought (the owner's Bybit card was declined), so the bot
-# uses Groq's free tier instead — no card needed, just a free API
+# Groq — the first AI from 13 Nov 2026 until DeepSeek took over
+# that evening (see below). OpenAI's $5 credit could not be
+# bought (the owner's Bybit card was declined), so the bot uses
+# Groq's free tier instead — no card needed, just a free API
 # key. Groq's API is OpenAI-compatible (same chat-completions
 # shape, same Whisper transcription endpoint). Default model
 # openai/gpt-oss-120b (current production model, 13 Nov 2026;
@@ -106,6 +107,18 @@ OPENAI_URL = "https://api.openai.com/v1"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_URL = "https://api.groq.com/openai/v1"
+# DeepSeek — the FIRST AI since the evening of 13 Nov 2026: Groq's
+# free tier hit its daily token limit (73% used by 21:48 EAT) and
+# Groq had temporarily disabled Developer (paid) upgrades, so the
+# owner said "use DeepSeek". DeepSeek's API is OpenAI-compatible
+# (same chat-completions shape as Groq/OpenAI). Default model
+# deepseek-chat (V4.1 Flash): $0.15/1M input, $0.60/1M output
+# off-peak (double at peak); new accounts get 5M free tokens for
+# 30 days. DeepSeek has no voice transcription — ai_transcribe
+# stays on Groq Whisper. The key is a Render env var, never in code.
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_URL = "https://api.deepseek.com/v1"
 # Google Cloud Text-to-Speech (voice replies). The API key comes from a
 # Google Cloud project with the Cloud Text-to-Speech API enabled and
 # billing on; the AI Studio (Gemini) key does NOT work for it.
@@ -2138,13 +2151,14 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
 
 
 # -------------------------------------------------------- OpenAI ------
-# ChatGPT is the second AI (13 Nov 2026): the Gemini free-tier key
+# ChatGPT is the third AI (13 Nov 2026): the Gemini free-tier key
 # kept hitting its per-minute limit, so when OPENAI_API_KEY is set
 # the bot classifies, transcribes and reads pictures with OpenAI
 # instead. The three functions mirror the Gemini ones exactly (same
 # inputs, same outputs, same retry shape), and the ai_* wrappers
-# below pick Groq first, OpenAI second, Gemini third — so with no
-# Groq or OpenAI key the bot behaves exactly as before.
+# below pick DeepSeek first, Groq second, OpenAI third, Gemini
+# fourth — so with no DeepSeek, Groq or OpenAI key the bot behaves
+# exactly as before.
 
 async def _openai_post(path: str, headers=None, json=None, data=None,
                        files=None) -> dict:
@@ -2236,13 +2250,14 @@ async def openai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
 
 
 # -------------------------------------------------------- Groq --------
-# Groq is the first AI (13 Nov 2026): OpenAI's $5 credit could not
-# be bought — the owner's Bybit card was declined — so the bot
-# uses Groq's free tier, which needs no card. Groq's API is
-# OpenAI-compatible, so the two functions below mirror the OpenAI
-# ones exactly (same inputs, same outputs, same retry shape), with
-# Groq's base URL and its own key/model env vars. Photos stay on
-# OpenAI/Gemini vision — Groq is not used for pictures.
+# Groq was the first AI (13 Nov 2026, until DeepSeek took over
+# that evening): OpenAI's $5 credit could not be bought — the
+# owner's Bybit card was declined — so the bot uses Groq's free
+# tier, which needs no card. Groq's API is OpenAI-compatible, so
+# the two functions below mirror the OpenAI ones exactly (same
+# inputs, same outputs, same retry shape), with Groq's base URL
+# and its own key/model env vars. Photos stay on OpenAI/Gemini
+# vision — Groq is not used for pictures.
 
 async def _groq_post(path: str, headers=None, json=None, data=None,
                      files=None) -> dict:
@@ -2304,6 +2319,62 @@ async def groq_transcribe(audio_bytes: bytes) -> str:
     return str(data.get("text") or "").strip()
 
 
+# --------------------------------------------------- DeepSeek ------
+# DeepSeek is the first AI (13 Nov 2026, evening): Groq's free
+# tier kept hitting its daily token limit and Groq had temporarily
+# disabled paid upgrades, so the owner said "use DeepSeek".
+# DeepSeek's API is OpenAI-compatible, so the two functions below
+# mirror the Groq ones exactly (same inputs, same outputs, same
+# retry shape), with DeepSeek's base URL and its own key/model env
+# vars. DeepSeek has no voice transcription — ai_transcribe stays
+# on Groq Whisper — and pictures stay on OpenAI/Gemini vision.
+
+async def _deepseek_post(path: str, headers=None, json=None) -> dict:
+    """One POST to the DeepSeek API, with retries on rate limits
+    and server errors. Same shape as _groq_post (two retries,
+    after 5s then 15s; 500 joins 429/503). The client shape is
+    identical (timeout 120s, trust_env False)."""
+    url = DEEPSEEK_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning(
+                    "DeepSeek %s, retrying (attempt %d of 3)", status, attempt + 2
+                )
+                continue
+            raise
+
+
+def _deepseek_headers() -> dict:
+    return {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+
+
+async def deepseek_generate(prompt: str, system: str = None) -> str:
+    """One DeepSeek text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _deepseek_post(
+        "/chat/completions",
+        headers=_deepseek_headers(),
+        json={"model": DEEPSEEK_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 def _log_ai_failure(message: str, exc) -> None:
     """Log an AI-provider failure: message + HTTP status only.
 
@@ -2321,13 +2392,19 @@ def _log_ai_failure(message: str, exc) -> None:
 
 
 async def ai_generate(prompt: str, system: str = None) -> str:
-    """Text from the AI: Groq when GROQ_API_KEY is set, else ChatGPT
-    when OPENAI_API_KEY is set, else Gemini. Every caller uses this,
-    so the provider switch is one env var and the fallback is
-    automatic. A provider that raises after its own retries falls
-    through to the next one; only when every configured provider
-    failed does the error reach the caller (extract_intent then
-    answers from local_intent instead of going silent)."""
+    """Text from the AI: DeepSeek when DEEPSEEK_API_KEY is set, else
+    Groq when GROQ_API_KEY is set, else ChatGPT when OPENAI_API_KEY
+    is set, else Gemini. Every caller uses this, so the provider
+    switch is one env var and the fallback is automatic. A provider
+    that raises after its own retries falls through to the next one;
+    only when every configured provider failed does the error reach
+    the caller (extract_intent then answers from local_intent
+    instead of going silent)."""
+    if DEEPSEEK_API_KEY:
+        try:
+            return await deepseek_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("DeepSeek generate failed, trying next provider", exc)
     if GROQ_API_KEY:
         try:
             return await groq_generate(prompt, system=system)
