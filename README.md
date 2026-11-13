@@ -23,7 +23,7 @@ Telegram user --(text/voice)--> bot.py (webhook, free Render web service)
 Paxyo Bot API on paxyo.et (https://paxyo.et/api/bot, X-Bot-Secret)
     | services / balance / create order / order status / create user
     v
-Paxyo MySQL + existing website order flow --> GodOfPanel (provider)
+Paxyo MySQL + existing website order flow --> fulfilment
 ```
 
 Money rules: the AI only listens and talks. All totals are computed
@@ -175,8 +175,100 @@ produces voice, voice in produces voice except the Confirm card and
 the post-acceptance text summary, Amharic and English orders) with
 the network mocked, and the webhook wiring (webhook URL/path building
 from `WEBHOOK_URL` / `RENDER_EXTERNAL_URL` / `WEBHOOK_PATH`, port
-handling, the health endpoint, the app's 7 handlers, and the webhook
-server lifecycle) with the network mocked.
+handling, the health endpoint, the app's 8 handlers, and the webhook
+server lifecycle) with the network mocked. It also covers the durable
+last-link memory (recent orders), repeating-order plans (Confirm
+required, stop/list) and the scheduler loop (due runs once,
+balance-short pause, catch-up after sleep).
+
+## Remembering and repeating orders
+
+- **Last link:** "order on that link again" resolves the link (and the
+  service, when none is named) from the user's most recent order via
+  `GET /api/bot/orders?telegram_id=&limit=5`, so it works after a
+  restart. With no previous order the bot asks for the link.
+- **Repeating orders:** "order 1k views on that link every 3 hours"
+  builds a plan and shows a short summary (service, quantity, link,
+  every 3 hours, cost per order) with Confirm/Cancel — nothing starts
+  without Confirm. `/schedules` lists active plans; "stop the
+  repeating order" cancels one (buttons when there are several).
+  Shortest repeat: every 30 minutes.
+- **Scheduler:** a background loop every 60 seconds asks the server
+  for due schedules (`GET /api/bot/recurring/due`), checks the balance
+  first, places the order (idempotency key per schedule+slot), then
+  marks it ran. Balance too low pauses the schedule and tells the
+  user. A schedule that slept only ever runs once on wake.
+
+## Choosing a service
+
+- The bot picks the fastest service automatically — unless the user
+  names one. "use service 6139", "service #5535", "order with 7246",
+  "the cheapest Instagram followers" or "same service as last time"
+  all use THAT service for the order, and the Confirm card shows it
+  as "Name (#id)" so the user sees which one is being used.
+- A named service is validated first: it must exist, be active, and
+  never be blacklisted (5379, 5834 — refused even if asked for by
+  ID). A bad one is refused in one line with a one-tap "Use the
+  fastest one" button that resumes the same order. A description
+  ("cheapest ...") ranks by price; otherwise fastest-first. "Same
+  service as last time" takes the service from the most recent order.
+
+## Deposit by chat
+
+- "let me deposit 10 br by telebirr and my phone number is 099387383"
+  (and many ways of saying it, in English or Amharic) starts a
+  deposit: the bot asks for only the missing pieces — amount, then
+  method (Telebirr or CBE), then phone — and shows a short Confirm
+  summary. Nothing is created until confirmed.
+- On Confirm it calls `POST /api/bot/deposits` and replies with
+  short payment instructions in the user's language. When Chapa
+  pushes a USSD prompt to the user's phone (Direct Charge), the bot
+  says the request is on its way and to approve it with the PIN;
+  when the server returns a code or a link instead, it shows the
+  USSD code to dial and/or the checkout link to open. Either way it
+  says the balance updates automatically once the payment succeeds.
+  The bot never credits anything itself — crediting is server-side
+  (Chapa verify/recheck). If the deposit endpoint is not live yet,
+  the bot says so in one line and points at paxyo.et.
+- Slang and typos are tolerated: "teleirr", "telebir", "amd", "blance",
+  "oder", "histry", "dipost" and similar are fixed by a small explicit
+  map before classification, and Latin-letter Amharic ("selam") is
+  accepted. Phones are normalized to the 2519xxxxxxxx form
+  (09… / 07… / 251… / +251… accepted). Amounts over 100,000 ETB are
+  refused in one line.
+- **Checking a deposit:** "did my deposit go through?", "I paid but my
+  balance didn't change", "check my deposit", or a bare "I paid" /
+  "I approved it" rechecks the most recent deposit — the in-session
+  deposit id first, else the newest from
+  `GET /api/bot/deposits?telegram_id=&limit=5` — through
+  `GET /api/bot/deposits/{id}?telegram_id=`, which re-verifies with
+  Chapa before answering. Completed: the fresh balance is shown.
+  Still pending: the user is told to approve the prompt on their
+  phone and ask again. Failed: the server's reason, or a generic
+  line — the bot never invents one. No deposits: one short line
+  offering to start one. Endpoints not live yet: one short line
+  pointing at Deposit History on paxyo.et.
+
+## Photos
+
+- A picture sent to the bot is read with Gemini vision
+  (`gemini_vision`, same model as text) and routed by what it shows:
+  a payment receipt is shown back with the amount/reference found
+  and offered a recheck ("Yes, check it" button, or a bare "yes") —
+  the same Chapa recheck as "did my deposit go through?"; a
+  profile/post screenshot starts the order flow with the extracted
+  link (platform from the link's domain, so it goes straight to
+  "how many?"); anything else gets the summary plus one short
+  follow-up question. A receipt the model cannot read asks for the
+  amount in text; a username without a link asks for the link.
+- Pictures are capped at 10 MB (refused in one line) and are kept in
+  memory only — never written to disk, and sent nowhere except the
+  one Gemini call the user asked for by sending the picture. A
+  vision failure, timeout or unreadable result gets one short
+  fallback line and is never retried in a loop. A photo sent while
+  an order or deposit is being built answers that pending question
+  when it makes sense (a receipt while a deposit is pending, a link
+  while an order is being built).
 
 ## Amharic prompt
 
@@ -191,6 +283,60 @@ is separate: `VOICE_STYLE_PROMPT` in `bot.py`, pasted by him verbatim.
 See "Voice replies" and "Reply rules" above for what it does and for
 why the voice provider is Google Cloud TTS (Gemini TTS was verified
 to return no audio for Amharic).
+
+## Messy real-world inputs (owner edge-case spec, 13 Nov 2026)
+
+Users type messy, incomplete, unexpected prompts. The bot handles
+them instead of breaking; every reply stays short and in the user's
+language, and nothing is ever placed without an explicit Confirm.
+
+- **Ambiguous:** "give me the usual" replays the last order as a
+  Confirm card (doubled on request, capped at the service max);
+  "boost my latest video" admits the bot cannot see the profile and
+  asks for the link; budget-first ("10k for 500 birr") lists the
+  cheapest and fastest options that fit, or the max quantity the
+  budget buys; goal-based ("make my TikTok go viral") asks which
+  metric matters first.
+- **Multi-order:** split an order across N links (one Confirm places
+  them all, each with its own idempotency key; missing links are
+  counted); several services/targets in one message become one batch
+  Confirm card, with the unclear part listed and asked about;
+  drip-feed ("1,000 every hour") maps to the recurring feature
+  (intervals under 30 minutes are refused); a friend's handle is
+  shown exactly as typed with a spelling double-check on the card.
+- **Links:** a platform/link mismatch is flagged in one line and the
+  order waits for the correction — never placed mismatched.
+  Shortened links are accepted; private accounts and expiring story
+  links get one warning on the Confirm card. A profile screenshot
+  mid-order fills the link; a mixed Amharic-English voice note still
+  extracts platform/link/quantity.
+- **Mid-order:** changing the quantity edits a draft (a placed order
+  shows its live status instead); cancelling a draft cancels at once
+  (a placed order shows status and the support path); "why hasn't it
+  started yet?" answers with the real status plus the service's
+  average time, never a bare "soon"; a short delivery is checked
+  first — still running says so, finished short points at support
+  with no refund/refill promise and no second order without Confirm.
+- **Payment:** split payment is not supported (deposit the Telebirr
+  half first, then the order uses the wallet); "how many can my
+  balance buy?" reverse-calculates from the real balance, floored to
+  a multiple of 10 and capped by the service min/max; discounts are
+  refused in one line with the cheapest real option offered instead.
+- **Policy and trust:** ban risk and "real Ethiopian followers" get
+  an honest answer (gradual and widely used, no zero-risk guarantee,
+  global network, not guaranteed real Ethiopian people) plus a slower
+  service when one exists; drops/refunds are never promised — support
+  reviews them; Addis-only targeting is not available; no free likes
+  (smallest order is the service minimum, cheapest service suggested).
+- **Adversarial:** a user-supplied price is never applied — prices
+  are fixed by Paxyo, cheapest real option offered; caption/posting
+  tips are brief, then back to ordering; website payment/account
+  problems redirect to the deposit recheck or Deposit History at
+  paxyo.et — the bot cannot fix the website account.
+- **Guardrails:** a half-built order survives any interruption (the
+  user is told where it stands — "still waiting for Confirm" or
+  "still building"); every Confirm shows service, quantity, link and
+  total; API errors are one short plain line, never raw.
 
 ## Later phase (not built in this version)
 
