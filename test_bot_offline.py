@@ -7376,5 +7376,565 @@ class TestRoundSevenFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Please confirm", query.message.text_sent[0])
 
 
+class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
+    """Qwen-Turbo is the second AI (13 Nov 2026): ~3x cheaper than
+    DeepSeek ($0.05/$0.20 per 1M tokens) via Alibaba's international
+    DashScope endpoint, which is OpenAI-compatible, so the provider
+    mirrors DeepSeek exactly. Order: DeepSeek -> Qwen -> Groq ->
+    OpenAI -> Gemini -> GLM."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_qwen_default_model_is_qwen_turbo(self):
+        self.assertEqual(bot.QWEN_MODEL, "qwen-turbo")
+
+    async def test_qwen_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"):
+            self.assertEqual(await bot.qwen_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith(
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+            )
+        )
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer sk-qwen-test"
+        )
+        self.assertEqual(post["json"]["model"], "qwen-turbo")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_qwen_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"):
+            await bot.qwen_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_qwen_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.qwen_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_ai_generate_prefers_qwen_when_deepseek_unset(self):
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch(
+                 "bot.deepseek_generate", new=mock.AsyncMock()
+             ) as deepseek, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(return_value="q"),
+             ) as qwen, \
+             mock.patch(
+                 "bot.groq_generate", new=mock.AsyncMock()
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "q")
+        deepseek.assert_not_called()
+        qwen.assert_awaited_once()
+        groq.assert_not_called()
+        gen.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_groq_when_qwen_raises(self):
+        # DeepSeek unset, Qwen 429s after its own retries: Groq takes over.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("qwen down")),
+             ) as qwen, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="g"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "g")
+        qwen.assert_awaited_once()
+        groq.assert_awaited_once()
+        gen.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_generate_qwen_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate", new=mock.AsyncMock(return_value="hello")
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            result = await bot.ai_generate("hi")
+        self.assertEqual(result, "hello")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "Qwen generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("sk-qwen-test", joined)
+        self.assertNotIn("key=", joined)
+
+
+class TestGlmProvider(unittest.IsolatedAsyncioTestCase):
+    """GLM is the last-resort fallback (13 Nov 2026): GLM-4.7-Flash
+    is FREE ($0 input/output) on Z.AI, but rate-limited (~1
+    request/second) and slow, so it only runs after DeepSeek, Qwen,
+    Groq, OpenAI and Gemini all failed. The provider mirrors
+    DeepSeek exactly (OpenAI-compatible API)."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.z.ai/api/paas/v4/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_glm_default_model_is_glm_4_7_flash(self):
+        self.assertEqual(bot.GLM_MODEL, "glm-4.7-flash")
+
+    async def test_glm_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"):
+            self.assertEqual(await bot.glm_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith("https://api.z.ai/api/paas/v4")
+        )
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer sk-glm-test"
+        )
+        self.assertEqual(post["json"]["model"], "glm-4.7-flash")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_glm_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.glm_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_ai_generate_falls_through_full_chain_to_glm(self):
+        # Every provider before GLM fails: GLM answers, and each
+        # provider was tried exactly once, in chain order.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ) as qwen, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("o")),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ) as gem, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "glm")
+        for fn in (deepseek, qwen, groq, gen, gem, glm):
+            fn.assert_awaited_once()
+
+    async def test_ai_generate_raises_when_every_provider_fails(self):
+        # All six fail: the last provider's error propagates, and
+        # Gemini is not called a second time.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
+             ), \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("o")),
+             ), \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ) as gem, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("gl")),
+             ) as glm:
+            with self.assertRaises(RuntimeError):
+                await bot.ai_generate("hello")
+        gem.assert_awaited_once()
+        glm.assert_awaited_once()
+
+    async def test_ai_generate_glm_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", ""), \
+             mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.ai_generate("hi")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "GLM generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("sk-glm-test", joined)
+        self.assertNotIn("key=", joined)
+
+
+class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
+    """The Amharic translate-bridge (owner, 13 Nov 2026): a message
+    in Ethiopic fidels is translated to English by Gemini first, the
+    flow runs in English, and prose replies are translated back to
+    Amharic before sending. English never touches the bridge; a
+    failed translation falls back to the original text; Confirm
+    cards, buttons, prices, links and service IDs are never
+    translated."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        bot._BRIDGE_AMHARIC.set(False)
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        bot._BRIDGE_AMHARIC.set(False)
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def test_translate_to_english_uses_gemini(self):
+        with mock.patch(
+            "bot.gemini_generate",
+            new=mock.AsyncMock(return_value="I want 200 TikTok views"),
+        ) as gen:
+            result = await bot.translate_to_english(
+                "200 የቲክቶክ እይታዎች እፈልጋለሁ"
+            )
+        self.assertEqual(result, "I want 200 TikTok views")
+        prompt = gen.await_args.args[0]
+        self.assertIn("Translate", prompt)
+        self.assertIn("200 የቲክቶክ እይታዎች እፈልጋለሁ", prompt)
+        self.assertIn("Keep links, numbers", prompt)
+
+    async def test_translate_to_english_failure_returns_empty(self):
+        with mock.patch(
+            "bot.gemini_generate",
+            new=mock.AsyncMock(side_effect=RuntimeError("429")),
+        ):
+            self.assertEqual(await bot.translate_to_english("ሰላም"), "")
+
+    async def test_translate_to_amharic_uses_gemini(self):
+        with mock.patch(
+            "bot.gemini_generate",
+            new=mock.AsyncMock(return_value="ሰላም፣ እንዴት ልርዳዎት?"),
+        ) as gen:
+            result = await bot.translate_to_amharic(
+                "Hello, how can I help you?"
+            )
+        self.assertEqual(result, "ሰላም፣ እንዴት ልርዳዎት?")
+        prompt = gen.await_args.args[0]
+        self.assertIn("Translate", prompt)
+        self.assertIn("Hello, how can I help you?", prompt)
+        self.assertIn("service names", prompt)
+
+    async def test_translate_to_amharic_failure_returns_empty(self):
+        with mock.patch(
+            "bot.gemini_generate",
+            new=mock.AsyncMock(side_effect=RuntimeError("429")),
+        ):
+            self.assertEqual(await bot.translate_to_amharic("Hello"), "")
+
+    async def test_amharic_order_translated_and_confirm_card_stays_english(self):
+        # Live shape: an Amharic views order. The classifier must see
+        # the English translation, and the Confirm card (buttons,
+        # prices, link, service ID) must stay English — it is never
+        # translated.
+        amharic = (
+            "እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ: "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        )
+        english = (
+            "please order 200 TikTok views for this video: "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        )
+        intent = intent_of(
+            "order", platform="tiktok", service_hint="views",
+            link="https://vt.tiktok.com/ZSpQWTSmH/", quantity=200,
+        )
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=english),
+        ) as to_en, \
+            mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError(
+                        "Confirm card must not be translated"
+                    )
+                ),
+            ), \
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ) as extract, \
+            mock.patch("bot.paxyo", TikTokPaxyo()), \
+            mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(FakeUpdate(msg), None, amharic)
+        self.assertIn("እይታዎች", to_en.await_args.args[0])
+        extract.assert_awaited_once()
+        self.assertEqual(extract.await_args.args[0], english)
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertIn("18.90 ETB", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_amharic_reply_is_translated_back(self):
+        # A source question in Amharic: the guard answers in English
+        # after the bridge, and reply_message translates it back.
+        amharic_q = "አገልግሎቶችዎን ከየት ታገኛላችሁ?"
+        amharic_a = "Paxyo orderዎን በቀጥታ ያደርሳል"
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value="where do you get your services"),
+        ), \
+            mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(return_value=amharic_a),
+            ) as to_am, \
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError("classifier must not run")
+                ),
+            ), \
+            mock.patch("bot.paxyo", FakePaxyo()), \
+            mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(FakeUpdate(msg), None, amharic_q)
+        self.assertEqual(msg.text_sent, [amharic_a])
+        to_am.assert_awaited_once()
+        self.assertIn(
+            "Paxyo delivers your order directly",
+            to_am.await_args.args[0],
+        )
+
+    async def test_english_message_never_touches_the_bridge(self):
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("must not translate English")
+            ),
+        ), \
+            mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError("must not translate back")
+                ),
+            ), \
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError("classifier must not run")
+                ),
+            ), \
+            mock.patch("bot.paxyo", FakePaxyo()), \
+            mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(
+                FakeUpdate(msg), None, "where do you get your services"
+            )
+        self.assertEqual(msg.text_sent, [bot.t("source_question", "en")])
+
+    async def test_translation_failure_falls_back_to_original_amharic(self):
+        # Gemini 429s on the inbound translation: the original
+        # Amharic text is classified as-is (round-7 Amharic metric
+        # words still work) and no translate-back is attempted.
+        amharic = (
+            "እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ: "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        )
+        intent = intent_of(
+            "order", platform="tiktok", service_hint="views",
+            link="https://vt.tiktok.com/ZSpQWTSmH/", quantity=200,
+        )
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=""),
+        ), \
+            mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError("no bridge, no translate-back")
+                ),
+            ), \
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ) as extract, \
+            mock.patch("bot.paxyo", TikTokPaxyo()), \
+            mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(FakeUpdate(msg), None, amharic)
+        extract.assert_awaited_once()
+        self.assertEqual(extract.await_args.args[0], amharic)
+        self.assertEqual(len(bot.PENDING), 1)
+        # Fallback uses the local Amharic templates: the Confirm card
+        # itself is Amharic ("እባክዎ ያረጋግጡ"), with the same service,
+        # price and link untouched.
+        self.assertIn("እባክዎ ያረጋግጡ", msg.text_sent[0])
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertIn("18.90 ETB", msg.text_sent[0])
+        self.assertIn("https://vt.tiktok.com/ZSpQWTSmH/", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_unchanged_translation_does_not_engage_bridge(self):
+        # Gemini returns the text unchanged: the bridge stays off
+        # and nothing is translated back.
+        amharic = "ሰላም"
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=amharic),
+        ), \
+            mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError("bridge must not engage")
+                ),
+            ), \
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(
+                    return_value=intent_of("unclear")
+                ),
+            ) as extract, \
+            mock.patch("bot.paxyo", FakePaxyo()), \
+            mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(FakeUpdate(msg), None, amharic)
+        extract.assert_awaited_once()
+        self.assertEqual(extract.await_args.args[0], amharic)
+        self.assertTrue(msg.text_sent)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -157,21 +157,34 @@ record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 7).
 
 ## AI providers (the brain is replaceable — the lessons live here)
 - DeepSeek is the primary AI (model deepseek-chat, V4.1 Flash) since
-  the evening of 13 Nov 2026, Groq second, OpenAI third, Gemini
-  fallback. Switching providers loses no data: all bot data lives in
-  Paxyo's database and this repo, not in the AI provider. If all AI
-  fails, local rules answer — the bot never goes silent and never
-  forgets these lessons, because the lessons are in this repo
-  (bot.py + this file), NOT in any AI provider. No provider keeps
-  any memory of the bot between chats.
+  the evening of 13 Nov 2026, Qwen-Turbo second (model qwen-turbo,
+  $0.05/$0.20 per 1M tokens, ~3x cheaper than DeepSeek), Groq third,
+  OpenAI fourth, Gemini fifth, GLM last resort (model glm-4.7-flash,
+  FREE but rate-limited ~1 request/second and slow — only when every
+  other provider failed). Switching providers loses no data: all bot
+  data lives in Paxyo's database and this repo, not in the AI
+  provider. If all AI fails, local rules answer — the bot never goes
+  silent and never forgets these lessons, because the lessons are in
+  this repo (bot.py + this file), NOT in any AI provider. No provider
+  keeps any memory of the bot between chats.
+- Amharic translate-bridge (owner, 13 Nov 2026): an Amharic message
+  is translated to English by Gemini first, the flow runs in
+  English, and prose replies are translated back to Amharic before
+  sending. English never touches the bridge. If a translation fails,
+  the original text is used — never silent, never a dropped order.
+  Confirm cards, buttons, prices, links and service IDs are never
+  translated. The bridge does not break the local Amharic metric
+  words or Amharic reply templates — those still apply when
+  translation fails.
 - Groq free tier: 1,000 requests/day, 200,000 tokens/day. The TOKEN limit
   binds first (~2,700 tokens per chat — each call sends the service list
   + knowledge). Paid Groq (Developer, pay-as-you-go) is $0.15/$0.60 per
   1M tokens, no monthly fee, first bill at $1 usage. (Note: on 13 Nov
   2026 Groq had temporarily disabled Developer upgrades — retry later.)
-- If DeepSeek fails, the bot falls back to Groq, then OpenAI, then
-  Gemini, then to local rules. It gets less clever at understanding
-  messy language, but it does NOT lose any lesson.
+- If DeepSeek fails, the bot falls back to Qwen, then Groq, then
+  OpenAI, then Gemini, then GLM, then to local rules. It gets less
+  clever at understanding messy language, but it does NOT lose any
+  lesson.
 
 ## Admin facts the bot relies on
 - Bot API on paxyo.et: services, balance, create order, order status,

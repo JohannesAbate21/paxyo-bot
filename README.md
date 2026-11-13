@@ -58,12 +58,16 @@ of 10 and inside the service min/max.
 | `BOT_API_SECRET` | From `config_secret.php` on the paxyo.et server. Read it in the DirectAdmin Terminal (`grep BOT_API_SECRET public_html/config_secret.php`) and paste the value into Render. Never put it in a file or in chat. |
 | `GEMINI_API_KEY` | Google AI Studio (aistudio.google.com) — "Get API key", create a key, paste it into Render. |
 | `GEMINI_MODEL` | `gemini-3.5-flash` (default). gemini-2.5-flash is retired for new users; gemini-3.8-flash returned 503 when tested. |
-| `DEEPSEEK_API_KEY` | DeepSeek (platform.deepseek.com) — create an API key, paste it into Render. The bot uses it first; without it, it falls back to Groq, then OpenAI, then Gemini. New accounts get 5M free tokens for 30 days. |
+| `DEEPSEEK_API_KEY` | DeepSeek (platform.deepseek.com) — create an API key, paste it into Render. The bot uses it first; without it, it falls back to Qwen, then Groq, then OpenAI, then Gemini, then GLM. New accounts get 5M free tokens for 30 days. |
 | `DEEPSEEK_MODEL` | `deepseek-chat` (default, V4.1 Flash). $0.15/1M input, $0.60/1M output off-peak (double at peak). |
-| `GROQ_API_KEY` | Groq (console.groq.com) — create a free API key, paste it into Render. No card needed. The bot uses it second (after DeepSeek); without it, it falls back to OpenAI, then Gemini. |
+| `QWEN_API_KEY` | Qwen (Alibaba Cloud Model Studio, international) — create an API key, paste it into Render. The bot uses it second (after DeepSeek); without it, it falls back to Groq, then OpenAI, then Gemini, then GLM. |
+| `QWEN_MODEL` | `qwen-turbo` (default). $0.05/1M input, $0.20/1M output — about 3x cheaper than DeepSeek. |
+| `GROQ_API_KEY` | Groq (console.groq.com) — create a free API key, paste it into Render. No card needed. The bot uses it third (after DeepSeek and Qwen); without it, it falls back to OpenAI, then Gemini, then GLM. |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` (default, 1,000 requests/day free). The small `llama-3.1-8b-instant` allows 14,400/day free. Groq retires models without warning — the old default `llama-3.3-70b-versatile` 404s for free accounts (13 Nov 2026) — so if Groq 404s, change this setting in Render, no code change needed. |
-| `OPENAI_API_KEY` | OpenAI (platform.openai.com) — create an API key, add $5 of credit, paste the key into Render. The bot uses it third (after DeepSeek and Groq); without it, it falls back to Gemini. Setup is paused: the owner's card was declined (13 Nov 2026), so no key exists yet. |
+| `OPENAI_API_KEY` | OpenAI (platform.openai.com) — create an API key, add $5 of credit, paste the key into Render. The bot uses it fourth (after DeepSeek, Qwen and Groq); without it, it falls back to Gemini, then GLM. Setup is paused: the owner's card was declined (13 Nov 2026), so no key exists yet. |
 | `OPENAI_MODEL` | `gpt-4o-mini` (default). gpt-4o-mini retires 2027-01-14, so switch this to its replacement when OpenAI says so — no code change needed. |
+| `GLM_API_KEY` | GLM (Z.AI / Zhipu, open.bigmodel.cn) — create an API key, paste it into Render. The bot uses it last, only when every other provider failed; without it, there is no last resort. |
+| `GLM_MODEL` | `glm-4.7-flash` (default). FREE ($0 input/output) but rate-limited (~1 request/second) and can be slow — last resort only. |
 | `GOOGLE_CLOUD_TTS_API_KEY` | Google Cloud project (Cloud Text-to-Speech API enabled, billing on) — "Create API key", paste it into Render. The AI Studio (Gemini) key does NOT work for it. Until this is set, voice replies fall back to text. |
 | `GOOGLE_CLOUD_TTS_VOICE` | `am-ET-Wavenet-A` (default) — the Amharic voice. |
 | `GOOGLE_CLOUD_TTS_VOICE_EN` | `en-US-Wavenet-D` (default) — the English voice. |
@@ -72,7 +76,7 @@ of 10 and inside the service min/max.
 | `WEBHOOK_URL` | Optional override for `RENDER_EXTERNAL_URL` (local testing behind ngrok, etc.). |
 | `WEBHOOK_PATH` | Optional secret path for Telegram updates. Defaults to the bot token itself (secret, so unguessable). |
 
-## AI provider (DeepSeek first, Groq second, ChatGPT third, Gemini fallback)
+## AI provider (DeepSeek first, Qwen second, Groq third, ChatGPT fourth, Gemini fifth, GLM last resort)
 
 `ai_generate` / `ai_transcribe` / `ai_vision` in `bot.py` are the
 only AI entry points. When `DEEPSEEK_API_KEY` is set they call
@@ -80,7 +84,11 @@ DeepSeek (`deepseek_generate` with the model from `DEEPSEEK_MODEL`,
 default `deepseek-chat`, V4.1 Flash: $0.15/1M input, $0.60/1M
 output off-peak, double at peak; new accounts get 5M free tokens
 for 30 days). DeepSeek's API is OpenAI-compatible, so the code
-mirrors the Groq calls. When no DeepSeek key is set they call Groq
+mirrors the Groq calls. When no DeepSeek key is set they call Qwen
+(`qwen_generate` with the model from `QWEN_MODEL`, default
+`qwen-turbo`, $0.05/1M input, $0.20/1M output — about 3x cheaper
+than DeepSeek — via Alibaba's international DashScope endpoint,
+also OpenAI-compatible). When no Qwen key is set they call Groq
 (`groq_generate` with the model from `GROQ_MODEL`, default
 `openai/gpt-oss-120b`, 1,000 requests/day free (Groq retired the
 old default `llama-3.3-70b-versatile` for free accounts, 13 Nov
@@ -92,24 +100,46 @@ no Groq key is set they call OpenAI (`openai_generate`
 with the model from `OPENAI_MODEL`, default `gpt-4o-mini`;
 `openai_transcribe` with Whisper `whisper-1`; `openai_vision`
 with the same model and a base64 image data URI). When no key at
-all is set they call the existing `gemini_*` functions, which are
-unchanged. DeepSeek has no voice transcription — `ai_transcribe`
+all is set they call the existing `gemini_*` functions, and after
+Gemini they call GLM (`glm_generate` with the model from
+`GLM_MODEL`, default `glm-4.7-flash`, FREE but rate-limited at
+~1 request/second and slow — last resort only). DeepSeek, Qwen
+and GLM have no voice transcription — `ai_transcribe`
 stays on Groq Whisper — and pictures stay on OpenAI/Gemini vision
-— DeepSeek and Groq are not used for them. A provider that fails
+— DeepSeek, Qwen and GLM are not used for them. A provider that fails
 after its retries falls through to the next one, so the bot only
 goes silent when every configured provider failed (and then
-`extract_intent` answers from `local_intent`). The DeepSeek, Groq
-and OpenAI calls retry 429/500/503 twice (after 5s, then 15s),
+`extract_intent` answers from `local_intent`). The DeepSeek, Qwen,
+Groq, OpenAI and GLM calls retry 429/500/503 twice (after 5s, then 15s),
 mirroring `_gemini_post`.
 **DeepSeek is the live provider (13 Nov 2026, evening):** Groq's
 free tier hit its daily token limit (73% used by 21:48 EAT) and
 Groq had temporarily disabled Developer (paid) upgrades, so the
-owner said "use DeepSeek". **OpenAI setup is paused (13 Nov 2026):**
+owner said "use DeepSeek". **Qwen and GLM were added the same
+evening (13 Nov 2026):** Qwen-Turbo as the cheaper second provider
+and GLM-4.7-Flash as the free last resort. **OpenAI setup is paused (13 Nov 2026):**
 the owner's card was declined, so no OpenAI key exists yet.
 **gpt-4o-mini retires 2027-01-14** — switch `OPENAI_MODEL` to its
 replacement then; no code change is needed. ChatGPT cost, when it
 is used: about $0.0004 per chat reply, so $5 of credit covers
 roughly 10,000 chats.
+
+### Amharic translate-bridge (Gemini translates, the main AI thinks)
+
+DeepSeek, Qwen and Groq have unproven Amharic, but Gemini is
+strong on it — so a message in Ethiopic fidels is translated to
+English by Gemini first (`translate_to_english`, in
+`handle_order_text`), the whole flow runs in English, and prose
+replies are translated back to Amharic in `reply_message`
+(`translate_to_amharic`) before sending. English messages never
+touch the bridge. If either translation call fails (Gemini 429,
+no key), the original text is used instead — the bot never goes
+silent and never drops an order over a translation failure, and
+the local Amharic handling (round-7 Amharic metric words,
+Amharic reply templates) still applies. Confirm cards, buttons,
+prices, links and service IDs are never translated — only the
+prose reply text is, and only when the message has no buttons
+attached.
 
 ## Voice messages
 
@@ -434,7 +464,7 @@ Two bugs found live on 13 Nov, both fixed here:
   silence. (DeepSeek is now the first AI — see "AI provider" —
   because Groq's free tier hit its daily token limit and Groq had
   temporarily disabled paid upgrades; the fallback chain is
-  DeepSeek → Groq → ChatGPT → Gemini → local classifier.)
+  DeepSeek → Qwen → Groq → ChatGPT → Gemini → GLM → local classifier.)
 - **Prices showed 0.00 ETB.** The Paxyo API returns each service
   with `id` and `price` (ETB per 1000); the bot read `service` and
   `rate_etb_per_1000`, which the API does not send. `PaxyoClient.

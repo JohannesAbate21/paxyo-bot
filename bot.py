@@ -81,8 +81,8 @@ PAXYO_API_BASE = os.environ.get("PAXYO_API_BASE", "https://paxyo.et/api/bot").rs
 BOT_API_SECRET = os.environ.get("BOT_API_SECRET", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-# OpenAI (ChatGPT) — the third AI since 13 Nov 2026, now behind
-# DeepSeek and Groq: the Gemini free-tier key kept hitting its
+# OpenAI (ChatGPT) — the fourth AI since 13 Nov 2026, now behind
+# DeepSeek, Qwen and Groq: the Gemini free-tier key kept hitting its
 # per-minute limit (429), so when OPENAI_API_KEY is set the bot
 # classifies, transcribes and reads pictures with OpenAI instead,
 # and only falls back to Gemini when no OpenAI key is set. The key
@@ -119,6 +119,24 @@ GROQ_URL = "https://api.groq.com/openai/v1"
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_URL = "https://api.deepseek.com/v1"
+# Qwen-Turbo (Alibaba) — the SECOND AI since 13 Nov 2026: ~3x
+# cheaper than DeepSeek ($0.05/1M input, $0.20/1M output) via the
+# international DashScope endpoint, which is OpenAI-compatible
+# (same chat-completions shape as DeepSeek/Groq/OpenAI). Amharic is
+# unproven on Qwen — Amharic messages go through the Gemini
+# translate-bridge (see below) instead. The key is a Render env
+# var, never in code.
+QWEN_API_KEY = os.environ.get("QWEN_API_KEY", "")
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen-turbo")
+QWEN_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+# GLM (Zhipu / Z.AI) — the LAST-RESORT fallback since 13 Nov 2026:
+# GLM-4.7-Flash is FREE ($0 input/output) but rate-limited (~1
+# request/second) and can be slow, so it only runs after every other
+# provider failed. OpenAI-compatible via https://api.z.ai/api/paas/v4/.
+# The key is a Render env var, never in code.
+GLM_API_KEY = os.environ.get("GLM_API_KEY", "")
+GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4.7-flash")
+GLM_URL = "https://api.z.ai/api/paas/v4"
 # Google Cloud Text-to-Speech (voice replies). The API key comes from a
 # Google Cloud project with the Cloud Text-to-Speech API enabled and
 # billing on; the AI Studio (Gemini) key does NOT work for it.
@@ -2164,14 +2182,14 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
 
 
 # -------------------------------------------------------- OpenAI ------
-# ChatGPT is the third AI (13 Nov 2026): the Gemini free-tier key
+# ChatGPT is the fourth AI (13 Nov 2026): the Gemini free-tier key
 # kept hitting its per-minute limit, so when OPENAI_API_KEY is set
 # the bot classifies, transcribes and reads pictures with OpenAI
 # instead. The three functions mirror the Gemini ones exactly (same
 # inputs, same outputs, same retry shape), and the ai_* wrappers
-# below pick DeepSeek first, Groq second, OpenAI third, Gemini
-# fourth — so with no DeepSeek, Groq or OpenAI key the bot behaves
-# exactly as before.
+# below pick DeepSeek first, Qwen second, Groq third, OpenAI fourth,
+# Gemini fifth, GLM last — so with no DeepSeek, Qwen, Groq or OpenAI
+# key the bot behaves exactly as before.
 
 async def _openai_post(path: str, headers=None, json=None, data=None,
                        files=None) -> dict:
@@ -2388,6 +2406,110 @@ async def deepseek_generate(prompt: str, system: str = None) -> str:
         return ""
 
 
+# ------------------------------------------------------------ Qwen ------
+# Qwen-Turbo (Alibaba international DashScope) mirrors the DeepSeek
+# provider exactly (same inputs, same outputs, same retry shape),
+# with Qwen's base URL and its own key/model env vars.
+
+async def _qwen_post(path: str, headers=None, json=None) -> dict:
+    """One POST to the Qwen API, with retries on rate limits
+    and server errors. Same shape as _groq_post (two retries,
+    after 5s then 15s; 500 joins 429/503). The client shape is
+    identical (timeout 120s, trust_env False)."""
+    url = QWEN_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning(
+                    "Qwen %s, retrying (attempt %d of 3)", status, attempt + 2
+                )
+                continue
+            raise
+
+
+def _qwen_headers() -> dict:
+    return {"Authorization": f"Bearer {QWEN_API_KEY}"}
+
+
+async def qwen_generate(prompt: str, system: str = None) -> str:
+    """One Qwen text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _qwen_post(
+        "/chat/completions",
+        headers=_qwen_headers(),
+        json={"model": QWEN_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+# ------------------------------------------------------------- GLM ------
+# GLM (Zhipu / Z.AI) mirrors the DeepSeek provider exactly (same
+# inputs, same outputs, same retry shape), with GLM's base URL and
+# its own key/model env vars. GLM-4.7-Flash is free but slow and
+# rate-limited (~1 request/second), so it is only the last resort
+# in ai_generate — never the first call.
+
+async def _glm_post(path: str, headers=None, json=None) -> dict:
+    """One POST to the GLM API, with retries on rate limits
+    and server errors. Same shape as _groq_post (two retries,
+    after 5s then 15s; 500 joins 429/503). The client shape is
+    identical (timeout 120s, trust_env False)."""
+    url = GLM_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning(
+                    "GLM %s, retrying (attempt %d of 3)", status, attempt + 2
+                )
+                continue
+            raise
+
+
+def _glm_headers() -> dict:
+    return {"Authorization": f"Bearer {GLM_API_KEY}"}
+
+
+async def glm_generate(prompt: str, system: str = None) -> str:
+    """One GLM text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _glm_post(
+        "/chat/completions",
+        headers=_glm_headers(),
+        json={"model": GLM_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 def _log_ai_failure(message: str, exc) -> None:
     """Log an AI-provider failure: message + HTTP status only.
 
@@ -2406,29 +2528,112 @@ def _log_ai_failure(message: str, exc) -> None:
 
 async def ai_generate(prompt: str, system: str = None) -> str:
     """Text from the AI: DeepSeek when DEEPSEEK_API_KEY is set, else
-    Groq when GROQ_API_KEY is set, else ChatGPT when OPENAI_API_KEY
-    is set, else Gemini. Every caller uses this, so the provider
-    switch is one env var and the fallback is automatic. A provider
-    that raises after its own retries falls through to the next one;
-    only when every configured provider failed does the error reach
-    the caller (extract_intent then answers from local_intent
-    instead of going silent)."""
+    Qwen when QWEN_API_KEY is set, else Groq when GROQ_API_KEY is
+    set, else ChatGPT when OPENAI_API_KEY is set, else Gemini, else
+    GLM when GLM_API_KEY is set (free last resort — slow and
+    rate-limited, so it only runs when every other provider failed).
+    Every caller uses this, so the provider switch is one env var
+    and the fallback is automatic. A provider that raises after its
+    own retries falls through to the next one; only when every
+    configured provider failed does the error reach the caller
+    (extract_intent then answers from local_intent instead of going
+    silent). The last provider's error is re-raised — never retried
+    — so a total failure fails once, not twice."""
+    last_exc = None
     if DEEPSEEK_API_KEY:
         try:
             return await deepseek_generate(prompt, system=system)
         except Exception as exc:
             _log_ai_failure("DeepSeek generate failed, trying next provider", exc)
+            last_exc = exc
+    if QWEN_API_KEY:
+        try:
+            return await qwen_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("Qwen generate failed, trying next provider", exc)
+            last_exc = exc
     if GROQ_API_KEY:
         try:
             return await groq_generate(prompt, system=system)
         except Exception as exc:
             _log_ai_failure("Groq generate failed, trying next provider", exc)
+            last_exc = exc
     if OPENAI_API_KEY:
         try:
             return await openai_generate(prompt, system=system)
         except Exception as exc:
             _log_ai_failure("OpenAI generate failed, trying next provider", exc)
+            last_exc = exc
+    if GEMINI_API_KEY:
+        try:
+            return await gemini_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("Gemini generate failed, trying next provider", exc)
+            last_exc = exc
+    if GLM_API_KEY:
+        try:
+            return await glm_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("GLM generate failed, trying next provider", exc)
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    # No provider configured at all: let Gemini raise so the caller
+    # falls back to local rules instead of going silent.
     return await gemini_generate(prompt, system=system)
+
+
+# ------------------------------------------- Amharic translate-bridge ---
+# Amharic messages are translated to English by Gemini first, the
+# whole flow runs in English, and prose replies are translated back
+# to Amharic before sending (see reply_message). Owner, 13 Nov 2026:
+# DeepSeek/Qwen/Groq have unproven Amharic, but Gemini is strong on
+# it, so Gemini does the translating while the main AI does the
+# thinking. Links, numbers, service IDs, prices and service names
+# are never translated — the prompts say so, and Confirm cards,
+# buttons and post-acceptance summaries never pass through the
+# bridge at all. If either translation call fails, the original
+# text is used instead — the bot never goes silent and never drops
+# an order over a translation failure.
+_BRIDGE_AMHARIC = contextvars.ContextVar("paxyo_bridge_amharic", default=False)
+
+BRIDGE_TO_ENGLISH_PROMPT = (
+    "Translate this Amharic message to English. Keep links, numbers, "
+    "service IDs and prices exactly as they are. Reply with only the "
+    "translation."
+)
+BRIDGE_TO_AMHARIC_PROMPT = (
+    "Translate this reply to Amharic. Keep links, numbers, service "
+    "IDs, prices and service names exactly as they are. Reply with "
+    "only the translation."
+)
+
+
+async def translate_to_english(text: str) -> str:
+    """Amharic -> English via Gemini. Returns "" on any failure
+    (no key, 429, empty reply) — the caller then uses the original
+    Amharic text instead."""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        result = await gemini_generate(BRIDGE_TO_ENGLISH_PROMPT + "\n\n" + text)
+    except Exception as exc:
+        _log_ai_failure("Amharic bridge translate to English failed", exc)
+        return ""
+    return (result or "").strip()
+
+
+async def translate_to_amharic(text: str) -> str:
+    """English -> Amharic via Gemini. Returns "" on any failure —
+    the caller then sends the English reply as-is."""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        result = await gemini_generate(BRIDGE_TO_AMHARIC_PROMPT + "\n\n" + text)
+    except Exception as exc:
+        _log_ai_failure("Amharic bridge translate to Amharic failed", exc)
+        return ""
+    return (result or "").strip()
 
 
 async def ai_transcribe(audio_bytes: bytes) -> str:
@@ -2655,8 +2860,8 @@ def local_intent(text: str) -> dict:
 
 
 async def extract_intent(text: str, user_id: int = None) -> dict:
-    """Ask the AI (Groq when configured, else ChatGPT, else Gemini)
-    to classify the message and extract the order intent.
+    """Ask the AI (DeepSeek, then Qwen, Groq, ChatGPT, Gemini, GLM —
+    see ai_generate) to classify the message and extract the order intent.
 
     The text is normalised first (typos/slang fixed, URLs kept
     verbatim), so "let me deposit 10 br by teleirr" still classifies
@@ -2953,9 +3158,22 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
     keyboard (the Confirm card) is always text, because a voice message
     cannot carry buttons. Any voice failure falls back to text silently
     — the user always gets an answer.
+
+    Amharic translate-bridge: when this turn's message was bridged
+    (see handle_order_text), prose replies are translated back to
+    Amharic here before sending. Anything with buttons (Confirm
+    cards, keyboards) is never translated, and a failed translation
+    sends the English reply as-is. The English original is what
+    goes into the conversation history, so the AI keeps reading
+    English there.
     """
+    out_text, out_lang = text, lang
+    if reply_markup is None and _BRIDGE_AMHARIC.get():
+        _amharic = await translate_to_amharic(text)
+        if _amharic:
+            out_text, out_lang = _amharic, "am"
     if voice and reply_markup is None:
-        ogg = await speak_reply(text, lang)
+        ogg = await speak_reply(out_text, out_lang)
         if ogg:
             try:
                 await message.reply_voice(
@@ -2965,7 +3183,7 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
                 return
             except Exception as exc:
                 log.warning("reply_voice failed, falling back to text: %s", exc)
-    await message.reply_text(text, reply_markup=reply_markup)
+    await message.reply_text(out_text, reply_markup=reply_markup)
     _record_bot_reply(text)
 
 
@@ -6021,6 +6239,21 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # cleaned text. URLs are kept verbatim (case-sensitive links).
     text = normalize_text(text)
     lang = lang_of(text, user.language_code)
+    # Amharic translate-bridge (owner, 13 Nov 2026): a message in
+    # Ethiopic fidels is translated to English by Gemini first, so
+    # the whole flow below runs in English and the main AI never has
+    # to guess Amharic. Prose replies are translated back before
+    # sending (see reply_message). Only Ethiopic text triggers it —
+    # English never touches the bridge. If translation fails or
+    # comes back unchanged, the original Amharic text is used and
+    # the local Amharic handling (round-7 metric words, Amharic
+    # templates) applies untouched.
+    if is_amharic(text):
+        _english = await translate_to_english(text)
+        if _english and _english.strip() != text.strip():
+            text = _english
+            lang = "en"
+            _BRIDGE_AMHARIC.set(True)
     # Conversation memory: remember who is speaking and what they
     # said, so the bot's first reply of this turn is recorded.
     _CURRENT_USER_ID.set(user.id)
