@@ -141,17 +141,42 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/{model}:genera
 
 # ------------------------------------------------------- Gemini prompt ----
 # Default system prompt for the order assistant. The owner may replace this
-# text with their own Amharic prompt; the behaviour contract is: extract
-# the order intent as JSON, never place an order, never discuss the
-# provider or Paxyo's costs, keep replies short.
+# text with their own Amharic prompt; the behaviour contract is: classify
+# what the user wants as JSON, and for orders extract the order fields.
+# Never place an order, never discuss the provider or Paxyo's costs, keep
+# replies short. (13 Nov 2026: extended from order-only extraction to
+# full intent classification, because the owner found the bot "very dumb"
+# — it answered "I did not understand" to balance, order-history,
+# greeting and "I don't want to" messages.)
 SYSTEM_PROMPT = """You are the Paxyo order assistant on Telegram. The user writes in
-Amharic or English, by text or by voice transcription. Your job is only to
-understand what service they want to order and to extract the intent as JSON.
+Amharic or English, by text or by voice transcription. You are a smart,
+friendly customer-support assistant for Paxyo: you understand normal
+human talk, answer questions about Paxyo, and help the user place
+orders. Your job is to classify what the user wants and, for orders,
+extract the intent as JSON.
 
 Rules:
 - Reply with JSON only, no extra text, no markdown fences.
-- JSON shape: {"platform": "...", "service_hint": "...", "link": "...",
-  "quantity": 123}
+- JSON shape: {"intent": "...", "platform": "...", "service_hint": "...",
+  "link": "...", "quantity": 123}
+- intent: one of:
+  - "order": the user wants to order a service (followers, likes, views,
+    members...). Fill platform / service_hint / link / quantity when
+    given; use null for anything not given.
+  - "balance": the user asks for their balance ("how much is my
+    balance", "check my balance").
+  - "orders": the user asks about their orders, order history or order
+    status ("where is my order", "check my order history").
+  - "deposit": the user asks how to deposit or pay ("how do I add money").
+  - "help": the user asks for help or how the bot works.
+  - "greeting": a greeting or small talk ("hello", "ሰላም").
+  - "paxyo_info": a question about Paxyo itself — what it is, what
+    services it has, prices, how it works, delivery times, support.
+  - "cancel": the user does not want to continue, wants to stop or
+    cancel ("I don't want to", "cancel", "never mind").
+  - "off_topic": anything unrelated to Paxyo or ordering (the weather,
+    football, jokes, other apps...).
+  - "unclear": you cannot tell what the user wants.
 - platform: one of instagram, tiktok, telegram, youtube, facebook, x
   (twitter). Use null when the user did not name a platform.
 - service_hint: a short phrase for the service, e.g. "followers", "likes",
@@ -161,8 +186,28 @@ Rules:
 - quantity: a whole number, or null when the user did not give one.
 - Never place an order, never confirm an order, never quote a price.
 - Never mention the provider, GodOfPanel, costs, or how Paxyo buys services.
-- If the message is not an order at all, return {"platform": null,
-  "service_hint": null, "link": null, "quantity": null}.
+- For a message that is not an order, still classify the intent; do not
+  return "order" with empty fields.
+"""
+
+# ------------------------------------------------------- Paxyo knowledge --
+# Short facts about Paxyo, given to Gemini as context when the user asks
+# a question about Paxyo itself (paxyo_info intent). The bot answers from
+# these facts only — it never invents prices, delivery times or features,
+# and never mentions the provider or Paxyo's costs.
+PAXYO_KNOWLEDGE = """Facts about Paxyo:
+- Paxyo (paxyo.et) is a social media services panel in Ethiopia.
+- Customers order Instagram, TikTok, Telegram, YouTube, Facebook and X
+  followers, likes, views and members.
+- Prices are in ETB per 1000 and are shown before the user confirms.
+- The customer pays from their Paxyo balance; they deposit at paxyo.et
+  with Telebirr or CBE Birr through Chapa.
+- The bot picks the fastest available service for the order automatically
+  and shows the estimated total before confirming.
+- The average delivery time of the picked service is shown before
+  confirming; exact delivery time depends on the service.
+- An order is placed only after the customer taps Confirm.
+- Support: this bot, or paxyo.et.
 """
 
 # ------------------------------------------------------ voice style ------
@@ -290,6 +335,24 @@ TEXT = {
     "cancelled": {
         "am": "Order ተሰርዟል።",
         "en": "Order cancelled.",
+    },
+    "deposit": {
+        "am": (
+            "Deposit ለማድረግ paxyo.et ይክፈቱ → Deposit ይምረጡ → Telebirr ወይም "
+            "CBE Birr በChapa ይክፈሉ። ከከፈሉ በኋላ balance ወዲያው ይጨምራል።"
+        ),
+        "en": (
+            "To deposit, open paxyo.et → Deposit → pay with Telebirr or "
+            "CBE Birr through Chapa. Your balance is credited after payment."
+        ),
+    },
+    "off_topic": {
+        "am": "እኔ የPaxyo order bot ነኝ — በPaxyo order ላይ ብቻ እረዳለሁ። ምን ማዘዝ ይፈልጋሉ?",
+        "en": "I'm the Paxyo order bot — I can only help with Paxyo orders. What would you like to order?",
+    },
+    "paxyo_info_fallback": {
+        "am": "Paxyo የsocial media service ነው — followers, likes, views በpaxyo.et ይገኛሉ። ምን ማዘዝ ይፈልጋሉ?",
+        "en": "Paxyo is a social media services panel — followers, likes and views at paxyo.et. What would you like to order?",
     },
     "no_orders": {
         "am": "ገና order የለዎትም።",
@@ -580,17 +643,57 @@ async def gemini_transcribe(audio_bytes: bytes) -> str:
 
 
 async def extract_intent(text: str) -> dict:
-    """Ask Gemini to extract the order intent from user text."""
+    """Ask Gemini to classify the message and extract the order intent.
+
+    Returns {"intent": ..., "platform": ..., "service_hint": ...,
+    "link": ..., "quantity": ...}. intent is one of order, balance,
+    orders, deposit, help, greeting, paxyo_info, cancel, off_topic,
+    unclear — or None when the model output had no usable JSON.
+    """
     reply = await gemini_generate(text, system=SYSTEM_PROMPT)
     intent = extract_json(reply)
     if intent is None:
-        return {"platform": None, "service_hint": None, "link": None, "quantity": None}
+        return {
+            "intent": None,
+            "platform": None,
+            "service_hint": None,
+            "link": None,
+            "quantity": None,
+        }
     return {
+        "intent": intent.get("intent"),
         "platform": intent.get("platform"),
         "service_hint": intent.get("service_hint"),
         "link": intent.get("link"),
         "quantity": intent.get("quantity"),
     }
+
+
+async def answer_paxyo_question(text: str, lang: str) -> str:
+    """Answer a question about Paxyo itself (paxyo_info intent).
+
+    Gemini answers from PAXYO_KNOWLEDGE only, in the user's language,
+    in 1-3 short sentences. Falls back to a short canned line when the
+    model gives nothing usable. Never mentions the provider or costs.
+    """
+    system = (
+        PAXYO_KNOWLEDGE
+        + "\nAnswer the user's question using only these facts, in "
+        + ("Amharic (Ethiopic fidels mixed with English) — " if lang == "am"
+           else "English — ")
+        + "1-3 short sentences. If the question is about something outside "
+        "Paxyo, answer in one short line steering back to ordering. "
+        "Never mention the provider, GodOfPanel, costs, or how Paxyo buys "
+        "services. Never quote a price; say prices are shown in ETB per "
+        "1000 before confirming."
+    )
+    try:
+        reply = await gemini_generate(text, system=system)
+    except Exception as exc:
+        log.warning("paxyo_info answer failed: %s", exc)
+        return t("paxyo_info_fallback", lang)
+    answer = (reply or "").strip()
+    return answer if answer else t("paxyo_info_fallback", lang)
 
 
 # ------------------------------------------------------- voice replies ----
@@ -704,6 +807,15 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
 paxyo = None
 PENDING = {}  # confirm_id -> {user_id, service, link, quantity, total}
 LAST_ORDER = {}  # telegram_id -> order_id
+# Multi-turn order state: telegram_id -> {"platform", "service_hint",
+# "link", "quantity"} of the order being built. The bot asks for one
+# missing piece at a time (platform -> link -> quantity); what the user
+# already gave is remembered here, so a bare "2000" after a link, or a
+# bare link after a service, completes the order instead of the bot
+# answering "I did not understand". Cleared when the Confirm card is
+# created (the order then lives in PENDING), when the user cancels, or
+# when a different platform starts a new order.
+PARTIAL = {}  # telegram_id -> {"platform", "service_hint", "link", "quantity"}
 
 
 def confirm_keyboard(confirm_id: str) -> InlineKeyboardMarkup:
@@ -731,41 +843,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(t("greeting", lang))
 
 
+async def balance_text(user_id: int, lang: str) -> str:
+    """Balance line for a user. Shared by /balance and the balance
+    intent, so both answer the same way."""
+    try:
+        data = await paxyo.balance(user_id)
+    except Exception as exc:
+        log.warning("balance failed: %s", exc)
+        return t("not_understood", lang)
+    if not data.get("found"):
+        return t("greeting", lang)
+    return t("balance", lang, balance=format_money(data.get("balance", 0)))
+
+
+async def last_order_status_text(user_id: int, lang: str) -> str:
+    """Status line for the user's last order (tracked in memory).
+    Shared by /orders and the orders intent."""
+    order_id = LAST_ORDER.get(user_id)
+    if not order_id:
+        return t("no_orders", lang)
+    try:
+        data = await paxyo.order_status(order_id, user_id)
+    except Exception as exc:
+        log.warning("order_status failed: %s", exc)
+        return t("not_understood", lang)
+    status = data.get("status") or data.get("order", {}).get("status", "?")
+    return t("order_ok", lang, order_id=order_id, status=status)
+
+
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     lang = lang_of("", user.language_code)
-    try:
-        data = await paxyo.balance(user.id)
-    except Exception as exc:
-        log.warning("balance failed: %s", exc)
-        await update.message.reply_text(t("not_understood", lang))
-        return
-    if not data.get("found"):
-        await update.message.reply_text(t("greeting", lang))
-        return
-    await update.message.reply_text(
-        t("balance", lang, balance=format_money(data.get("balance", 0)))
-    )
+    await update.message.reply_text(await balance_text(user.id, lang))
 
 
 async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Status of the user's last order (tracked in memory)."""
     user = update.effective_user
     lang = lang_of("", user.language_code)
-    order_id = LAST_ORDER.get(user.id)
-    if not order_id:
-        await update.message.reply_text(t("no_orders", lang))
-        return
-    try:
-        data = await paxyo.order_status(order_id, user.id)
-    except Exception as exc:
-        log.warning("order_status failed: %s", exc)
-        await update.message.reply_text(t("not_understood", lang))
-        return
-    status = data.get("status") or data.get("order", {}).get("status", "?")
-    await update.message.reply_text(
-        t("order_ok", lang, order_id=order_id, status=status)
-    )
+    await update.message.reply_text(await last_order_status_text(user.id, lang))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -891,6 +1007,15 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       confirmation must end with a readable text record of the order).
     - A bare acceptance ("yes", "confirm", "አዎ", ...) while an order
       is pending places that order — no new intent is extracted.
+    - Gemini first classifies the message (order, balance, orders,
+      deposit, help, greeting, paxyo_info, cancel, off_topic, unclear).
+      Conversational intents are answered before the order flow, so the
+      bot talks like customer support instead of only understanding
+      orders; off-topic talk is steered back to ordering in one line.
+    - Orders are built over several turns: what the user already gave
+      (platform, service, link, quantity) is remembered per user in
+      PARTIAL, so a bare "2000" after a link completes the order. A
+      different platform starts a new order; cancelling clears it.
     - Orders work in Amharic and English, by text and by voice.
     """
     user = update.effective_user
@@ -909,16 +1034,93 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # "not understood".
 
     intent = await extract_intent(text)
+    intent_type = (intent.get("intent") or "unclear").strip().lower()
 
-    if not intent.get("platform") and not intent.get("service_hint"):
+    # --- conversational intents: answered before the order flow ---
+    if intent_type == "cancel":
+        # "I don't want to" / "cancel": drop any pending order and any
+        # order being built, and say so.
+        confirm_id, pending = pending_for_user(user.id)
+        if pending is not None:
+            PENDING.pop(confirm_id, None)
+        PARTIAL.pop(user.id, None)
+        await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+        return
+    if intent_type == "balance":
+        await reply_message(
+            update.message, await balance_text(user.id, lang), lang, voice=voice
+        )
+        return
+    if intent_type == "orders":
+        await reply_message(
+            update.message, await last_order_status_text(user.id, lang),
+            lang, voice=voice,
+        )
+        return
+    if intent_type == "deposit":
+        await reply_message(update.message, t("deposit", lang), lang, voice=voice)
+        return
+    if intent_type == "help":
+        await reply_message(update.message, t("help", lang), lang, voice=voice)
+        return
+    if intent_type == "greeting":
+        await reply_message(update.message, t("greeting", lang), lang, voice=voice)
+        return
+    if intent_type == "paxyo_info":
+        await reply_message(
+            update.message, await answer_paxyo_question(text, lang),
+            lang, voice=voice,
+        )
+        return
+    if intent_type == "off_topic":
+        # One short polite line steering back to ordering — never
+        # preachy, never long, never a lecture about the topic itself.
+        await reply_message(update.message, t("off_topic", lang), lang, voice=voice)
+        return
+
+    # --- order flow: multi-turn state ---
+    # What the user already gave is remembered per user in PARTIAL, so a
+    # bare "2000" after a link, or a bare link after a service, completes
+    # the order instead of "I did not understand". A message naming a
+    # different platform starts a new order and drops the stored pieces.
+    stored = PARTIAL.get(user.id) or {}
+    new_platform = (intent.get("platform") or "").strip().lower()
+    stored_platform = (stored.get("platform") or "").strip().lower()
+    if new_platform and stored_platform and new_platform != stored_platform:
+        stored = {}
+    merged = {}
+    for key in ("platform", "service_hint", "link", "quantity"):
+        value = intent.get(key)
+        merged[key] = value if value is not None else stored.get(key)
+
+    # Nothing to work with at all: not understood. (A bare number or a
+    # bare link with no context still counts as something: it is stored
+    # and the bot asks for the next missing piece below.)
+    if (
+        intent_type != "order"
+        and not merged.get("platform")
+        and not merged.get("service_hint")
+        and not merged.get("link")
+        and not merged.get("quantity")
+    ):
         await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
         return
-    if not intent.get("link"):
+    if not merged.get("platform") and not merged.get("service_hint"):
+        PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
+        return
+    if not merged.get("link"):
+        PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
         return
-    if not intent.get("quantity"):
+    if not merged.get("quantity"):
+        PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_quantity", lang), lang, voice=voice)
         return
+
+    # Complete order: remember it while the services are fetched, then
+    # move it to PENDING with the Confirm card.
+    PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
 
     try:
         services = await paxyo.services()
@@ -928,14 +1130,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     picks = pick_services(
-        services, platform=intent.get("platform"), service_hint=intent.get("service_hint")
+        services, platform=merged.get("platform"), service_hint=merged.get("service_hint")
     )
     if not picks:
         await reply_message(update.message, t("no_service", lang), lang, voice=voice)
         return
 
     service = picks[0]
-    error = validate_quantity(intent.get("quantity"), service)
+    error = validate_quantity(merged.get("quantity"), service)
     if error:
         await reply_message(
             update.message,
@@ -950,16 +1152,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
-    quantity = int(intent["quantity"])
+    quantity = int(merged["quantity"])
     rate = float(service.get("rate_etb_per_1000", 0))
     total = estimated_total_etb(rate, quantity)
     avg = service.get("average_time") or "—"
 
     confirm_id = uuid.uuid4().hex[:12]
+    PARTIAL.pop(user.id, None)  # the order now lives in PENDING
     PENDING[confirm_id] = {
         "user_id": user.id,
         "service": service,
-        "link": intent["link"],
+        "link": merged["link"],
         "quantity": quantity,
         "total": total,
     }
