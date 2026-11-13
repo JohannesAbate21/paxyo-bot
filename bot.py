@@ -3,7 +3,8 @@
 
 Users order Paxyo social-media services by text/chat or by voice message,
 in Amharic or English. The bot talks to the Paxyo Bot API on paxyo.et and
-uses Gemini to understand what the user wants.
+uses ChatGPT (OpenAI) to understand what the user wants, falling back to
+Gemini when no OpenAI key is set.
 
 Money rules (hard):
   - The AI only listens and talks. All totals are computed server-side by
@@ -81,6 +82,16 @@ PAXYO_API_BASE = os.environ.get("PAXYO_API_BASE", "https://paxyo.et/api/bot").rs
 BOT_API_SECRET = os.environ.get("BOT_API_SECRET", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# OpenAI (ChatGPT) — the primary AI since 13 Nov 2026: the Gemini
+# free-tier key kept hitting its per-minute limit (429), so when
+# OPENAI_API_KEY is set the bot classifies, transcribes and reads
+# pictures with OpenAI instead, and only falls back to Gemini when
+# no OpenAI key is set. The key is a Render env var, never in code.
+# gpt-4o-mini retires 2027-01-14; the model is an env var on
+# purpose, so the switch is one setting, not a code change.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_URL = "https://api.openai.com/v1"
 # Google Cloud Text-to-Speech (voice replies). The API key comes from a
 # Google Cloud project with the Cloud Text-to-Speech API enabled and
 # billing on; the AI Studio (Gemini) key does NOT work for it.
@@ -828,6 +839,41 @@ TEXT = {
         "am": "Order እየገነቡ ነው — {given} አለኝ።",
         "en": "You're still building an order — I have {given} so far.",
     },
+    # Answers for questions about the order being built ("how fast
+    # can you deliver it?", "wouldn't it drop?") — from the stored
+    # service, instead of asking for the link again (13 Nov 2026).
+    "pending_speed": {
+        "am": "{service} በአብዛኛው በ {avg} ውስጥ ይጀምራል። Link ይላኩልኝ — orderዎን አረጋግጣለሁ።",
+        "en": "{service} usually starts within {avg}. Send the link and I'll confirm your order.",
+    },
+    "pending_speed_unknown": {
+        "am": "{service} — እስካሁን የመላኪያ ሰዓት የለኝም። Link ይላኩልኝ — orderዎን አረጋግጣለሁ።",
+        "en": "{service} — I don't have a delivery time for it yet. Send the link and I'll confirm your order.",
+    },
+    "pending_drop": {
+        "am": "{service}: {refill} Link ይላኩልኝ — orderዎን አረጋግጣለሁ።",
+        "en": "{service}: {refill} Send the link and I'll confirm your order.",
+    },
+    "pending_no_refill": {
+        "am": "refill የለውም — ቁጥር ከቀነሰ አይሞላም።",
+        "en": "it has no refill — if numbers drop they are not topped up.",
+    },
+    "pending_has_refill": {
+        "am": "refill አለው።",
+        "en": "it includes a refill.",
+    },
+    "pending_refill_unknown": {
+        "am": "ስለ refill ምንም ማስታወሻ አላየሁም።",
+        "en": "I don't see a refill note on this service.",
+    },
+    # The fastest services are different kinds (views vs likes vs
+    # comments) and no metric was named: ask which kind, instead of
+    # silently picking the wrong one (13 Nov 2026 — a views order
+    # got Tiktok Comment Likes).
+    "ask_metric_choose": {
+        "am": "የትኛውን ይፈልጋሉ — {metrics}? የሚፈልጉትን ይምረጡ።",
+        "en": "Which one do you want — {metrics}? Reply with the one you want.",
+    },
     "budget_ask": {
         "am": "ምን ያህል ገንዘብ አሎት? (ለምሳሌ 500 ETB)",
         "en": "How much money do you have? (for example 500 ETB)",
@@ -1119,7 +1165,10 @@ def normalize_text(text: str) -> str:
     URL tokens are left exactly as written — a TikTok short link is
     case-sensitive, so lowercasing the whole message would break it.
     Everything else is lowercased and run through TYPO_MAP word by
-    word (punctuation around a word is kept)."""
+    word (punctuation around a word is kept). Chat shorthand for
+    quantities is expanded too: "1k" -> "1000", "2.5k" -> "2500",
+    "1m" -> "1000000". The expansion needs leading digits, so
+    ordinary words ("ok") are untouched."""
     out = []
     for token in (text or "").split():
         if "://" in token or token.lower().startswith("www."):
@@ -1132,7 +1181,14 @@ def normalize_text(text: str) -> str:
         while core and core[-1] in ".,!?;:\"'()[]{}":
             trail = core[-1] + trail
             core = core[:-1]
-        out.append(lead + TYPO_MAP.get(core.lower(), core.lower()) + trail)
+        word = TYPO_MAP.get(core.lower(), core.lower())
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)([km])", word)
+        if match:
+            value = float(match.group(1)) * (
+                1000 if match.group(2) == "k" else 1000000
+            )
+            word = str(int(value))
+        out.append(lead + word + trail)
     return " ".join(out)
 
 
@@ -1172,6 +1228,38 @@ def parse_deposit_amount(text):
         except ValueError:
             continue
         if value > 0:
+            return value
+    return None
+
+
+def parse_money_amount(text):
+    """An ETB amount that carries a currency word (br / birr / etb)
+    next to it, or None. "1000 views" is a quantity, not money — a
+    budget needs the currency word, so "I want 1000 views for this
+    order now" is not a 1000 ETB budget, but "20 br" is. The word
+    must sit right before or right after the number ("20 br",
+    "br 20", "500birr"), punctuation stripped, so a currency word
+    belonging to another number ("1000 views for 20 br") does not
+    make the quantity look like money. Long digit runs (phone
+    numbers) are skipped, like parse_deposit_amount."""
+    if not text:
+        return None
+    s = str(text).lower()
+    for m in re.finditer(r"[\d,]+(?:\.\d+)?", s):
+        num = m.group(0).replace(",", "")
+        if len(num.replace(".", "")) >= 9:
+            continue
+        try:
+            value = float(num)
+        except ValueError:
+            continue
+        if value <= 0:
+            continue
+        before = re.findall(r"[a-z]+", s[max(0, m.start() - 8):m.start()])
+        after = re.findall(r"[a-z]+", s[m.end():m.end() + 8])
+        if (before and before[-1] in ("br", "birr", "etb")) or (
+            after and after[0] in ("br", "birr", "etb")
+        ):
             return value
     return None
 
@@ -1227,9 +1315,12 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
     Excludes blacklisted and inactive services. Services with no average
     time sort last. Returns at most `limit` services. A description
     hint ("cheapest instagram followers") is matched word by word
-    against the service name and category, so a description still
-    finds its service; "cheapest" ranks by price (lowest first)
-    instead of by time.
+    against the service name and category — EVERY word of the hint
+    must appear, so "tiktok views" never matches "TikTok Video Save"
+    or "Tiktok Comment Likes" just because they say "tiktok" (13 Nov
+    2026 — the bot offered saves and comment likes for a views
+    order). "cheapest" ranks by price (lowest first) instead of by
+    time.
     """
     wanted = (platform or "").strip().lower()
     hint = (service_hint or "").strip().lower()
@@ -1259,8 +1350,7 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
         if words:
             hay = name + " " + category
             if not all(w in hay for w in words):
-                if not any(w in hay for w in words):
-                    continue
+                continue
         candidates.append(s)
     if cheapest:
         candidates.sort(
@@ -1764,6 +1854,129 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
         return ""
 
 
+# -------------------------------------------------------- OpenAI ------
+# ChatGPT is the primary AI (13 Nov 2026): the Gemini free-tier key
+# kept hitting its per-minute limit, so when OPENAI_API_KEY is set
+# the bot classifies, transcribes and reads pictures with OpenAI
+# instead. The three functions mirror the Gemini ones exactly (same
+# inputs, same outputs, same retry shape), and the ai_* wrappers
+# below pick OpenAI first and Gemini second — so with no OpenAI key
+# the bot behaves exactly as before.
+
+async def _openai_post(path: str, headers=None, json=None, data=None,
+                       files=None) -> dict:
+    """One POST to the OpenAI API, with retries on rate limits and
+    server errors. Same shape as _gemini_post (two retries, after
+    5s then 15s; 500 joins 429/503 here because OpenAI returns it
+    for overloaded models). The client shape is identical (timeout
+    120s, trust_env False). `files` values are bytes, so a retried
+    multipart upload re-sends cleanly."""
+    url = OPENAI_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(
+                    url, headers=headers, json=json, data=data, files=files
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning("OpenAI %s, retrying (attempt %d of 3)", status, attempt + 2)
+                continue
+            raise
+
+
+def _openai_headers() -> dict:
+    return {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+
+async def openai_generate(prompt: str, system: str = None) -> str:
+    """One ChatGPT text call. Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _openai_post(
+        "/chat/completions",
+        headers=_openai_headers(),
+        json={"model": OPENAI_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+async def openai_transcribe(audio_bytes: bytes) -> str:
+    """Transcribe a Telegram voice message (.ogg) with Whisper."""
+    data = await _openai_post(
+        "/audio/transcriptions",
+        headers=_openai_headers(),
+        data={"model": "whisper-1"},
+        files={"file": ("voice.ogg", audio_bytes, "audio/ogg")},
+    )
+    return str(data.get("text") or "").strip()
+
+
+async def openai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
+    """Read a picture with ChatGPT vision. Returns the reply text
+    (may be empty). Telegram photos are JPEG, sent as a base64 data
+    URI — the same picture bytes the Gemini call used to get."""
+    data = await _openai_post(
+        "/chat/completions",
+        headers=_openai_headers(),
+        json={
+            "model": OPENAI_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/jpeg;base64,"
+                                   + base64.b64encode(image_bytes).decode(),
+                        },
+                    },
+                ],
+            }],
+        },
+    )
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+async def ai_generate(prompt: str, system: str = None) -> str:
+    """Text from the AI: ChatGPT when OPENAI_API_KEY is set, else
+    Gemini. Every caller uses this, so the provider switch is one
+    env var and the fallback is automatic."""
+    if OPENAI_API_KEY:
+        return await openai_generate(prompt, system=system)
+    return await gemini_generate(prompt, system=system)
+
+
+async def ai_transcribe(audio_bytes: bytes) -> str:
+    """Voice transcription: Whisper when OPENAI_API_KEY is set, else
+    Gemini."""
+    if OPENAI_API_KEY:
+        return await openai_transcribe(audio_bytes)
+    return await gemini_transcribe(audio_bytes)
+
+
+async def ai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
+    """Picture reading: ChatGPT vision when OPENAI_API_KEY is set,
+    else Gemini vision."""
+    if OPENAI_API_KEY:
+        return await openai_vision(image_bytes, prompt=prompt)
+    return await gemini_vision(image_bytes, prompt=prompt)
+
+
 def parse_vision_result(text: str):
     """Parse Gemini vision output into a dict, or None when it has no
     usable JSON. Unknown/missing "want" becomes "other"; "amount" is
@@ -1862,7 +2075,11 @@ def local_intent(text: str) -> dict:
             intent["quantity"] = value
             break
     intent["service_id"] = extract_service_id(text)
-    intent["amount"] = parse_deposit_amount(text)
+    # A budget amount is the currency-aware one when there is one:
+    # "10k for 500 birr" budgets 500, not 10000. Otherwise the first
+    # plausible number, as before.
+    money = parse_money_amount(s)
+    intent["amount"] = money if money is not None else parse_deposit_amount(s)
     intent["method"] = normalize_method(text)
     intent["phone"] = normalize_phone(text)
     interval = parse_interval_minutes(text)
@@ -1920,10 +2137,25 @@ def local_intent(text: str) -> dict:
     elif "viral" in words:
         intent["intent"] = "goal"
     elif (
-        intent["amount"] is not None
-        and intent["quantity"] is not None
-        and "for" in words
+        money is not None
+        and (intent["platform"] or metric)
+        and ("how much" in s or "how many" in s or "can i" in s)
+        and "for" not in words
     ):
+        # "If I have 100 etb how much tiktok views can I order" —
+        # money they have, a platform/metric, a how-much question,
+        # and no "for <money>" budget phrasing: the bot
+        # reverse-calculates from the real balance.
+        intent["intent"] = "max_for_balance"
+    elif (
+        money is not None
+        and intent["quantity"] is not None
+        and ("for" in words or "how much" in s or "how many" in s)
+    ):
+        # A budget needs a currency word on the amount: "1000 views
+        # for this order" is a quantity, not 1000 ETB. "How much can
+        # 20 br get me" has the currency word and the how-much
+        # phrasing, so it is a budget even without "for".
         intent["intent"] = "budget"
     elif (
         links
@@ -1944,7 +2176,8 @@ def local_intent(text: str) -> dict:
 
 
 async def extract_intent(text: str) -> dict:
-    """Ask Gemini to classify the message and extract the order intent.
+    """Ask the AI (ChatGPT when configured, else Gemini) to classify
+    the message and extract the order intent.
 
     The text is normalised first (typos/slang fixed, URLs kept
     verbatim), so "let me deposit 10 br by teleirr" still classifies
@@ -1962,11 +2195,11 @@ async def extract_intent(text: str) -> dict:
     None when the model output had no usable JSON.
     """
     try:
-        reply = await gemini_generate(normalize_text(text), system=SYSTEM_PROMPT)
+        reply = await ai_generate(normalize_text(text), system=SYSTEM_PROMPT)
     except Exception:
         # The AI is unreachable (rate limit, outage). Answer from the
         # message itself instead of going silent — see local_intent.
-        log.warning("Gemini classify failed, using local fallback", exc_info=True)
+        log.warning("AI classify failed, using local fallback", exc_info=True)
         return local_intent(text)
     intent = extract_json(reply)
     if intent is None:
@@ -2067,7 +2300,7 @@ async def extract_intent(text: str) -> dict:
 async def answer_paxyo_question(text: str, lang: str) -> str:
     """Answer a question about Paxyo itself (paxyo_info intent).
 
-    Gemini answers from PAXYO_KNOWLEDGE only, in the user's language,
+    The AI answers from PAXYO_KNOWLEDGE only, in the user's language,
     in 1-3 short sentences. Falls back to a short canned line when the
     model gives nothing usable. Never mentions the provider or costs.
     """
@@ -2083,7 +2316,7 @@ async def answer_paxyo_question(text: str, lang: str) -> str:
         "prices are shown in ETB per 1000 before confirming."
     )
     try:
-        reply = await gemini_generate(text, system=system)
+        reply = await ai_generate(text, system=system)
     except Exception as exc:
         log.warning("paxyo_info answer failed: %s", exc)
         return t("paxyo_info_fallback", lang)
@@ -2251,6 +2484,34 @@ PENDING_BATCH = {}
 # "service_hint", "quantity", "count", "links": [...]}. Cleared when
 # the split is confirmed or the user cancels.
 SPLIT_DRAFT = {}
+# The budget options just shown: telegram_id -> {"platform",
+# "service_hint", "quantity", "options": [service, ...]} in the
+# order shown, so "first one" / "second one" / "1" / "2" picks the
+# shown service instead of starting a new order. Cleared when the
+# choice is used, when the order is confirmed, or on cancel.
+BUDGET_OPTIONS = {}
+# Telegram sometimes redelivers an update when the handler was slow
+# (13 Nov 2026: one message got two identical "send the link"
+# replies). Seen update_ids are remembered here, bounded so memory
+# stays flat; a redelivery is answered once. Updates without an id
+# (offline tests) are never treated as duplicates.
+SEEN_UPDATES = set()
+MAX_SEEN_UPDATES = 1000
+
+
+def _update_seen(update) -> bool:
+    """True when this Telegram update was already handled: the
+    caller skips it. Records the id otherwise. Returns False for
+    updates without an id."""
+    update_id = getattr(update, "update_id", None)
+    if update_id is None:
+        return False
+    if update_id in SEEN_UPDATES:
+        return True
+    if len(SEEN_UPDATES) >= MAX_SEEN_UPDATES:
+        SEEN_UPDATES.clear()
+    SEEN_UPDATES.add(update_id)
+    return False
 # A single deposit over this is refused in one line.
 MAX_DEPOSIT_ETB = 100000
 
@@ -2386,6 +2647,46 @@ def is_wait_question(text: str) -> bool:
     started yet (as opposed to asking for its status in general)."""
     s = " ".join((text or "").strip().lower().split())
     return any(p in s for p in WAIT_QUESTION_PATTERNS)
+
+
+# A question about the order being built, rather than new order
+# details: speed ("how fast can you deliver it?") or drops
+# ("wouldn't it drop?"). Answered from the stored service instead
+# of asking for the link again (13 Nov 2026 — both questions got
+# "Please send the link the order is for.").
+_PENDING_SPEED_PHRASES = (
+    "how fast", "how long", "how soon", "when will", "when does",
+    "when do", "deliver", "delivery", "how quickly",
+)
+_PENDING_DROP_PHRASES = (
+    "drop", "disappear", "refill", "fall off", "decrease", "go down",
+)
+
+
+def pending_order_question(text: str):
+    """'speed' / 'drop' / None: is this message a question about an
+    order being built? A question carries no link and no
+    quantity-like number, and is not a service choice ("use the
+    fastest one")."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return None
+    if extract_links(text):
+        return None
+    if "fastest" in s or "cheapest" in s or "use the" in s:
+        return None
+    for m in re.finditer(r"\d[\d,]*", s):
+        try:
+            value = int(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if 10 <= value <= 1000000 and value % 10 == 0:
+            return None
+    if any(p in s for p in _PENDING_DROP_PHRASES):
+        return "drop"
+    if any(p in s for p in _PENDING_SPEED_PHRASES):
+        return "speed"
+    return None
 
 
 def link_needs_warning(text: str, link: str) -> bool:
@@ -3129,7 +3430,7 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
 
 async def complete_order(message, user_id, merged, lang, voice=False,
                          named_service_id=None, last_service_id=None,
-                         note: str = None):
+                         note: str = None, ask_metric: bool = True):
     """Fetch services, pick/validate the service, show the Confirm card.
 
     The order being built stays in PARTIAL until the card is shown,
@@ -3142,7 +3443,12 @@ async def complete_order(message, user_id, merged, lang, voice=False,
     service for "order on that link again". A blacklisted service is
     never used, whichever path picked it. `note` is a one-line
     warning on the card (a quantity change, a doubled usual, a
-    risky link, a handle to double-check).
+    risky link, a handle to double-check). When no metric was named
+    and the fastest services are different kinds (views vs likes
+    vs comments), the bot asks which kind instead of silently
+    picking the wrong one — the order stays in PARTIAL, so the
+    answer completes it. `ask_metric=False` skips that question
+    (the "Use the fastest one" button: the user already chose).
     """
     PARTIAL[user_id] = {k: v for k, v in merged.items() if v is not None}
     try:
@@ -3195,6 +3501,29 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         if not picks:
             await reply_message(message, t("no_service", lang), lang, voice=voice)
             return False
+        if ask_metric and not merged.get("service_hint"):
+            # No metric was named and the fastest services are
+            # different kinds (views vs likes vs comments): ask
+            # which kind instead of silently picking the wrong one
+            # (13 Nov 2026 — a views order got Comment Likes).
+            # When the metric is known (a hint), the fastest pick
+            # still applies with no question.
+            metrics = []
+            for pick in picks:
+                hay = (
+                    str(pick.get("name") or "") + " "
+                    + str(pick.get("category") or "")
+                ).lower()
+                found = next((m for m in _METRICS if m in hay), None)
+                if found and found not in metrics:
+                    metrics.append(found)
+            if len(metrics) > 1:
+                await reply_message(
+                    message,
+                    t("ask_metric_choose", lang, metrics=", ".join(metrics)),
+                    lang, voice=voice,
+                )
+                return False
         service = picks[0]
     error = validate_quantity(merged.get("quantity"), service)
     if error:
@@ -3217,6 +3546,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
 
     confirm_id = uuid.uuid4().hex[:12]
     PARTIAL.pop(user_id, None)  # the order now lives in PENDING
+    BUDGET_OPTIONS.pop(user_id, None)  # a budget choice is spent now
     DEPOSIT_DRAFT.pop(user_id, None)  # a half-built deposit is stale now
     PENDING[confirm_id] = {
         "user_id": user_id,
@@ -3306,6 +3636,26 @@ async def handle_usual(update, text, intent, lang, voice=False):
     )
 
 
+_BUDGET_ORDINALS = {
+    "first": 0, "1st": 0, "1": 0,
+    "second": 1, "2nd": 1, "2": 1,
+    "third": 2, "3rd": 2, "3": 2,
+}
+
+
+def budget_choice_index(text: str):
+    """Index of the budget option the user picked ("first one",
+    "second one", "1", "2"), or None. Only the bare words match, so
+    "first one" picks option 0 but "first order" does not."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return None
+    for word, idx in _BUDGET_ORDINALS.items():
+        if s in (word, f"{word} one", f"the {word} one", f"{word} option"):
+            return idx
+    return None
+
+
 async def handle_budget_text(update, text, intent, lang, voice=False):
     """Budget-first ordering: '10k for 500 birr, what do I get?'
 
@@ -3361,6 +3711,12 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
             f"{format_money(s.get('rate_etb_per_1000', 0))} ETB per 1000"
             for s in options
         )
+        # Remember what was shown, in order, so "first one" /
+        # "second one" picks it instead of starting a new order.
+        BUDGET_OPTIONS[user.id] = {
+            "platform": platform, "service_hint": hint,
+            "quantity": None, "options": options,
+        }
         await reply_message(
             update.message,
             t("budget_no_quantity", lang, budget=format_money(budget),
@@ -3377,6 +3733,12 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
             f"{format_money(estimated_total_etb(float(s.get('rate_etb_per_1000', 0)), quantity))} ETB"
             for s in options
         )
+        # Remember what was shown, in order, so "first one" /
+        # "second one" picks it instead of starting a new order.
+        BUDGET_OPTIONS[user.id] = {
+            "platform": platform, "service_hint": hint,
+            "quantity": quantity, "options": options,
+        }
         await reply_message(
             update.message,
             t("budget_options", lang, quantity=quantity, metric=metric,
@@ -4133,6 +4495,29 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         intent = await extract_intent(text)
     intent_type = (intent.get("intent") or "unclear").strip().lower()
 
+    # "First one" / "second one" after a budget list: the user picked
+    # one of the options just shown. Resolve it to that service and
+    # ask for the link — the order continues from the picked service
+    # instead of the reply being misread as a new order.
+    if user.id in BUDGET_OPTIONS:
+        choice = budget_choice_index(text)
+        if choice is not None:
+            stored_options = BUDGET_OPTIONS.get(user.id) or {}
+            options = stored_options.get("options") or []
+            if 0 <= choice < len(options):
+                BUDGET_OPTIONS.pop(user.id, None)
+                service = options[choice]
+                merged = {
+                    "platform": stored_options.get("platform"),
+                    "service_hint": stored_options.get("service_hint"),
+                    "link": None,
+                    "quantity": stored_options.get("quantity"),
+                    "service_id": service.get("service"),
+                }
+                PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
+                await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
+                return
+
     # --- conversational intents: answered before the order flow ---
     if intent_type == "cancel":
         # "I don't want to" / "cancel": drop any pending order and any
@@ -4185,6 +4570,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 return
             PENDING.pop(confirm_id, None)
             PARTIAL.pop(user.id, None)
+            BUDGET_OPTIONS.pop(user.id, None)
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
             return
         # No pending order: the user may mean a repeating order.
@@ -4199,6 +4585,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         RECURRING_DRAFT.pop(user.id, None)
         DEPOSIT_DRAFT.pop(user.id, None)
         SPLIT_DRAFT.pop(user.id, None)
+        BUDGET_OPTIONS.pop(user.id, None)
         dep_id, _dep = pending_deposit_for_user(user.id)
         if dep_id is not None:
             PENDING_DEPOSIT.pop(dep_id, None)
@@ -4523,6 +4910,44 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
         return
+    # A question about the order being built ("how fast can you
+    # deliver it?", "wouldn't it drop?") is answered from the stored
+    # service instead of asking for the link again. Only when the
+    # order is actually waiting for its link and the message carries
+    # no new order details — the helper checks that. The partial
+    # stays open, so the next message still completes the order.
+    if not merged.get("link") and (stored.get("platform") or stored.get("service_hint")):
+        question = pending_order_question(text)
+        if question is not None:
+            try:
+                services = await paxyo.services()
+            except Exception as exc:
+                log.warning("pending-question services failed: %s", exc)
+                services = []
+            picks = pick_services(
+                services, platform=stored.get("platform"),
+                service_hint=stored.get("service_hint"),
+            ) if services else []
+            if picks:
+                service = picks[0]
+                name = clean_service_name(service.get("name"))
+                if question == "speed":
+                    avg = service.get("average_time")
+                    if parse_average_time(avg) is not None:
+                        answer = t("pending_speed", lang, service=name, avg=avg)
+                    else:
+                        answer = t("pending_speed_unknown", lang, service=name)
+                else:
+                    low = str(service.get("name") or "").lower()
+                    if "no refill" in low:
+                        refill = t("pending_no_refill", lang)
+                    elif "refill" in low:
+                        refill = t("pending_has_refill", lang)
+                    else:
+                        refill = t("pending_refill_unknown", lang)
+                    answer = t("pending_drop", lang, service=name, refill=refill)
+                await reply_message(update.message, answer, lang, voice=voice)
+                return
     if not merged.get("link"):
         PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
@@ -4554,16 +4979,20 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Text in -> text out, always. The bot never answers a text
     # message with a voice message (handle_order_text gets voice=False).
+    if _update_seen(update):
+        return
     await handle_order_text(update, context, update.message.text or "")
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _update_seen(update):
+        return
     user = update.effective_user
     lang = lang_of("", user.language_code)
     try:
         voice_file = await update.message.voice.get_file()
         audio = bytes(await voice_file.download_as_bytearray())
-        text = await gemini_transcribe(audio)
+        text = await ai_transcribe(audio)
     except Exception as exc:
         log.warning("voice handling failed: %s", exc)
         await update.message.reply_text(t("transcribe_failed", lang))
@@ -4667,6 +5096,8 @@ async def route_photo_result(update, result: dict, lang: str):
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _update_seen(update):
+        return
     user = update.effective_user
     message = update.message
     # Language from the caption when there is one, else the
@@ -4693,9 +5124,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(t("photo_too_big", lang))
         return
     try:
-        raw = await gemini_vision(image)
+        raw = await ai_vision(image)
     except Exception as exc:
-        log.warning("gemini_vision failed: %s", exc)
+        log.warning("ai_vision failed: %s", exc)
         await message.reply_text(t("photo_unreadable", lang))
         return
     result = parse_vision_result(raw)
@@ -4706,6 +5137,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _update_seen(update):
+        return
     query = update.callback_query
     await query.answer()
     user = update.effective_user
@@ -4740,7 +5173,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         merged = dict(fallback["merged"])
         merged.pop("service_id", None)
-        await complete_order(query.message, user.id, merged, lang)
+        # The user already chose "the fastest one" — do not ask
+        # which metric; the fastest pick is what they tapped for.
+        await complete_order(query.message, user.id, merged, lang,
+                             ask_metric=False)
         return
 
     if action == "stoprec":

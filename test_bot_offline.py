@@ -4557,5 +4557,497 @@ class TestIntentPassthrough(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(intent["split"])
 
 
+TIKTOK_SERVICES = [
+    # William's live case (13 Nov 2026): asking for views got
+    # offered the Save service and the Comment Likes service.
+    {
+        "service": 2001, "name": "TikTok Video Views | Fast",
+        "category": "TikTok Video Views", "type": "Default",
+        "rate_etb_per_1000": 18.9, "min": 10, "max": 100000,
+        "average_time": "5 minutes", "active": True, "provider_service_id": 2001,
+    },
+    {
+        "service": 2002, "name": "TikTok Video Save | Cheap",
+        "category": "TikTok Video Save", "type": "Default",
+        "rate_etb_per_1000": 2.1, "min": 10, "max": 100000,
+        "average_time": "1 minute", "active": True, "provider_service_id": 2002,
+    },
+    {
+        "service": 2003, "name": "Tiktok Comment Likes | Fast",
+        "category": "Tiktok Comment Likes", "type": "Default",
+        "rate_etb_per_1000": 41.12, "min": 10, "max": 5000000,
+        "average_time": "1 minute", "active": True, "provider_service_id": 2003,
+    },
+]
+
+
+class TikTokPaxyo(FakePaxyo):
+    """FakePaxyo serving the TikTok fixture instead of SAMPLE_SERVICES."""
+
+    async def services(self):
+        return TIKTOK_SERVICES
+
+
+class OpenAIFlakyClient:
+    """Fake client for OpenAI calls: records posts, returns a queue
+    of responses/errors per post. Accepts the data/files kwargs the
+    transcription call uses."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.posts = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None, data=None,
+                   files=None, params=None):
+        self.posts.append(
+            {"url": url, "headers": headers, "json": json,
+             "data": data, "files": files}
+        )
+        result = self._results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class TestOpenAIProvider(unittest.IsolatedAsyncioTestCase):
+    """ChatGPT is the primary AI (13 Nov 2026); Gemini stays as the
+    fallback when no OpenAI key is set."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.openai.com/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    async def test_openai_generate_retries_429_then_succeeds(self):
+        client = OpenAIFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.openai_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer sk-test"
+        )
+        self.assertEqual(post["json"]["model"], "gpt-4o-mini")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_openai_generate_retries_500_then_succeeds(self):
+        # 500 is in the OpenAI retry set (it is not in Gemini's).
+        client = OpenAIFlakyClient(
+            [self._status_error(500), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.openai_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_openai_transcribe_posts_audio(self):
+        client = OpenAIFlakyClient(
+            [FakeCloudTTSResponse({"text": "hello"})]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"):
+            self.assertEqual(await bot.openai_transcribe(b"fake-ogg"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/audio/transcriptions"))
+        self.assertEqual(post["data"], {"model": "whisper-1"})
+        self.assertEqual(post["files"]["file"][0], "voice.ogg")
+        self.assertEqual(post["files"]["file"][1], b"fake-ogg")
+
+    async def test_openai_vision_posts_image_data_uri(self):
+        client = OpenAIFlakyClient(
+            [self._ok_response('{"want": "other"}')]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"):
+            self.assertEqual(
+                await bot.openai_vision(b"fake-jpeg"), '{"want": "other"}'
+            )
+        post = client.posts[0]
+        content = post["json"]["messages"][0]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": bot.VISION_PROMPT})
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertTrue(
+            content[1]["image_url"]["url"].startswith(
+                "data:image/jpeg;base64,"
+            )
+        )
+
+    async def test_ai_generate_uses_openai_when_key_set(self):
+        with mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="hi"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "hi")
+        gen.assert_awaited_once()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_gemini_without_key(self):
+        with mock.patch(
+            "bot.gemini_generate", new=mock.AsyncMock(return_value="g")
+        ) as gem, mock.patch(
+            "bot.openai_generate", new=mock.AsyncMock()
+        ) as gen:
+            self.assertEqual(await bot.ai_generate("hello"), "g")
+        gem.assert_awaited_once()
+        gen.assert_not_called()
+
+    async def test_ai_transcribe_and_vision_fall_back_without_key(self):
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(return_value="hi"),
+        ) as tr, mock.patch(
+            "bot.gemini_vision",
+            new=mock.AsyncMock(return_value="seen"),
+        ) as vi:
+            self.assertEqual(await bot.ai_transcribe(b"x"), "hi")
+            self.assertEqual(await bot.ai_vision(b"x"), "seen")
+        tr.assert_awaited_once()
+        vi.assert_awaited_once()
+
+    async def test_extract_intent_calls_ai_generate(self):
+        # The call site moved from gemini_generate to ai_generate.
+        payload = json.dumps({"intent": "balance"})
+        with mock.patch(
+            "bot.ai_generate", new=mock.AsyncMock(return_value=payload)
+        ):
+            result = await bot.extract_intent("How much is my balance")
+        self.assertEqual(result["intent"], "balance")
+
+
+class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
+    """The 13 Nov 2026 live-test fixes: hint matching, currency-aware
+    budgets, max-for-balance, 1k quantities, pending-order questions,
+    metric ambiguity, duplicate updates, budget ordinals."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+        ):
+            store.clear()
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+        ):
+            store.clear()
+
+    async def _send(self, text, intent, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _turns(self, turns, paxyo=None):
+        """Send several messages in sequence, sharing one FakeMessage
+        so text_sent accumulates; returns (msg, fake_paxyo)."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    # (a) hint matching: every word must match ----------------------
+
+    def test_pick_services_hint_requires_all_words(self):
+        # William's live case: "tiktok views" must not match the
+        # Save service or the Comment Likes service.
+        picks = bot.pick_services(
+            TIKTOK_SERVICES, platform="tiktok", service_hint="tiktok views"
+        )
+        self.assertEqual([s["service"] for s in picks], [2001])
+
+    async def test_budget_for_views_offers_only_views(self):
+        msg = await self._send(
+            "1000 tiktok views for 20 br",
+            intent_of("budget", amount=20, quantity=1000,
+                      platform="tiktok", service_hint="tiktok views"),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertNotIn("Video Save", msg.text_sent[0])
+        self.assertNotIn("Comment Likes", msg.text_sent[0])
+        self.assertIn("18.90", msg.text_sent[0])
+
+    # (b) currency-aware budgets ------------------------------------
+
+    def test_parse_money_amount_requires_currency_word(self):
+        self.assertEqual(
+            bot.parse_money_amount("How much can 20 br get me"), 20
+        )
+        self.assertEqual(bot.parse_money_amount("10k for 500 birr"), 500)
+        self.assertEqual(bot.parse_money_amount("deposit 1,000 birr"), 1000)
+        self.assertEqual(bot.parse_money_amount("br 20"), 20)
+        self.assertEqual(bot.parse_money_amount("20br"), 20)
+        self.assertIsNone(
+            bot.parse_money_amount("I want 1000 views for this order now")
+        )
+        self.assertIsNone(bot.parse_money_amount("order 1000 tiktok views"))
+
+    def test_local_intent_quantity_is_not_a_budget(self):
+        result = bot.local_intent("I want 1000 views for this order now")
+        self.assertEqual(result["intent"], "order")
+        self.assertEqual(result["quantity"], 1000)
+
+    def test_local_intent_budget_needs_currency_word(self):
+        result = bot.local_intent("How much can 20 br get me")
+        self.assertEqual(result["intent"], "budget")
+        self.assertEqual(result["amount"], 20)
+
+    def test_local_intent_budget_reads_the_money_not_the_quantity(self):
+        result = bot.local_intent("10k for 500 birr, what do I get?")
+        self.assertEqual(result["intent"], "budget")
+        self.assertEqual(result["amount"], 500)
+        self.assertEqual(result["quantity"], 10000)
+
+    # (c) max-for-balance -------------------------------------------
+
+    def test_local_intent_max_for_balance(self):
+        result = bot.local_intent(
+            "If I have 100 etb how much tiktok views can I order"
+        )
+        self.assertEqual(result["intent"], "max_for_balance")
+        self.assertEqual(result["platform"], "tiktok")
+        self.assertEqual(result["service_hint"], "tiktok views")
+
+    async def test_max_for_balance_flow_uses_views_service(self):
+        msg = await self._send(
+            "If I have 100 etb how much tiktok views can I order",
+            intent_of("max_for_balance", platform="tiktok",
+                      service_hint="tiktok views"),
+            paxyo=TikTokPaxyo(),
+        )
+        # Balance 1000 ETB buys 52910 of the 18.90/1000 views service.
+        self.assertIn("52910", msg.text_sent[0])
+        self.assertIn("tiktok views", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 52910)
+
+    # (d) k/m quantity shorthand ------------------------------------
+
+    def test_normalize_expands_k_and_m_suffixes(self):
+        self.assertEqual(
+            bot.normalize_text("I want 1k views"), "i want 1000 views"
+        )
+        self.assertEqual(
+            bot.normalize_text("order 2.5k tiktok views"),
+            "order 2500 tiktok views",
+        )
+        self.assertEqual(
+            bot.normalize_text("give me 1m views"), "give me 1000000 views"
+        )
+        self.assertEqual(bot.normalize_text("ok"), "ok")
+        self.assertEqual(
+            bot.normalize_text(
+                "order on https://vt.tiktok.com/ZSpQWTSmH/ 1k"
+            ),
+            "order on https://vt.tiktok.com/ZSpQWTSmH/ 1000",
+        )
+
+    def test_local_intent_reads_1k_as_1000(self):
+        result = bot.local_intent(
+            "I want 1k tiktok views https://vt.tiktok.com/ZSpQWTSmH/"
+        )
+        self.assertEqual(result["intent"], "order")
+        self.assertEqual(result["quantity"], 1000)
+        self.assertEqual(
+            result["link"], "https://vt.tiktok.com/ZSpQWTSmH/"
+        )
+
+    # (e) pending-order questions -----------------------------------
+
+    async def test_pending_speed_question_answered_not_swallowed(self):
+        msg, _ = await self._turns([
+            ("I want 1000 Instagram followers",
+             intent_of("order", platform="instagram",
+                       service_hint="followers", quantity=1000)),
+            ("Bro how fast can you deliver it", intent_of("unclear")),
+        ])
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link the order is for."
+        )
+        self.assertIn("Instagram Followers | Fast", msg.text_sent[1])
+        self.assertIn("12 minutes", msg.text_sent[1])
+        # The order is still being built: the link still completes it.
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "instagram")
+
+    async def test_pending_drop_question_answered(self):
+        msg, _ = await self._turns([
+            ("I want 1000 Instagram followers",
+             intent_of("order", platform="instagram",
+                       service_hint="followers", quantity=1000)),
+            ("Wouldn't it drop?", intent_of("unclear")),
+        ])
+        self.assertIn("Instagram Followers | Fast", msg.text_sent[1])
+        self.assertIn("refill", msg.text_sent[1].lower())
+
+    async def test_pending_question_ignores_new_details(self):
+        msg, _ = await self._turns([
+            ("I want 1000 Instagram followers",
+             intent_of("order", platform="instagram",
+                       service_hint="followers", quantity=1000)),
+            ("https://instagram.com/p/x how fast",
+             intent_of("order", link="https://instagram.com/p/x")),
+        ])
+        # The link was new information: the Confirm card appears,
+        # not a speed answer.
+        self.assertIn("Instagram Followers | Fast", msg.text_sent[1])
+        self.assertIsNotNone(msg.markups[1])
+
+    # (f) metric ambiguity ------------------------------------------
+
+    async def test_ambiguous_metric_asks_instead_of_picking(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Which one do you want", msg.text_sent[0])
+        self.assertIn("views", msg.text_sent[0])
+        self.assertIn("likes", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
+
+    async def test_metric_answer_completes_the_order(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            ("views",
+             intent_of("order", platform="tiktok", service_hint="views")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Which one do you want", msg.text_sent[0])
+        self.assertIn("TikTok Video Views | Fast (#2001)", msg.text_sent[1])
+        self.assertIsNotNone(msg.markups[1])
+
+    # (g) duplicate updates -----------------------------------------
+
+    async def test_duplicate_update_answered_once(self):
+        msg = FakeMessage("hi")
+        update1 = FakeUpdate(msg)
+        update1.update_id = 7
+        update2 = FakeUpdate(msg)
+        update2.update_id = 7
+        with mock.patch(
+            "bot.handle_order_text", new=mock.AsyncMock()
+        ) as handled:
+            await bot.on_text(update1, None)
+            await bot.on_text(update2, None)
+        self.assertEqual(handled.call_count, 1)
+
+    async def test_different_update_ids_both_handled(self):
+        msg = FakeMessage("hi")
+        update1 = FakeUpdate(msg)
+        update1.update_id = 7
+        msg2 = FakeMessage("hi")
+        update2 = FakeUpdate(msg2)
+        update2.update_id = 8
+        with mock.patch(
+            "bot.handle_order_text", new=mock.AsyncMock()
+        ) as handled:
+            await bot.on_text(update1, None)
+            await bot.on_text(update2, None)
+        self.assertEqual(handled.call_count, 2)
+
+    def test_seen_updates_bounded(self):
+        for i in range(bot.MAX_SEEN_UPDATES + 50):
+            update = FakeUpdate(FakeMessage("hi"))
+            update.update_id = i
+            self.assertFalse(bot._update_seen(update))
+        self.assertLessEqual(len(bot.SEEN_UPDATES), bot.MAX_SEEN_UPDATES)
+
+    # (h) budget ordinals -------------------------------------------
+
+    async def test_first_one_selects_first_budget_option(self):
+        msg, _ = await self._turns([
+            ("1k for 500 birr, what do I get?",
+             intent_of("budget", amount=500, quantity=1000,
+                       platform="instagram", service_hint="followers")),
+            ("First one", intent_of("unclear")),
+            ("https://instagram.com/p/x",
+             intent_of("order", link="https://instagram.com/p/x")),
+        ])
+        self.assertIn("Which one?", msg.text_sent[0])
+        self.assertEqual(
+            msg.text_sent[1], "Please send the link the order is for."
+        )
+        self.assertIn("Instagram Followers | Slow (#1002)", msg.text_sent[2])
+        self.assertIsNotNone(msg.markups[2])
+
+    async def test_second_one_selects_second_budget_option(self):
+        msg, _ = await self._turns([
+            ("1k for 500 birr, what do I get?",
+             intent_of("budget", amount=500, quantity=1000,
+                       platform="instagram", service_hint="followers")),
+            ("second one", intent_of("unclear")),
+            ("https://instagram.com/p/x",
+             intent_of("order", link="https://instagram.com/p/x")),
+        ])
+        self.assertIn("Which one?", msg.text_sent[0])
+        self.assertEqual(
+            msg.text_sent[1], "Please send the link the order is for."
+        )
+        self.assertIn("Instagram Followers | Fast (#1001)", msg.text_sent[2])
+
+    async def test_bare_number_picks_budget_option(self):
+        msg, _ = await self._turns([
+            ("1k for 500 birr, what do I get?",
+             intent_of("budget", amount=500, quantity=1000,
+                       platform="instagram", service_hint="followers")),
+            ("2", intent_of("unclear")),
+        ])
+        self.assertEqual(
+            msg.text_sent[1], "Please send the link the order is for."
+        )
+        self.assertEqual(bot.PARTIAL[1].get("service_id"), 1001)
+
+    async def test_first_one_without_budget_options_is_not_an_order(self):
+        msg = await self._send("First one", intent_of("unclear"))
+        self.assertIn("did not understand", msg.text_sent[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

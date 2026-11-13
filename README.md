@@ -4,8 +4,10 @@ Telegram bot that lets Paxyo customers order social-media services by
 chatting — text or voice message, in Amharic or English.
 
 - A user taps /start and their Paxyo account is created automatically.
-- They write what they want (or send a voice message). Gemini understands
-  the message and extracts the order intent as JSON.
+- They write what they want (or send a voice message). ChatGPT
+  understands the message and extracts the order intent as JSON
+  (Gemini is the fallback when no OpenAI key is set — see
+  "AI provider" below).
 - The bot searches the Paxyo catalogue, ranks services in the category by
   average time (fastest first), and shows the top pick with price and
   total, plus Confirm / Cancel buttons.
@@ -18,7 +20,7 @@ chatting — text or voice message, in Amharic or English.
 
 ```
 Telegram user --(text/voice)--> bot.py (webhook, free Render web service)
-    | Gemini: transcribe voice, extract intent JSON
+    | ChatGPT (or Gemini): transcribe voice, extract intent JSON
     v
 Paxyo Bot API on paxyo.et (https://paxyo.et/api/bot, X-Bot-Secret)
     | services / balance / create order / order status / create user
@@ -34,7 +36,8 @@ service min/max.
 
 ## Files
 
-- `bot.py` — the whole bot (handlers, Paxyo API client, Gemini client).
+- `bot.py` — the whole bot (handlers, Paxyo API client, OpenAI +
+  Gemini clients).
 - `requirements.txt` — python-telegram-bot 21+, httpx.
 - `render.yaml` — Render free web service definition (webhook mode).
 - `test_bot_offline.py` — offline self-test, no network, no real orders.
@@ -49,6 +52,8 @@ service min/max.
 | `BOT_API_SECRET` | From `config_secret.php` on the paxyo.et server. Read it in the DirectAdmin Terminal (`grep BOT_API_SECRET public_html/config_secret.php`) and paste the value into Render. Never put it in a file or in chat. |
 | `GEMINI_API_KEY` | Google AI Studio (aistudio.google.com) — "Get API key", create a key, paste it into Render. |
 | `GEMINI_MODEL` | `gemini-3.5-flash` (default). gemini-2.5-flash is retired for new users; gemini-3.8-flash returned 503 when tested. |
+| `OPENAI_API_KEY` | OpenAI (platform.openai.com) — create an API key, add $5 of credit, paste the key into Render. The bot uses it first; without it, it falls back to Gemini. |
+| `OPENAI_MODEL` | `gpt-4o-mini` (default). gpt-4o-mini retires 2027-01-14, so switch this to its replacement when OpenAI says so — no code change needed. |
 | `GOOGLE_CLOUD_TTS_API_KEY` | Google Cloud project (Cloud Text-to-Speech API enabled, billing on) — "Create API key", paste it into Render. The AI Studio (Gemini) key does NOT work for it. Until this is set, voice replies fall back to text. |
 | `GOOGLE_CLOUD_TTS_VOICE` | `am-ET-Wavenet-A` (default) — the Amharic voice. |
 | `GOOGLE_CLOUD_TTS_VOICE_EN` | `en-US-Wavenet-D` (default) — the English voice. |
@@ -56,6 +61,20 @@ service min/max.
 | `RENDER_EXTERNAL_URL` | Set by Render automatically — the service's public URL, e.g. `https://paxorder-bot.onrender.com`. The webhook URL is built from it. |
 | `WEBHOOK_URL` | Optional override for `RENDER_EXTERNAL_URL` (local testing behind ngrok, etc.). |
 | `WEBHOOK_PATH` | Optional secret path for Telegram updates. Defaults to the bot token itself (secret, so unguessable). |
+
+## AI provider (ChatGPT first, Gemini fallback)
+
+`ai_generate` / `ai_transcribe` / `ai_vision` in `bot.py` are the
+only AI entry points. When `OPENAI_API_KEY` is set they call OpenAI
+(`openai_generate` with the model from `OPENAI_MODEL`, default
+`gpt-4o-mini`; `openai_transcribe` with Whisper `whisper-1`;
+`openai_vision` with the same model and a base64 image data URI).
+When it is not set they call the existing `gemini_*` functions,
+which are unchanged. The OpenAI calls retry 429/500/503 twice
+(after 5s, then 15s), mirroring `_gemini_post`. **gpt-4o-mini
+retires 2027-01-14** — switch `OPENAI_MODEL` to its replacement
+then; no code change is needed. Cost: about $0.0004 per chat
+reply, so $5 of credit covers roughly 10,000 chats.
 
 ## Voice replies
 
@@ -251,8 +270,9 @@ balance-short pause, catch-up after sleep).
 
 ## Photos
 
-- A picture sent to the bot is read with Gemini vision
-  (`gemini_vision`, same model as text) and routed by what it shows:
+- A picture sent to the bot is read with ChatGPT vision
+  (`ai_vision`, falling back to `gemini_vision` with no OpenAI key;
+  same model as text) and routed by what it shows:
   a payment receipt is shown back with the amount/reference found
   and offered a recheck ("Yes, check it" button, or a bare "yes") —
   the same Chapa recheck as "did my deposit go through?"; a
@@ -263,7 +283,7 @@ balance-short pause, catch-up after sleep).
   amount in text; a username without a link asks for the link.
 - Pictures are capped at 10 MB (refused in one line) and are kept in
   memory only — never written to disk, and sent nowhere except the
-  one Gemini call the user asked for by sending the picture. A
+  one AI call the user asked for by sending the picture. A
   vision failure, timeout or unreadable result gets one short
   fallback line and is never retried in a loop. A photo sent while
   an order or deposit is being built answers that pending question
@@ -273,7 +293,7 @@ balance-short pause, catch-up after sleep).
 ## Amharic prompt
 
 `bot.py` ships with a default English `SYSTEM_PROMPT` (marked
-replaceable) that tells Gemini to extract the order intent as JSON.
+replaceable) that tells the AI to extract the order intent as JSON.
 The owner may replace it with their own Amharic prompt. Replies to
 users are in the user's language: Amharic in means Amharic out
 (Ethiopic fidels mixed with English, never Latin-letter Amharic).
@@ -359,7 +379,9 @@ Two bugs found live on 13 Nov, both fixed here:
   the bot always answers — balance, orders, deposits, recurring,
   and plain orders all work without the AI. A message it still
   cannot classify gets a short "busy right now" line, never
-  silence.
+  silence. (ChatGPT is now the primary AI — see "AI provider" —
+  because the free Gemini key kept hitting its limit; the
+  fallback chain is ChatGPT → Gemini → local classifier.)
 - **Prices showed 0.00 ETB.** The Paxyo API returns each service
   with `id` and `price` (ETB per 1000); the bot read `service` and
   `rate_etb_per_1000`, which the API does not send. `PaxyoClient.
