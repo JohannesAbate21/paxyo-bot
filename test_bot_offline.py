@@ -530,6 +530,7 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -539,6 +540,7 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -697,6 +699,7 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -706,6 +709,7 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -947,6 +951,7 @@ class TestMultiTurnOrder(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -956,6 +961,7 @@ class TestMultiTurnOrder(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1115,6 +1121,7 @@ class TestThatLink(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1124,6 +1131,7 @@ class TestThatLink(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1209,6 +1217,7 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1218,6 +1227,7 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1366,6 +1376,7 @@ class TestSchedules(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1375,6 +1386,7 @@ class TestSchedules(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1510,6 +1522,7 @@ class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1519,6 +1532,7 @@ class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1950,6 +1964,7 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -1960,6 +1975,7 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -2241,6 +2257,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -2251,6 +2268,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -2551,6 +2569,7 @@ class TestGuideMe(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -2560,6 +2579,7 @@ class TestGuideMe(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -2711,6 +2731,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -2722,6 +2743,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3096,6 +3118,7 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3106,6 +3129,7 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3327,6 +3351,7 @@ class TestSecrecy(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3337,6 +3362,7 @@ class TestSecrecy(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3482,6 +3508,7 @@ class TestUsual(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3494,6 +3521,7 @@ class TestUsual(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3573,6 +3601,7 @@ class TestGoalAndBudget(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3585,6 +3614,7 @@ class TestGoalAndBudget(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3667,6 +3697,7 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3679,6 +3710,7 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3852,6 +3884,7 @@ class TestMidOrderChanges(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3864,6 +3897,7 @@ class TestMidOrderChanges(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -3994,6 +4028,7 @@ class TestPaymentEdgeCases(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4006,6 +4041,7 @@ class TestPaymentEdgeCases(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4080,6 +4116,7 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4092,6 +4129,7 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4121,7 +4159,7 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("No — anybody can buy followers for you",
                       msg.text_sent[0])
-        self.assertIn("can't be banned for it without your permission",
+        self.assertIn("can't be banned or shadowbanned for it without your permission",
                       msg.text_sent[0])
 
     async def test_safety_with_platform_offers_slower_service(self):
@@ -4210,6 +4248,7 @@ class TestLinkProblems(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4222,6 +4261,7 @@ class TestLinkProblems(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4326,6 +4366,7 @@ class TestVoiceMixedAndPhoto(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4339,6 +4380,7 @@ class TestVoiceMixedAndPhoto(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4412,6 +4454,7 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4424,6 +4467,7 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
         bot.PENDING_RECURRING.clear()
@@ -4559,6 +4603,7 @@ class TestEdgeHelpers(unittest.TestCase):
         self.assertIn("still waiting for Confirm",
                       bot.pending_note(1, "en"))
         bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
         bot.PARTIAL[1] = {"platform": "instagram"}
         self.assertIn("still building an order",
                       bot.pending_note(1, "en"))
@@ -6713,7 +6758,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertIn("No — anybody can buy followers for you",
                       msg.text_sent[0])
-        self.assertIn("can't be banned for it without your permission",
+        self.assertIn("can't be banned or shadowbanned for it without your permission",
                       msg.text_sent[0])
 
     async def test_payment_answer_lists_all_four_methods(self):
@@ -6758,6 +6803,271 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
             ("show me the terms", intent_of("paxyo_info")),
         ])
         self.assertIn("paxyo.et", msg.text_sent[0])
+
+
+
+class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
+    """The 13 Nov 2026 round-6 fixes (owner instructions, live retest
+    of round-5, 22:15-22:30 EAT): cancelling clears the stored
+    order, "same like as usual" reuses the link, a mismatched link
+    is explained once instead of looping, "how can I pay?" lists the
+    methods first, the orders table carries the ETB label, and the
+    ban answer covers shadowban too."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _send(self, text, intent, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _turns(self, turns, paxyo=None):
+        """Send several messages in sequence, sharing one FakeMessage
+        so text_sent accumulates; returns (msg, fake_paxyo)."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _callback(self, data, paxyo=None):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def _build_pending(self, paxyo=None):
+        await self._send(
+            "I want 1000 Instagram followers https://instagram.com/p/x",
+            intent_of("order", platform="instagram",
+                      service_hint="followers",
+                      link="https://instagram.com/p/x", quantity=1000),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+
+    # (1) cancel clears the stored order --------------------------------
+
+    async def test_cancel_button_clears_stored_order_then_fresh_order_asks_for_link(self):
+        # Live case (13 Nov 2026): after cancelling a Confirm card,
+        # a fresh "I want tiktok views" auto-showed the cancelled
+        # card's link and quantity. The cancel must clear the stored
+        # order, so the AI returning the cancelled values from
+        # history cannot resurrect it — the bot asks for the link.
+        fake_paxyo = FakePaxyo()
+        await self._build_pending(paxyo=fake_paxyo)
+        confirm_id = next(iter(bot.PENDING))
+        query = await self._callback(f"cancel:{confirm_id}", paxyo=fake_paxyo)
+        self.assertEqual(bot.PENDING, {})
+        self.assertIn("Order cancelled.", query.edited)
+        self.assertEqual(bot.CANCELLED_DRAFT[1], {
+            "link": "https://instagram.com/p/x", "quantity": 1000,
+        })
+        # The AI misreads the fresh order from history: it returns
+        # the cancelled link and quantity. The bot must still ask
+        # for the link instead of auto-showing the card.
+        msg, _ = await self._turns([
+            ("I want tiktok views",
+             intent_of("order", platform="tiktok", service_hint="views",
+                       link="https://instagram.com/p/x", quantity=1000)),
+        ], paxyo=fake_paxyo)
+        self.assertIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_cancel_then_same_link_pasted_again_is_used(self):
+        # The cancelled values are only dropped when they are NOT in
+        # the message: re-pasting the same link (with the quantity)
+        # is a deliberate fresh choice and the order proceeds.
+        fake_paxyo = FakePaxyo()
+        await self._build_pending(paxyo=fake_paxyo)
+        msg = await self._send(
+            "Cancel it! I pasted the wrong link!", intent_of("cancel"),
+            paxyo=fake_paxyo,
+        )
+        self.assertEqual(msg.text_sent, ["Order cancelled."])
+        self.assertEqual(bot.PENDING, {})
+        msg, _ = await self._turns([
+            ("here it is again: 1000 followers https://instagram.com/p/x",
+             intent_of("order", platform="instagram",
+                       service_hint="followers",
+                       link="https://instagram.com/p/x", quantity=1000)),
+        ], paxyo=fake_paxyo)
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+
+    # (2) "same as usual" reuses the link ---------------------------------
+
+    async def test_same_as_usual_reuses_link_despite_ai_misclassification(self):
+        # Live case (13 Nov 2026): "same like as usual please order
+        # 1k views" asked for the link — the AI read it as a plain
+        # order. The local guard catches the phrasing before the
+        # classifier, so the Confirm card shows the last order's
+        # service, link and quantity 1000 even when the AI would
+        # misclassify it as a plain order (mocked here).
+        msg, _ = await self._turns([
+            ("same like as usual please order 1k views",
+             intent_of("order", platform="tiktok", service_hint="views",
+                       quantity=1000)),
+        ], paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER]))
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertIn("1000", msg.text_sent[0])
+        self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+
+    # (3) link mismatch explains once, never loops ------------------------
+
+    async def test_link_mismatch_video_for_followers_explains_once(self):
+        msg, _ = await self._turns([
+            ("1000 tiktok followers https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       service_hint="followers",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("That link is a video", msg.text_sent[0])
+        self.assertIn("followers go to your profile", msg.text_sent[0])
+        self.assertNotIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+        self.assertEqual(bot.PENDING, {})
+        self.assertIsNone(bot.PARTIAL.get(1, {}).get("link"))
+
+    async def test_link_mismatch_profile_for_views_explains(self):
+        msg, _ = await self._turns([
+            ("1000 tiktok views https://tiktok.com/@someone",
+             intent_of("order", platform="tiktok", service_hint="views",
+                       link="https://tiktok.com/@someone", quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("That link is a profile", msg.text_sent[0])
+        self.assertIn("views go on a video", msg.text_sent[0])
+        self.assertNotIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_video_link_for_likes_proceeds(self):
+        # A video link IS the right link for likes on a video.
+        msg, _ = await self._turns([
+            ("1000 tiktok likes https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint="likes",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+        self.assertNotIn("That link is a video", msg.text_sent[0])
+
+    async def test_pasted_link_used_when_ai_drops_it(self):
+        # The ask-link loop: the user pasted the link, the AI
+        # dropped it, and the bot asked for the link again. A link
+        # in the message always wins — the bot must never ask for a
+        # link it was just given.
+        msg = await self._send(
+            "https://vt.tiktok.com/ZSpQWTSmH/", intent_of("unclear"),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertNotIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+
+    # (4) "how can I pay?" lists the methods first ------------------------
+
+    async def test_how_can_i_pay_lists_methods_first(self):
+        msg, _ = await self._turns([
+            ("how can I pay?", intent_of("paxyo_info")),
+        ])
+        for method in ("Telebirr", "CBE Birr", "CBE", "M-Pesa"):
+            self.assertIn(method, msg.text_sent[0])
+        self.assertNotIn(
+            "How much do you want to deposit?", msg.text_sent[0]
+        )
+
+    async def test_deposit_with_method_skips_methods_list(self):
+        # A message that already names a method is a deposit in
+        # progress, not a question — the deposit flow keeps it.
+        msg = await self._send(
+            "how can I pay with telebirr?", intent_of("deposit"),
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["How much do you want to deposit? (for example 100)"],
+        )
+
+    # (5) orders table carries the ETB label -------------------------------
+
+    async def test_orders_table_shows_etb(self):
+        second = dict(
+            FakePaxyo.RECENT_ORDER, id=1826, service_id=2001,
+            service_name="TikTok Video Views | Fast", quantity=500,
+            charge=9.45, status="completed",
+        )
+        msg, _ = await self._turns([
+            ("show my orders", intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, second]))
+        self.assertIn("42.00 ETB", msg.text_sent[0])
+        self.assertIn("9.45 ETB", msg.text_sent[0])
+
+    # (6) ban answer covers shadowban --------------------------------------
+
+    async def test_ban_answer_mentions_shadowban(self):
+        msg, _ = await self._turns([
+            ("can my social media account get banned or shadow banned?",
+             intent_of("safety")),
+        ])
+        self.assertIn("No — anybody can buy followers for you",
+                      msg.text_sent[0])
+        self.assertIn("shadowbanned", msg.text_sent[0])
 
 
 

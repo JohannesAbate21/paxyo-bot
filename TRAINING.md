@@ -4,7 +4,7 @@ This file is the bot's memory of everything its owner taught it. If the bot
 ever has to be rebuilt from scratch, read this file first: it holds every
 rule, fact and behaviour the owner set, so the rebuild learns fast.
 Source of truth for behaviour is `bot.py`; this file is the human-readable
-record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 5).
+record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 6).
 
 ## Who Paxyo is
 - Paxyo is an Ethiopian service for ordering followers, likes, views,
@@ -16,7 +16,9 @@ record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 5).
 - Support: support@paxyo.et. First-deposit bonus: invite code REF3723FB335
   = 20% bonus.
 - Pay in ETB from Paxyo balance. Accepted payment methods: Telebirr,
-  CBE Birr, CBE, M-Pesa. Deposits go through Chapa.
+  CBE Birr, CBE, M-Pesa. Deposits go through Chapa. "How can I pay?"
+  lists all four methods first; a message that already names a method,
+  amount or phone goes straight to the deposit flow.
 - Prices are in ETB per 1000. Prices are FIXED — never negotiate, never give
   discounts. If asked for a discount, offer the cheapest real option instead.
 - Delivery times vary and are shown before Confirm.
@@ -65,18 +67,26 @@ record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 5).
   — let's order now. Never the vague "shown before you confirm" line.
 - WEBSITE: when asked about the website, always mention paxyo.et.
 - BANNED / SHADOWBANNED: answer NO — anybody can buy followers for you,
-  so your account can't be banned for it without your permission.
+  so your account can't be banned or shadowbanned for it without your permission.
 - CONTACT: when a customer asks for Paxyo's contact, give the owner's
   Telegram username. (TODO: owner has not supplied the username yet.)
 - TERMS: answer from `paxyo-terms.md` (the real Paxyo Terms &
   Conditions). If the terms don't cover a question, say so and offer
   support. Full terms live on paxyo.et.
 - ORDER HISTORY: show all orders as a table — ID, short service name,
-  quantity, total, status — newest first, up to 20.
+  quantity, total in ETB (e.g. "3.78 ETB"), status — newest first,
+  up to 20.
 - "The usual" / "same as usual" / "same like as usual please order 1k
   views": use the last order's service and link, with the new quantity,
   and show the Confirm card. "Same as yesterday but double" = last order
   x2, capped at the service maximum.
+- CANCEL: cancelling a Confirm card clears the stored order — a
+  fresh order after a cancel starts from scratch and asks for the
+  link; the cancelled link/quantity are never auto-shown again.
+- LINK MISMATCH: a pasted link always wins over the AI's link.
+  A TikTok video link for a followers order (or a profile link
+  for views/likes) gets ONE plain line explaining it and asking
+  for the right link — never a bare "send the link" loop.
 - BUDGET: "10 birr, how many views?" — answer with the QUANTITY (e.g.
   "about 520 views"), not just the per-1000 price.
 - IMPATIENCE: give the real status + average time, never "soon".

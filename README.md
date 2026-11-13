@@ -579,7 +579,7 @@ Four gaps found in the live retest, plus one the owner added:
 - **Ban / shadowban answer.** "Can my social media account get
   banned or shadow banned?" is answered NO, with the owner's
   reasoning: anybody can buy followers for you, so your account
-  can't be banned for it without your permission. (EN + AM.)
+  can't be banned or shadowbanned for it without your permission. (EN + AM; round 6 added the shadowban wording.)
 - **Payment methods.** The how-to-pay answer lists all four:
   Telebirr, CBE Birr, CBE, and M-Pesa. **Follow-up still owed:**
   deposit-by-chat only supports Telebirr/CBE today
@@ -599,3 +599,57 @@ Four gaps found in the live retest, plus one the owner added:
   "Show me the terms" points to paxyo.et. A terms question the
   file does not cover says so and offers support — nothing is
   invented.
+
+## Round 6 (13 Nov 2026 — live-test gaps)
+
+- **Cancel clears the stored order.** Tapping Cancel on a Confirm
+  card (or saying "cancel") now drops the draft, any other open
+  Confirm card for that user, the budget choice and any
+  fastest-fallback token — and remembers the cancelled order's link
+  and quantity (`CANCELLED_DRAFT`). If the AI then returns those
+  exact values from conversation history for a fresh order, they
+  are dropped and the bot asks for the link instead of auto-showing
+  the cancelled card. A link or quantity the user types in the new
+  message is a deliberate fresh choice and is kept. The record
+  clears as soon as the user gives a fresh link or an order is
+  placed. The last PLACED order is untouched, so "the usual" keeps
+  working.
+- **"Same like as usual" reuses the link even when the AI
+  misclassifies it.** The phrasing ("the usual", "same as
+  yesterday", "same as last", "as usual", "my usual") is caught
+  locally before the classifier, so "same like as usual please
+  order 1k views" shows the Confirm card with the last order's
+  service, link and quantity 1000 even when the AI would read it
+  as a plain order (which used to ask for the link).
+- **A mismatched link is explained once, never looped.** The link
+  the user just pasted always wins over the AI's link, so a pasted
+  link is never "missed" and the bot never repeats "Please send the
+  link the order is for." with no explanation. For TikTok links
+  only (their URL shapes are unambiguous): a video link for a
+  followers order, or a profile link for a views/likes order, gets
+  one plain line ("That link is a video — followers go to your
+  profile, so please send your profile link instead.") and the bad
+  link is dropped from the draft. Other platforms' links are left
+  alone — the same shapes serve several metrics there, and the
+  provider confirms the order on the Confirm card.
+- **"How can I pay?" lists the methods first.** The bare question
+  now answers with all four payment methods (Telebirr, CBE Birr,
+  CBE, M-Pesa) before any deposit amount is asked. A message that
+  already names a method, an amount or a phone is a deposit in
+  progress, not a question — the deposit flow keeps it. "How do I
+  add money?" / "how do I deposit?" stay deposit-flow entries (the
+  existing tests pin them to asking for the amount).
+- **Orders table totals carry the ETB label** (e.g. "3.78 ETB",
+  not a bare number).
+- **Ban answer covers shadowban.** "Can my social media account
+  get banned or shadow banned?" is answered NO for both, with the
+  owner's reasoning (EN + AM).
+
+First attempt at these fixes was too broad and broke 33 existing
+tests: the grounding guard dropped any link/quantity the AI
+returned that the message text did not contain (the suite's mocked
+intents legitimately carry details the text phrases without
+digits/links), the pay-methods guard swallowed "How do I add
+money?", and the kind check fired on the sample `instagram.com/p/x`
+link used for followers orders. All three were rescoped as above;
+the suite is green again (439 tests: 428 existing + 11 new).

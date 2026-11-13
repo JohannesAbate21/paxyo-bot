@@ -394,7 +394,8 @@ PAXYO_KNOWLEDGE = """Facts about Paxyo:
   time is only shown before confirming: give the real time and nudge
   the user to order now.
 - Banned or shadowbanned? No — anybody can buy followers for you, so
-  your account can't be banned for it without your permission.
+  your account can't be banned or shadowbanned for it without your
+  permission.
 - Terms: refunds go back to Paxyo balance only, never to a bank
   account or mobile money; Paxyo balance can't be withdrawn as cash;
   orders can't be cancelled or changed once processing has started;
@@ -915,6 +916,18 @@ TEXT = {
         "am": "ይህ link {link_platform} ነው፣ ግን {platform} ጠይቀዋል — የትኛው ትክክል ነው?",
         "en": "That link is {link_platform}, but you asked for {platform} — which one is right?",
     },
+    # A link for the wrong kind of thing (round 6, 13 Nov 2026): a
+    # profile link for views/likes, or a video link for followers.
+    # One plain line, then the user sends the right link — never a
+    # bare "Please send the link" loop.
+    "link_kind_video_for_profile": {
+        "am": "ይህ link ቪዲዮ ነው — {metric} ወደ profileዎ ይሄዳል፣ ስለዚህ profile linkዎን ይላኩልኝ።",
+        "en": "That link is a video — {metric} go to your profile, so please send your profile link instead.",
+    },
+    "link_kind_profile_for_video": {
+        "am": "ይህ link profile ነው — {metric} በቪዲዮ ላይ ይሄዳል፣ ስለዚህ የቪዲዮውን link ይላኩልኝ።",
+        "en": "That link is a profile — {metric} go on a video, so please send the video link instead.",
+    },
     "link_warning": {
         "am": "ማስጠንቅቂያ: private accounts እና በቅርብ የሚጠፉ stories አንዳንድ ጊዜ ይሳናሉ — link ትክክል መሆኑን እርግጠኛ ነዎት?",
         "en": "Heads up: private accounts and stories that expire soon sometimes fail — are you sure this link is right?",
@@ -1169,8 +1182,8 @@ TEXT = {
     # reasoning. This replaces the old "no zero-risk guarantee" line
     # for this specific question.
     "ban_no": {
-        "am": "አይ — ማንም ሰው ለእርስዎ followers መግዛት ይችላል፣ ስለዚህ ያለእርስዎ ፈቃድ accountዎ ሊታገድ አይችልም።",
-        "en": "No — anybody can buy followers for you, so your account can't be banned for it without your permission.",
+        "am": "አይ — ማንም ሰው ለእርስዎ followers መግዛት ይችላል፣ ስለዚህ ያለእርስዎ ፈቃድ accountዎ ሊታገድ ወይም shadow ban ሊደረግበት አይችልም።",
+        "en": "No — anybody can buy followers for you, so your account can't be banned or shadowbanned for it without your permission.",
     },
     # Terms & Conditions (paxyo-terms.md, fetched from paxyo.et
     # 13 Nov 2026): answers from the actual terms, never invented.
@@ -2832,7 +2845,8 @@ def paxyo_facts_answer(text: str, lang: str):
         return t("paxyo_owner", lang)
     if any(p in s for p in (
         "how do i add money", "how to add money", "how do i pay",
-        "how to pay", "how do i deposit", "how to deposit",
+        "how to pay", "how can i pay", "how do you accept payment",
+        "how do i deposit", "how to deposit", "how can i deposit",
         "add money", "top up", "recharge", "ገንዘብ ማስገባት",
     )):
         return t("paxyo_pay", lang)
@@ -3302,6 +3316,189 @@ def reply_or_bare_intent(text: str, quoted_text, user_id: int):
     return None
 
 
+# The link/quantity of the order a user just cancelled (round 6,
+# 13 Nov 2026). The order flow drops exactly these values if the
+# AI returns them from conversation history after the cancel — and
+# only these values. The record clears as soon as the user gives a
+# fresh link, or an order is placed (see complete_order).
+CANCELLED_DRAFT = {}
+
+
+def clear_order_state(user_id: int, cancelled=None):
+    """Drop everything a cancelled order left behind (round 6,
+    13 Nov 2026): the draft being built, any Confirm card still open
+    for this user, the budget choice and any fastest-fallback token.
+    A fresh order after a cancel starts from scratch — it must not
+    auto-show the cancelled order's link and quantity. (The last
+    PLACED order is not touched: LAST_ORDER and the server's order
+    history still remember it, so "the usual" keeps working.)
+
+    `cancelled` is the Confirm card that was cancelled (its link and
+    quantity): it is remembered in CANCELLED_DRAFT so the order flow
+    can drop exactly those values if the AI returns them from
+    conversation history after the cancel."""
+    PARTIAL.pop(user_id, None)
+    BUDGET_OPTIONS.pop(user_id, None)
+    for token in [
+        t for t, fb in FASTEST_FALLBACK.items()
+        if fb.get("user_id") == user_id
+    ]:
+        FASTEST_FALLBACK.pop(token, None)
+    for cid in [
+        c for c, p in PENDING.items() if p.get("user_id") == user_id
+    ]:
+        PENDING.pop(cid, None)
+    if cancelled:
+        _record = {
+            k: cancelled.get(k)
+            for k in ("link", "quantity")
+            if cancelled.get(k) is not None
+        }
+        if _record:
+            CANCELLED_DRAFT[user_id] = _record
+
+
+_USUAL_PHRASES = (
+    "the usual", "same as yesterday", "same as last", "as usual",
+    "my usual",
+)
+
+
+def is_usual_request(text: str) -> bool:
+    """True when the user wants their usual order again ('same like
+    as usual please order 1k views', 'give me the usual'). The AI
+    sometimes reads it as a plain order and the flow then asks for
+    the link, even though the last order's link is known — so the
+    phrasing is caught locally, before the classifier."""
+    s = " ".join((text or "").strip().lower().split())
+    return any(p in s for p in _USUAL_PHRASES)
+
+
+def quantity_from_text(text: str):
+    """First number in the message that is a valid quantity (a
+    multiple of 10, 10..1,000,000), or None. The text is already
+    normalised, so '1k' reads as 1000."""
+    for m in re.finditer(r"\d[\d,]*", text or ""):
+        try:
+            value = int(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if 10 <= value <= 1000000 and value % 10 == 0:
+            return value
+    return None
+
+
+# Pay phrasings only (round 6, 13 Nov 2026): "how do I add
+# money?" / "how do I deposit?" are deposit-flow entries — the
+# existing tests pin them to asking for the amount — so they are
+# NOT methods questions and must not be swallowed by this guard.
+_PAY_METHODS_PHRASES = (
+    "how can i pay", "how do i pay", "how to pay",
+    "how can i pay you",
+    "how do you accept payment", "how do you take payment",
+    "what payment methods", "which payment methods", "payment methods",
+)
+
+
+def is_pay_methods_question(text: str) -> bool:
+    """True for a bare how-to-pay question ('how can I pay?'). A
+    message that already carries an amount, a method or a phone is
+    a deposit in progress, not a question — the deposit flow keeps
+    it instead of answering with the methods list."""
+    s = " ".join((text or "").strip().lower().split())
+    if not any(p in s for p in _PAY_METHODS_PHRASES):
+        return False
+    if parse_money_amount(s) is not None or parse_deposit_amount(s) is not None:
+        return False
+    if normalize_method(text) is not None or normalize_phone(text) is not None:
+        return False
+    return True
+
+
+_VIDEO_LINK_MARKERS = (
+    "/video/", "vt.tiktok.com", "/p/", "/reel", "/shorts/",
+    "watch", "youtu.be", "/clip/",
+)
+_PROFILE_METRICS = ("followers", "members", "subscribers")
+_CONTENT_METRICS = ("views", "likes", "comments", "shares")
+
+
+def link_content_kind(link: str):
+    """'video' when the link points at a single post/video,
+    'profile' when it points at an account/channel, None when it
+    cannot be told (a short link with no recognisable shape)."""
+    low = str(link or "").strip().lower()
+    if not low:
+        return None
+    if any(m in low for m in _VIDEO_LINK_MARKERS):
+        return "video"
+    if "t.me/" in low:
+        # t.me/name/123 is a post; t.me/name is a channel.
+        tail = low.split("t.me/", 1)[1].strip("/")
+        return "video" if "/" in tail and tail.rsplit("/", 1)[1].isdigit() else "profile"
+    if any(d in low for d in (
+        "tiktok.com", "instagram.com", "youtube.com", "youtu.be",
+        "facebook.com", "fb.com", "x.com", "twitter.com",
+    )):
+        return "profile"
+    if low.startswith("@"):
+        return "profile"
+    return None
+
+
+def metric_content_kind(service_hint: str):
+    """The kind of link a metric needs: 'profile' for followers /
+    members / subscribers, 'video' for views / likes / comments /
+    shares, None when the hint names no metric."""
+    words = (service_hint or "").lower().split()
+    if any(w in words for w in _PROFILE_METRICS):
+        return "profile"
+    if any(w in words for w in _CONTENT_METRICS):
+        return "video"
+    return None
+
+
+def _same_link(a: str, b: str) -> bool:
+    """Same link up to scheme, www, query string and a trailing
+    slash — the AI sometimes normalises the link it returns."""
+    def _norm(u):
+        u = str(u or "").strip().lower()
+        u = re.sub(r"^https?://", "", u)
+        u = re.sub(r"^www\.", "", u)
+        return u.split("?")[0].rstrip("/")
+    return bool(a) and bool(b) and _norm(a) == _norm(b)
+
+
+def _link_grounded_in_text(text: str, link) -> bool:
+    """True when the link the intent carries is actually in this
+    message (pasted just now), not pulled from an older turn."""
+    if not link:
+        return False
+    for candidate in extract_links(text):
+        if _same_link(candidate, link):
+            return True
+    # A handle target (@user) is grounded by an @-mention in the text.
+    if str(link).startswith("@"):
+        return any(tok.startswith("@") for tok in (text or "").split())
+    return False
+
+
+def _quantity_grounded_in_text(text: str, quantity) -> bool:
+    """True when the quantity the intent carries is a number in this
+    message (the text is already normalised, so '1k' reads as 1000)."""
+    try:
+        wanted = int(quantity)
+    except (TypeError, ValueError):
+        return False
+    for m in re.finditer(r"\d[\d,]*", text or ""):
+        try:
+            if int(m.group(0).replace(",", "")) == wanted:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def is_price_question(text: str) -> bool:
     """True when the user asks the price of a service ('how much are
     tiktok views?', "what's the price of 1000 views?"). A budget
@@ -3458,7 +3655,7 @@ async def orders_history_text(user_id: int, lang: str) -> str:
         # (tracked in memory): show its status line.
         return await last_order_status_text(user_id, lang)
     lines = [t("orders_history_title", lang), "```"]
-    lines.append(f"{'ID':<7}{'Service':<21}{'Qty':>6}  {'Total':>8}  Status")
+    lines.append(f"{'ID':<7}{'Service':<21}{'Qty':>6}  {'Total':>13}  Status")
     for o in orders:
         status = str(o.get("status") or "?").strip().lower()
         icon = _ORDER_STATUS_ICONS.get(status, "ℹ️")
@@ -3467,7 +3664,7 @@ async def orders_history_text(user_id: int, lang: str) -> str:
             f"{str(o.get('id') or o.get('order_id') or '?'):<7}"
             f"{name[:20]:<21}"
             f"{int(o.get('quantity') or 0):>6}  "
-            f"{format_money(o.get('charge', 0) or 0):>8}  "
+            f"{format_money(o.get('charge', 0) or 0) + ' ETB':>13}  "
             f"{icon} {status}"
         )
     lines.append("```")
@@ -4655,6 +4852,9 @@ async def complete_order(message, user_id, merged, lang, voice=False,
     (the "Use the fastest one" button: the user already chose).
     """
     PARTIAL[user_id] = {k: v for k, v in merged.items() if v is not None}
+    # A complete order was built (and is about to be confirmed or
+    # placed): the cancelled draft is history now.
+    CANCELLED_DRAFT.pop(user_id, None)
     try:
         services = await paxyo.services()
     except Exception as exc:
@@ -5830,6 +6030,22 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reply_message(update.message, t("source_question", lang), lang, voice=voice)
         return
 
+    # "Same as usual" (round 6, 13 Nov 2026): the AI sometimes
+    # reads it as a plain order and the flow then asks for the link,
+    # even though the last order's link is known. Catch the phrasing
+    # locally, before the classifier, and route it to the usual
+    # handler with the quantity from the message. (An injected
+    # intent — a photo — is never overridden.)
+    if intent is None and is_usual_request(text):
+        _words = set(re.findall(r"[a-z]+", text.lower()))
+        intent = _empty_intent(
+            "usual",
+            quantity=quantity_from_text(text),
+            quantity_multiplier=(
+                2 if "double" in _words
+                else 3 if "triple" in _words else None
+            ),
+        )
     # `intent` is injected by the photo handler (a picture's link is
     # already classified by Gemini vision, so a second text
     # classification of the bare link would be wasted and could
@@ -5875,6 +6091,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
     if is_ban_question(text):
         await reply_message(update.message, with_pending_note(user.id, lang, t("ban_no", lang)), lang, voice=voice)
+        return
+    if is_pay_methods_question(text):
+        # "How can I pay?" (round 6, 13 Nov 2026): list the methods
+        # FIRST — the deposit flow jumps straight to "How much do you
+        # want to deposit?" and the user never sees them.
+        await reply_message(update.message, with_pending_note(user.id, lang, t("paxyo_pay", lang)), lang, voice=voice)
         return
     if is_public_question(text):
         await reply_message(update.message, with_pending_note(user.id, lang, t("public_answer", lang)), lang, voice=voice)
@@ -5969,9 +6191,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
                 return
-            PENDING.pop(confirm_id, None)
-            PARTIAL.pop(user.id, None)
-            BUDGET_OPTIONS.pop(user.id, None)
+            clear_order_state(user.id, cancelled=pending)
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
             return
         # No pending order: the user may mean a repeating order.
@@ -5982,11 +6202,10 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if schedules:
             await stop_schedules_flow(update, schedules, lang, voice=voice)
             return
-        PARTIAL.pop(user.id, None)
+        clear_order_state(user.id)
         RECURRING_DRAFT.pop(user.id, None)
         DEPOSIT_DRAFT.pop(user.id, None)
         SPLIT_DRAFT.pop(user.id, None)
-        BUDGET_OPTIONS.pop(user.id, None)
         dep_id, _dep = pending_deposit_for_user(user.id)
         if dep_id is not None:
             PENDING_DEPOSIT.pop(dep_id, None)
@@ -6303,11 +6522,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # even when a fresh link was given.
     last_service_id = None
     same_service = mentions_same_service(text)
+    link_from_last = False
     if (not merged.get("link") and mentions_that_link(text)) or same_service:
         last = await resolve_last_order(user.id)
         if last:
             if not merged.get("link") and mentions_that_link(text):
                 merged["link"] = last.get("link")
+                link_from_last = True
                 last_service_id = last.get("service_id")
             if same_service and named_service_id is None:
                 last_service_id = last.get("service_id")
@@ -6327,6 +6548,44 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if named_by_id:
         merged["named_by_id"] = True
 
+    # The link the user just pasted always wins (round 6,
+    # 13 Nov 2026): the AI sometimes drops it, and then the flow
+    # asks for the link again even though the user sent it — the
+    # ask-link loop. A bare @handle message is a link too.
+    text_links = extract_links(text)
+    if text_links:
+        merged["link"] = text_links[0]
+    elif not merged.get("link"):
+        handle = next(
+            (tok for tok in (text or "").split() if tok.startswith("@")),
+            None,
+        )
+        if handle is not None and handle.lower() != "@paxyo_bot":
+            merged["link"] = handle
+    # Cancelled-order guard (round 6): right after a cancel, the
+    # AI sometimes returns the cancelled order's link/quantity from
+    # conversation history even though the user typed nothing of the
+    # sort — and the flow then auto-shows the cancelled Confirm
+    # card. Only the exact cancelled values are dropped, and only
+    # while the user has not typed them in this message (a link or
+    # quantity the user just pasted is a deliberate fresh choice and
+    # is kept). Values from the stored draft or from "that link" are
+    # never touched. The record clears as soon as the user gives a
+    # fresh link, or an order is placed (see complete_order).
+    cancelled_draft = CANCELLED_DRAFT.get(user.id) or {}
+    if cancelled_draft:
+        if (merged.get("link")
+                and merged["link"] == cancelled_draft.get("link")
+                and not _link_grounded_in_text(text, merged["link"])
+                and not link_from_last):
+            merged["link"] = stored.get("link")
+        if (merged.get("quantity") is not None
+                and merged["quantity"] == cancelled_draft.get("quantity")
+                and not _quantity_grounded_in_text(
+                    text, merged["quantity"])):
+            merged["quantity"] = stored.get("quantity")
+        if merged.get("link"):
+            CANCELLED_DRAFT.pop(user.id, None)
     # A link for the wrong platform ("YouTube subscribers" to a
     # TikTok URL): point it out and wait for the correction — never
     # place a mismatched order. Handles (@user1) have no domain, so
@@ -6351,6 +6610,36 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             lang, voice=voice,
         )
         return
+    # A link for the wrong kind of thing (round 6, 13 Nov 2026): a
+    # profile link for views/likes, or a video link for followers.
+    # Say so in one plain line and ask for the right link — never
+    # loop "Please send the link" with no explanation. The bad link
+    # is dropped from the draft so it cannot loop. TikTok links only:
+    # TikTok URL shapes are unambiguous (vt.tiktok.com and /video/
+    # are a video; tiktok.com/@user is a profile), while other
+    # platforms' links serve several metrics and the provider
+    # confirms the order on the Confirm card.
+    if (merged.get("link") and merged.get("service_hint")
+            and platform_from_link(merged["link"]) == "tiktok"):
+        _need = metric_content_kind(merged["service_hint"])
+        _have = link_content_kind(merged["link"])
+        if _need is not None and _have is not None and _need != _have:
+            _metric = kind_from_text(merged["service_hint"]) or "services"
+            _dropped = dict(merged)
+            _dropped.pop("link", None)
+            PARTIAL[user.id] = {
+                k: v for k, v in _dropped.items() if v is not None
+            }
+            _key = (
+                "link_kind_video_for_profile"
+                if _need == "profile"
+                else "link_kind_profile_for_video"
+            )
+            await reply_message(
+                update.message, t(_key, lang, metric=_metric),
+                lang, voice=voice,
+            )
+            return
 
     # A question about an order awaiting Confirm ("how fast can you
     # deliver it?") is answered from the pending service — the order
@@ -6847,6 +7136,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(t("cancelled", lang))
             return
         if action == "cancel":
+            # Cancelling clears the stored order state (round 6,
+            # 13 Nov 2026): a fresh order after this starts from
+            # scratch instead of auto-showing the cancelled card.
+            clear_order_state(user.id, cancelled=pending)
             await query.edit_message_text(t("cancelled", lang))
             return
         # Button tap: place the order and replace the Confirm card with
