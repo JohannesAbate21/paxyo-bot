@@ -1,0 +1,4 @@
+# Webhook mode needs PTB's optional `webhooks` extra (tornado): the bot
+# runs its own HTTP server for Telegram updates + Render's health check.
+python-telegram-bot[webhooks]==21.*
+httpx==0.28.*

@@ -1,0 +1,40 @@
+# Render service for the Paxyo Order bot (@paxorder_bot).
+# FREE web service (Telegram webhook): Render gives the service a public
+# URL (RENDER_EXTERNAL_URL) and a $PORT; on startup the bot sets its
+# Telegram webhook to that URL and answers the health check at GET /.
+# No paid background worker is needed. Free web services sleep after
+# ~15 minutes idle and wake in ~30-50s on the first message.
+services:
+  - type: web
+    name: paxorder-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: BOT_API_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PAXYO_API_BASE
+        value: https://paxyo.et/api/bot
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash
+      # Voice replies: Google Cloud Text-to-Speech. The API key comes
+      # from the Google Cloud project (Cloud TTS API enabled, billing
+      # on) — the AI Studio (Gemini) key does NOT work for it. Cloud
+      # TTS returns OGG Opus directly, so no ffmpeg is needed.
+      # Voices: Amharic am-ET-Wavenet-A, English en-US-Wavenet-D.
+      - key: GOOGLE_CLOUD_TTS_API_KEY
+        sync: false
+      - key: GOOGLE_CLOUD_TTS_VOICE
+        value: am-ET-Wavenet-A
+      - key: GOOGLE_CLOUD_TTS_VOICE_EN
+        value: en-US-Wavenet-D
+      # Optional overrides (normally not set — the defaults are right):
+      # WEBHOOK_PATH defaults to the bot token (secret, so the path is
+      # unguessable). WEBHOOK_URL overrides RENDER_EXTERNAL_URL as the
+      # public base URL of the webhook.
