@@ -4739,6 +4739,196 @@ class TestOpenAIProvider(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["intent"], "balance")
 
 
+class GroqFlakyClient(OpenAIFlakyClient):
+    """Same fake client as OpenAIFlakyClient, used for Groq calls
+    (Groq's API is OpenAI-compatible, so the post shape matches)."""
+
+
+class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
+    """Groq is the first AI (13 Nov 2026): OpenAI's $5 credit could
+    not be bought, so the bot uses Groq's free tier instead, with
+    OpenAI second and Gemini third."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.groq.com/openai/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    async def test_groq_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"):
+            self.assertEqual(await bot.groq_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith("https://api.groq.com/openai/v1")
+        )
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer gsk-test"
+        )
+        # Default model: the free tier's 70B model.
+        self.assertEqual(
+            post["json"]["model"], "llama-3.3-70b-versatile"
+        )
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_groq_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"):
+            await bot.groq_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_groq_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.groq_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_groq_transcribe_posts_audio(self):
+        client = GroqFlakyClient(
+            [FakeCloudTTSResponse({"text": "hello"})]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"):
+            self.assertEqual(await bot.groq_transcribe(b"fake-ogg"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/audio/transcriptions"))
+        self.assertEqual(post["data"], {"model": "whisper-large-v3-turbo"})
+        self.assertEqual(post["files"]["file"][0], "voice.ogg")
+        self.assertEqual(post["files"]["file"][1], b"fake-ogg")
+
+    async def test_ai_generate_prefers_groq_over_openai(self):
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="g"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "g")
+        groq.assert_awaited_once()
+        gen.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_openai_when_groq_raises(self):
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("groq down")
+                 ),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="o"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "o")
+        groq.assert_awaited_once()
+        gen.assert_awaited_once()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_gemini_when_groq_raises(self):
+        # Groq key set, no OpenAI key: a Groq failure falls through
+        # to Gemini instead of going silent.
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("groq down")
+                 ),
+             ) as groq, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="g"),
+             ) as gem, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen:
+            self.assertEqual(await bot.ai_generate("hello"), "g")
+        groq.assert_awaited_once()
+        gen.assert_not_called()
+        gem.assert_awaited_once()
+
+    async def test_ai_generate_falls_back_to_gemini_without_keys(self):
+        # No Groq key, no OpenAI key: Gemini, as before.
+        with mock.patch(
+            "bot.gemini_generate", new=mock.AsyncMock(return_value="g")
+        ) as gem, mock.patch(
+            "bot.groq_generate", new=mock.AsyncMock()
+        ) as groq, mock.patch(
+            "bot.openai_generate", new=mock.AsyncMock()
+        ) as gen:
+            self.assertEqual(await bot.ai_generate("hello"), "g")
+        gem.assert_awaited_once()
+        groq.assert_not_called()
+        gen.assert_not_called()
+
+    async def test_ai_transcribe_prefers_groq(self):
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch(
+                 "bot.groq_transcribe",
+                 new=mock.AsyncMock(return_value="g"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_transcribe", new=mock.AsyncMock()
+             ) as oai, \
+             mock.patch(
+                 "bot.gemini_transcribe", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_transcribe(b"x"), "g")
+        groq.assert_awaited_once()
+        oai.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_transcribe_falls_through_to_gemini(self):
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch(
+                 "bot.groq_transcribe",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("groq down")
+                 ),
+             ) as groq, \
+             mock.patch(
+                 "bot.gemini_transcribe",
+                 new=mock.AsyncMock(return_value="g"),
+             ) as gem:
+            self.assertEqual(await bot.ai_transcribe(b"x"), "g")
+        groq.assert_awaited_once()
+        gem.assert_awaited_once()
+
+
 class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
     """The 13 Nov 2026 live-test fixes: hint matching, currency-aware
     budgets, max-for-balance, 1k quantities, pending-order questions,

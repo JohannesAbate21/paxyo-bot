@@ -52,7 +52,9 @@ service min/max.
 | `BOT_API_SECRET` | From `config_secret.php` on the paxyo.et server. Read it in the DirectAdmin Terminal (`grep BOT_API_SECRET public_html/config_secret.php`) and paste the value into Render. Never put it in a file or in chat. |
 | `GEMINI_API_KEY` | Google AI Studio (aistudio.google.com) — "Get API key", create a key, paste it into Render. |
 | `GEMINI_MODEL` | `gemini-3.5-flash` (default). gemini-2.5-flash is retired for new users; gemini-3.8-flash returned 503 when tested. |
-| `OPENAI_API_KEY` | OpenAI (platform.openai.com) — create an API key, add $5 of credit, paste the key into Render. The bot uses it first; without it, it falls back to Gemini. |
+| `GROQ_API_KEY` | Groq (console.groq.com) — create a free API key, paste it into Render. No card needed. The bot uses it first; without it, it falls back to OpenAI, then Gemini. |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` (default, 1,000 requests/day free). The small `llama-3.1-8b-instant` allows 14,400/day free. |
+| `OPENAI_API_KEY` | OpenAI (platform.openai.com) — create an API key, add $5 of credit, paste the key into Render. The bot uses it second (after Groq); without it, it falls back to Gemini. Setup is paused: the owner's card was declined (13 Nov 2026), so no key exists yet. |
 | `OPENAI_MODEL` | `gpt-4o-mini` (default). gpt-4o-mini retires 2027-01-14, so switch this to its replacement when OpenAI says so — no code change needed. |
 | `GOOGLE_CLOUD_TTS_API_KEY` | Google Cloud project (Cloud Text-to-Speech API enabled, billing on) — "Create API key", paste it into Render. The AI Studio (Gemini) key does NOT work for it. Until this is set, voice replies fall back to text. |
 | `GOOGLE_CLOUD_TTS_VOICE` | `am-ET-Wavenet-A` (default) — the Amharic voice. |
@@ -62,19 +64,32 @@ service min/max.
 | `WEBHOOK_URL` | Optional override for `RENDER_EXTERNAL_URL` (local testing behind ngrok, etc.). |
 | `WEBHOOK_PATH` | Optional secret path for Telegram updates. Defaults to the bot token itself (secret, so unguessable). |
 
-## AI provider (ChatGPT first, Gemini fallback)
+## AI provider (Groq first, ChatGPT second, Gemini fallback)
 
 `ai_generate` / `ai_transcribe` / `ai_vision` in `bot.py` are the
-only AI entry points. When `OPENAI_API_KEY` is set they call OpenAI
-(`openai_generate` with the model from `OPENAI_MODEL`, default
-`gpt-4o-mini`; `openai_transcribe` with Whisper `whisper-1`;
-`openai_vision` with the same model and a base64 image data URI).
-When it is not set they call the existing `gemini_*` functions,
-which are unchanged. The OpenAI calls retry 429/500/503 twice
-(after 5s, then 15s), mirroring `_gemini_post`. **gpt-4o-mini
-retires 2027-01-14** — switch `OPENAI_MODEL` to its replacement
-then; no code change is needed. Cost: about $0.0004 per chat
-reply, so $5 of credit covers roughly 10,000 chats.
+only AI entry points. When `GROQ_API_KEY` is set they call Groq
+(`groq_generate` with the model from `GROQ_MODEL`, default
+`llama-3.3-70b-versatile`, 1,000 requests/day free;
+`groq_transcribe` with Whisper `whisper-large-v3-turbo`). Groq
+is free — no card needed, just a key from console.groq.com — and
+its API is OpenAI-compatible, so the code mirrors the OpenAI
+calls. When no Groq key is set they call OpenAI (`openai_generate`
+with the model from `OPENAI_MODEL`, default `gpt-4o-mini`;
+`openai_transcribe` with Whisper `whisper-1`; `openai_vision`
+with the same model and a base64 image data URI). When neither
+key is set they call the existing `gemini_*` functions, which are
+unchanged. Pictures stay on OpenAI/Gemini vision — Groq is not
+used for them. A provider that fails after its retries falls
+through to the next one, so the bot only goes silent when every
+configured provider failed (and then `extract_intent` answers
+from `local_intent`). The Groq and OpenAI calls retry 429/500/503
+twice (after 5s, then 15s), mirroring `_gemini_post`.
+**OpenAI setup is paused (13 Nov 2026):** the owner's card was
+declined, so no OpenAI key exists yet — Groq is the live provider.
+**gpt-4o-mini retires 2027-01-14** — switch `OPENAI_MODEL` to its
+replacement then; no code change is needed. ChatGPT cost, when it
+is used: about $0.0004 per chat reply, so $5 of credit covers
+roughly 10,000 chats.
 
 ## Voice replies
 
@@ -379,9 +394,10 @@ Two bugs found live on 13 Nov, both fixed here:
   the bot always answers — balance, orders, deposits, recurring,
   and plain orders all work without the AI. A message it still
   cannot classify gets a short "busy right now" line, never
-  silence. (ChatGPT is now the primary AI — see "AI provider" —
-  because the free Gemini key kept hitting its limit; the
-  fallback chain is ChatGPT → Gemini → local classifier.)
+  silence. (Groq is now the first AI — see "AI provider" —
+  because the free Gemini key kept hitting its limit and the
+  OpenAI card payment was declined; the fallback chain is
+  Groq → ChatGPT → Gemini → local classifier.)
 - **Prices showed 0.00 ETB.** The Paxyo API returns each service
   with `id` and `price` (ETB per 1000); the bot read `service` and
   `rate_etb_per_1000`, which the API does not send. `PaxyoClient.

@@ -82,16 +82,28 @@ PAXYO_API_BASE = os.environ.get("PAXYO_API_BASE", "https://paxyo.et/api/bot").rs
 BOT_API_SECRET = os.environ.get("BOT_API_SECRET", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-# OpenAI (ChatGPT) — the primary AI since 13 Nov 2026: the Gemini
-# free-tier key kept hitting its per-minute limit (429), so when
-# OPENAI_API_KEY is set the bot classifies, transcribes and reads
-# pictures with OpenAI instead, and only falls back to Gemini when
-# no OpenAI key is set. The key is a Render env var, never in code.
-# gpt-4o-mini retires 2027-01-14; the model is an env var on
-# purpose, so the switch is one setting, not a code change.
+# OpenAI (ChatGPT) — the second AI since 13 Nov 2026, now behind
+# Groq: the Gemini free-tier key kept hitting its per-minute limit
+# (429), so when OPENAI_API_KEY is set the bot classifies,
+# transcribes and reads pictures with OpenAI instead, and only
+# falls back to Gemini when no OpenAI key is set. The key is a
+# Render env var, never in code. gpt-4o-mini retires 2027-01-14;
+# the model is an env var on purpose, so the switch is one
+# setting, not a code change.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_URL = "https://api.openai.com/v1"
+# Groq — the FIRST AI since 13 Nov 2026: OpenAI's $5 credit could
+# not be bought (the owner's Bybit card was declined), so the bot
+# uses Groq's free tier instead — no card needed, just a free API
+# key. Groq's API is OpenAI-compatible (same chat-completions
+# shape, same Whisper transcription endpoint). Default model
+# llama-3.3-70b-versatile allows 1,000 requests/day free; the
+# small llama-3.1-8b-instant allows 14,400/day. The key is a
+# Render env var, never in code.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_URL = "https://api.groq.com/openai/v1"
 # Google Cloud Text-to-Speech (voice replies). The API key comes from a
 # Google Cloud project with the Cloud Text-to-Speech API enabled and
 # billing on; the AI Studio (Gemini) key does NOT work for it.
@@ -1855,13 +1867,13 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
 
 
 # -------------------------------------------------------- OpenAI ------
-# ChatGPT is the primary AI (13 Nov 2026): the Gemini free-tier key
+# ChatGPT is the second AI (13 Nov 2026): the Gemini free-tier key
 # kept hitting its per-minute limit, so when OPENAI_API_KEY is set
 # the bot classifies, transcribes and reads pictures with OpenAI
 # instead. The three functions mirror the Gemini ones exactly (same
 # inputs, same outputs, same retry shape), and the ai_* wrappers
-# below pick OpenAI first and Gemini second — so with no OpenAI key
-# the bot behaves exactly as before.
+# below pick Groq first, OpenAI second, Gemini third — so with no
+# Groq or OpenAI key the bot behaves exactly as before.
 
 async def _openai_post(path: str, headers=None, json=None, data=None,
                        files=None) -> dict:
@@ -1952,20 +1964,114 @@ async def openai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
         return ""
 
 
+# -------------------------------------------------------- Groq --------
+# Groq is the first AI (13 Nov 2026): OpenAI's $5 credit could not
+# be bought — the owner's Bybit card was declined — so the bot
+# uses Groq's free tier, which needs no card. Groq's API is
+# OpenAI-compatible, so the two functions below mirror the OpenAI
+# ones exactly (same inputs, same outputs, same retry shape), with
+# Groq's base URL and its own key/model env vars. Photos stay on
+# OpenAI/Gemini vision — Groq is not used for pictures.
+
+async def _groq_post(path: str, headers=None, json=None, data=None,
+                     files=None) -> dict:
+    """One POST to the Groq API, with retries on rate limits and
+    server errors. Same shape as _openai_post (two retries, after
+    5s then 15s; 500 joins 429/503). The client shape is identical
+    (timeout 120s, trust_env False). `files` values are bytes, so a
+    retried multipart upload re-sends cleanly."""
+    url = GROQ_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(
+                    url, headers=headers, json=json, data=data, files=files
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning("Groq %s, retrying (attempt %d of 3)", status, attempt + 2)
+                continue
+            raise
+
+
+def _groq_headers() -> dict:
+    return {"Authorization": f"Bearer {GROQ_API_KEY}"}
+
+
+async def groq_generate(prompt: str, system: str = None) -> str:
+    """One Groq text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _groq_post(
+        "/chat/completions",
+        headers=_groq_headers(),
+        json={"model": GROQ_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+async def groq_transcribe(audio_bytes: bytes) -> str:
+    """Transcribe a Telegram voice message (.ogg) with Groq Whisper
+    (whisper-large-v3-turbo)."""
+    data = await _groq_post(
+        "/audio/transcriptions",
+        headers=_groq_headers(),
+        data={"model": "whisper-large-v3-turbo"},
+        files={"file": ("voice.ogg", audio_bytes, "audio/ogg")},
+    )
+    return str(data.get("text") or "").strip()
+
+
 async def ai_generate(prompt: str, system: str = None) -> str:
-    """Text from the AI: ChatGPT when OPENAI_API_KEY is set, else
-    Gemini. Every caller uses this, so the provider switch is one
-    env var and the fallback is automatic."""
+    """Text from the AI: Groq when GROQ_API_KEY is set, else ChatGPT
+    when OPENAI_API_KEY is set, else Gemini. Every caller uses this,
+    so the provider switch is one env var and the fallback is
+    automatic. A provider that raises after its own retries falls
+    through to the next one; only when every configured provider
+    failed does the error reach the caller (extract_intent then
+    answers from local_intent instead of going silent)."""
+    if GROQ_API_KEY:
+        try:
+            return await groq_generate(prompt, system=system)
+        except Exception:
+            log.warning("Groq generate failed, trying next provider",
+                        exc_info=True)
     if OPENAI_API_KEY:
-        return await openai_generate(prompt, system=system)
+        try:
+            return await openai_generate(prompt, system=system)
+        except Exception:
+            log.warning("OpenAI generate failed, trying next provider",
+                        exc_info=True)
     return await gemini_generate(prompt, system=system)
 
 
 async def ai_transcribe(audio_bytes: bytes) -> str:
-    """Voice transcription: Whisper when OPENAI_API_KEY is set, else
-    Gemini."""
+    """Voice transcription: Groq Whisper when GROQ_API_KEY is set,
+    else Whisper when OPENAI_API_KEY is set, else Gemini. A provider
+    that raises falls through to the next one."""
+    if GROQ_API_KEY:
+        try:
+            return await groq_transcribe(audio_bytes)
+        except Exception:
+            log.warning("Groq transcribe failed, trying next provider",
+                        exc_info=True)
     if OPENAI_API_KEY:
-        return await openai_transcribe(audio_bytes)
+        try:
+            return await openai_transcribe(audio_bytes)
+        except Exception:
+            log.warning("OpenAI transcribe failed, trying next provider",
+                        exc_info=True)
     return await gemini_transcribe(audio_bytes)
 
 
@@ -2176,8 +2282,8 @@ def local_intent(text: str) -> dict:
 
 
 async def extract_intent(text: str) -> dict:
-    """Ask the AI (ChatGPT when configured, else Gemini) to classify
-    the message and extract the order intent.
+    """Ask the AI (Groq when configured, else ChatGPT, else Gemini)
+    to classify the message and extract the order intent.
 
     The text is normalised first (typos/slang fixed, URLs kept
     verbatim), so "let me deposit 10 br by teleirr" still classifies
