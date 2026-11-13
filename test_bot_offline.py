@@ -4774,9 +4774,11 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             post["headers"]["Authorization"], "Bearer gsk-test"
         )
-        # Default model: the free tier's 70B model.
+        # Default model: Groq's current production model (13 Nov
+        # 2026 — the old llama-3.3-70b-versatile 404s for free
+        # accounts, so the default changed with it).
         self.assertEqual(
-            post["json"]["model"], "llama-3.3-70b-versatile"
+            post["json"]["model"], "openai/gpt-oss-120b"
         )
         self.assertEqual(
             post["json"]["messages"], [{"role": "user", "content": "hi"}]
@@ -5237,6 +5239,228 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
     async def test_first_one_without_budget_options_is_not_an_order(self):
         msg = await self._send("First one", intent_of("unclear"))
         self.assertIn("did not understand", msg.text_sent[0])
+
+
+class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
+    """The 13 Nov 2026 round-3 fixes: Groq model default, metric
+    from the user's own words, questions about a pending Confirm,
+    and no secrets in the AI failure logs."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+        ):
+            store.clear()
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        """Send several messages in sequence, sharing one FakeMessage
+        so text_sent accumulates; returns (msg, fake_paxyo)."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    # (1) Groq default model ----------------------------------------
+
+    def test_groq_default_model_is_gpt_oss_120b(self):
+        self.assertEqual(bot.GROQ_MODEL, "openai/gpt-oss-120b")
+
+    # (2) metric from the user's own words ---------------------------
+
+    def test_metric_from_text(self):
+        self.assertEqual(
+            bot.metric_from_text("I want 1000 tiktok views"), "views"
+        )
+        self.assertEqual(
+            bot.metric_from_text("order 500 instagram followers"), "followers"
+        )
+        self.assertIsNone(bot.metric_from_text("how fast can you deliver it"))
+        self.assertIsNone(bot.metric_from_text(""))
+
+    async def test_no_hint_views_order_picks_views_service(self):
+        # William's live case: the classifier returned no hint, and
+        # the Confirm card showed Tiktok Comment Likes #5854.
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertIn("(#2001)", msg.text_sent[0])
+        self.assertNotIn("Video Save", msg.text_sent[0])
+        self.assertNotIn("Comment Likes", msg.text_sent[0])
+
+    async def test_platform_only_hint_views_order_picks_views_service(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint="tiktok",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertIn("(#2001)", msg.text_sent[0])
+
+    async def test_existing_metric_hint_is_not_overridden(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok likes https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint="tiktok likes",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Tiktok Comment Likes", msg.text_sent[0])
+        self.assertIn("(#2003)", msg.text_sent[0])
+
+    async def test_derived_hint_stored_when_asking_for_link(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link the order is for."
+        )
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "tiktok views")
+
+    async def test_derived_hint_survives_a_bare_link(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       quantity=1000)),
+            ("https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("unclear", link="https://vt.tiktok.com/ZSpQWTSmH/")),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link the order is for."
+        )
+        self.assertIn("TikTok Video Views", msg.text_sent[1])
+        self.assertIn("(#2001)", msg.text_sent[1])
+        # The hint carried through the bare link: the pending order
+        # is on the views service, not the fastest TikTok service.
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2001)
+
+    # (3) questions about a pending Confirm --------------------------
+
+    async def test_pending_confirm_speed_question(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            # The AI is down: local fallback, "unclear".
+            ("how fast can you deliver it",
+             intent_of("unclear", gemini_failed=True)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertIn("5 minutes", msg.text_sent[1])
+        self.assertNotIn("busy", msg.text_sent[1].lower())
+        self.assertNotIn("Send the link", msg.text_sent[1])
+        # The order is still open — nothing was cancelled.
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_pending_confirm_drop_question(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            ("wouldn't it drop?",
+             intent_of("unclear", gemini_failed=True)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("refill note", msg.text_sent[1])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    # (4) no secrets in the AI failure logs --------------------------
+
+    def _key_url_error(self, status, url):
+        req = bot.httpx.Request("POST", url)
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(
+            f"{status}", request=req, response=resp
+        )
+
+    def test_log_ai_failure_logs_status_only(self):
+        err = self._key_url_error(
+            429,
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-3.5-flash:generateContent?key=FAKESECRETKEY",
+        )
+        with self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            bot._log_ai_failure("AI classify failed", err)
+        joined = "\n".join(logs.output)
+        self.assertIn("AI classify failed (HTTP 429)", joined)
+        self.assertNotIn("key=", joined)
+        self.assertNotIn("FAKESECRETKEY", joined)
+        self.assertNotIn("Bearer ", joined)
+
+    def test_log_ai_failure_without_status(self):
+        with self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            bot._log_ai_failure("test fail", Exception("boom"))
+        self.assertIn("test fail", "\n".join(logs.output))
+        self.assertNotIn("boom", "\n".join(logs.output))
+
+    async def test_extract_intent_failure_logs_no_key(self):
+        err = self._key_url_error(
+            429,
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-3.5-flash:generateContent?key=FAKESECRETKEY",
+        )
+        client = FlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            intent = await bot.extract_intent("hello")
+        joined = "\n".join(logs.output)
+        self.assertNotIn("key=", joined)
+        self.assertNotIn("FAKESECRETKEY", joined)
+        self.assertNotIn("Bearer ", joined)
+        self.assertIn("AI classify failed, using local fallback (HTTP 429)", joined)
+        self.assertTrue(intent.get("gemini_failed"))
+
+    async def test_ai_generate_groq_failure_logs_no_bearer(self):
+        err = self._key_url_error(
+            404, "https://api.groq.com/openai/v1/chat/completions"
+        )
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate", new=mock.AsyncMock(return_value="hello")
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            result = await bot.ai_generate("hi")
+        self.assertEqual(result, "hello")
+        joined = "\n".join(logs.output)
+        self.assertIn("Groq generate failed, trying next provider (HTTP 404)", joined)
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("gsk-test", joined)
+        self.assertNotIn("key=", joined)
 
 
 if __name__ == "__main__":

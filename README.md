@@ -53,7 +53,7 @@ service min/max.
 | `GEMINI_API_KEY` | Google AI Studio (aistudio.google.com) — "Get API key", create a key, paste it into Render. |
 | `GEMINI_MODEL` | `gemini-3.5-flash` (default). gemini-2.5-flash is retired for new users; gemini-3.8-flash returned 503 when tested. |
 | `GROQ_API_KEY` | Groq (console.groq.com) — create a free API key, paste it into Render. No card needed. The bot uses it first; without it, it falls back to OpenAI, then Gemini. |
-| `GROQ_MODEL` | `llama-3.3-70b-versatile` (default, 1,000 requests/day free). The small `llama-3.1-8b-instant` allows 14,400/day free. |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` (default, 1,000 requests/day free). The small `llama-3.1-8b-instant` allows 14,400/day free. Groq retires models without warning — the old default `llama-3.3-70b-versatile` 404s for free accounts (13 Nov 2026) — so if Groq 404s, change this setting in Render, no code change needed. |
 | `OPENAI_API_KEY` | OpenAI (platform.openai.com) — create an API key, add $5 of credit, paste the key into Render. The bot uses it second (after Groq); without it, it falls back to Gemini. Setup is paused: the owner's card was declined (13 Nov 2026), so no key exists yet. |
 | `OPENAI_MODEL` | `gpt-4o-mini` (default). gpt-4o-mini retires 2027-01-14, so switch this to its replacement when OpenAI says so — no code change needed. |
 | `GOOGLE_CLOUD_TTS_API_KEY` | Google Cloud project (Cloud Text-to-Speech API enabled, billing on) — "Create API key", paste it into Render. The AI Studio (Gemini) key does NOT work for it. Until this is set, voice replies fall back to text. |
@@ -69,7 +69,10 @@ service min/max.
 `ai_generate` / `ai_transcribe` / `ai_vision` in `bot.py` are the
 only AI entry points. When `GROQ_API_KEY` is set they call Groq
 (`groq_generate` with the model from `GROQ_MODEL`, default
-`llama-3.3-70b-versatile`, 1,000 requests/day free;
+`openai/gpt-oss-120b`, 1,000 requests/day free (Groq retired the
+old default `llama-3.3-70b-versatile` for free accounts, 13 Nov
+2026 — the model is an env var so the next retirement is a
+setting change, not a code change);
 `groq_transcribe` with Whisper `whisper-large-v3-turbo`). Groq
 is free — no card needed, just a key from console.groq.com — and
 its API is OpenAI-compatible, so the code mirrors the OpenAI

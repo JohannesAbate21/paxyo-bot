@@ -98,11 +98,14 @@ OPENAI_URL = "https://api.openai.com/v1"
 # uses Groq's free tier instead — no card needed, just a free API
 # key. Groq's API is OpenAI-compatible (same chat-completions
 # shape, same Whisper transcription endpoint). Default model
-# llama-3.3-70b-versatile allows 1,000 requests/day free; the
-# small llama-3.1-8b-instant allows 14,400/day. The key is a
-# Render env var, never in code.
+# openai/gpt-oss-120b (current production model, 13 Nov 2026;
+# the old default llama-3.3-70b-versatile 404s — Groq retired it
+# for free accounts). Groq retires models without warning, so the
+# model is an env var on purpose: if Groq 404s on it again, switch
+# GROQ_MODEL in Render, not the code. The key is a Render env var,
+# never in code.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_URL = "https://api.groq.com/openai/v1"
 # Google Cloud Text-to-Speech (voice replies). The API key comes from a
 # Google Cloud project with the Cloud Text-to-Speech API enabled and
@@ -877,6 +880,22 @@ TEXT = {
     "pending_refill_unknown": {
         "am": "ስለ refill ምንም ማስታወሻ አላየሁም።",
         "en": "I don't see a refill note on this service.",
+    },
+    # Answers for questions about an order awaiting Confirm ("how fast
+    # can you deliver it?") — from the pending service, with no
+    # "send the link" line: the link is already given and the Confirm
+    # card is still up (13 Nov 2026).
+    "confirm_speed": {
+        "am": "{service} በአብዛኛው በ {avg} ውስጥ ይጀምራል።",
+        "en": "{service} usually starts within {avg}.",
+    },
+    "confirm_speed_unknown": {
+        "am": "{service} — እስካሁን የመላኪያ ሰዓት የለኝም።",
+        "en": "{service} — I don't have a delivery time for it yet.",
+    },
+    "confirm_drop": {
+        "am": "{service}: {refill}",
+        "en": "{service}: {refill}",
     },
     # The fastest services are different kinds (views vs likes vs
     # comments) and no metric was named: ask which kind, instead of
@@ -2033,6 +2052,22 @@ async def groq_transcribe(audio_bytes: bytes) -> str:
     return str(data.get("text") or "").strip()
 
 
+def _log_ai_failure(message: str, exc) -> None:
+    """Log an AI-provider failure: message + HTTP status only.
+
+    Never log the exception object or a traceback here — an httpx
+    error's text carries the request URL, and the Gemini URL carries
+    the API key (?key=...), which leaked into the Render logs (13 Nov
+    2026). The status code is all the debugging signal there is.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        log.warning("%s (HTTP %s)", message, status)
+    else:
+        log.warning("%s", message)
+
+
 async def ai_generate(prompt: str, system: str = None) -> str:
     """Text from the AI: Groq when GROQ_API_KEY is set, else ChatGPT
     when OPENAI_API_KEY is set, else Gemini. Every caller uses this,
@@ -2044,15 +2079,13 @@ async def ai_generate(prompt: str, system: str = None) -> str:
     if GROQ_API_KEY:
         try:
             return await groq_generate(prompt, system=system)
-        except Exception:
-            log.warning("Groq generate failed, trying next provider",
-                        exc_info=True)
+        except Exception as exc:
+            _log_ai_failure("Groq generate failed, trying next provider", exc)
     if OPENAI_API_KEY:
         try:
             return await openai_generate(prompt, system=system)
-        except Exception:
-            log.warning("OpenAI generate failed, trying next provider",
-                        exc_info=True)
+        except Exception as exc:
+            _log_ai_failure("OpenAI generate failed, trying next provider", exc)
     return await gemini_generate(prompt, system=system)
 
 
@@ -2063,15 +2096,13 @@ async def ai_transcribe(audio_bytes: bytes) -> str:
     if GROQ_API_KEY:
         try:
             return await groq_transcribe(audio_bytes)
-        except Exception:
-            log.warning("Groq transcribe failed, trying next provider",
-                        exc_info=True)
+        except Exception as exc:
+            _log_ai_failure("Groq transcribe failed, trying next provider", exc)
     if OPENAI_API_KEY:
         try:
             return await openai_transcribe(audio_bytes)
-        except Exception:
-            log.warning("OpenAI transcribe failed, trying next provider",
-                        exc_info=True)
+        except Exception as exc:
+            _log_ai_failure("OpenAI transcribe failed, trying next provider", exc)
     return await gemini_transcribe(audio_bytes)
 
 
@@ -2302,10 +2333,12 @@ async def extract_intent(text: str) -> dict:
     """
     try:
         reply = await ai_generate(normalize_text(text), system=SYSTEM_PROMPT)
-    except Exception:
+    except Exception as exc:
         # The AI is unreachable (rate limit, outage). Answer from the
         # message itself instead of going silent — see local_intent.
-        log.warning("AI classify failed, using local fallback", exc_info=True)
+        # Log status only: the exception text carries the request URL,
+        # and the Gemini URL carries the API key (?key=...).
+        _log_ai_failure("AI classify failed, using local fallback", exc)
         return local_intent(text)
     intent = extract_json(reply)
     if intent is None:
@@ -2424,7 +2457,7 @@ async def answer_paxyo_question(text: str, lang: str) -> str:
     try:
         reply = await ai_generate(text, system=system)
     except Exception as exc:
-        log.warning("paxyo_info answer failed: %s", exc)
+        _log_ai_failure("paxyo_info answer failed", exc)
         return t("paxyo_info_fallback", lang)
     answer = (reply or "").strip()
     return answer if answer else t("paxyo_info_fallback", lang)
@@ -2769,6 +2802,17 @@ _PENDING_DROP_PHRASES = (
 )
 
 
+def metric_from_text(text: str):
+    """First metric word in the message text, or None.
+
+    The classifier sometimes drops the metric ("I want 1000 tiktok
+    views" -> hint "tiktok" or none); the order flow reads the metric
+    back from the user's own words instead of guessing.
+    """
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    return next((w for w in words if w in _METRICS), None)
+
+
 def pending_order_question(text: str):
     """'speed' / 'drop' / None: is this message a question about an
     order being built? A question carries no link and no
@@ -2793,6 +2837,32 @@ def pending_order_question(text: str):
     if any(p in s for p in _PENDING_SPEED_PHRASES):
         return "speed"
     return None
+
+
+def pending_confirm_answer(service, question: str, lang: str):
+    """Answer a question about an order awaiting Confirm, from the
+    pending service itself. Returns the answer string, or None when
+    there is no service to answer from. The order stays open — the
+    caller does not cancel it. (13 Nov 2026: "how fast can you
+    deliver it" after a Confirm card got the busy line, because the
+    pending-question fix only covered a PARTIAL order waiting for a
+    link.)"""
+    if not service:
+        return None
+    name = clean_service_name(service.get("name"))
+    if question == "speed":
+        avg = service.get("average_time")
+        if parse_average_time(avg) is not None:
+            return t("confirm_speed", lang, service=name, avg=avg)
+        return t("confirm_speed_unknown", lang, service=name)
+    low = str(service.get("name") or "").lower()
+    if "no refill" in low:
+        refill = t("pending_no_refill", lang)
+    elif "refill" in low:
+        refill = t("pending_has_refill", lang)
+    else:
+        refill = t("pending_refill_unknown", lang)
+    return t("confirm_drop", lang, service=name, refill=refill)
 
 
 def link_needs_warning(text: str, link: str) -> bool:
@@ -4933,6 +5003,25 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
 
+    # Metric-from-text safety net (13 Nov 2026): the classifier
+    # sometimes returns an order intent with no service_hint (or only
+    # the platform word), and then complete_order picks the fastest
+    # service of the whole platform — a views order got Tiktok Comment
+    # Likes. When the message itself names a metric, use it. A hint
+    # that already carries a metric word is never overridden. merged
+    # is stored into PARTIAL at the ask-link/ask-quantity steps, so a
+    # derived hint survives a later bare-link message.
+    hint_words = set(
+        (merged.get("service_hint") or "").strip().lower().split()
+    )
+    if not (hint_words & set(_METRICS)):
+        metric = metric_from_text(text)
+        if metric:
+            platform = (merged.get("platform") or "").strip().lower()
+            merged["service_hint"] = (
+                f"{platform} {metric}" if platform else metric
+            )
+
     # A service the user named: Gemini's service_id first, the local
     # ID regex as fallback ("service 6139", "#6139", a bare "6139").
     # A bare number is a service ID, not a quantity — quantities must
@@ -4988,6 +5077,27 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             lang, voice=voice,
         )
         return
+
+    # A question about an order awaiting Confirm ("how fast can you
+    # deliver it?") is answered from the pending service — the order
+    # stays open and the Confirm card stays up. The PARTIAL branch
+    # below already answers questions about an order being built;
+    # this one covers the Confirm card. Placed before the "nothing
+    # to work with" check, or the question would fall through to
+    # the busy line while the AI is down.
+    if not merged.get("link") and not merged.get("quantity"):
+        question = pending_order_question(text)
+        if question is not None:
+            _cid, _pending = pending_for_user(user.id)
+            if _pending is not None:
+                answer = pending_confirm_answer(
+                    _pending.get("service"), question, lang
+                )
+                if answer is not None:
+                    await reply_message(
+                        update.message, answer, lang, voice=voice
+                    )
+                    return
 
     # Nothing to work with at all: not understood. (A bare number or a
     # bare link with no context still counts as something: it is stored
@@ -5100,7 +5210,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         audio = bytes(await voice_file.download_as_bytearray())
         text = await ai_transcribe(audio)
     except Exception as exc:
-        log.warning("voice handling failed: %s", exc)
+        _log_ai_failure("voice handling failed", exc)
         await update.message.reply_text(t("transcribe_failed", lang))
         return
     if not text:
@@ -5232,7 +5342,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         raw = await ai_vision(image)
     except Exception as exc:
-        log.warning("ai_vision failed: %s", exc)
+        _log_ai_failure("ai_vision failed", exc)
         await message.reply_text(t("photo_unreadable", lang))
         return
     result = parse_vision_result(raw)
