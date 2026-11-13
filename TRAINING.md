@@ -4,7 +4,7 @@ This file is the bot's memory of everything its owner taught it. If the bot
 ever has to be rebuilt from scratch, read this file first: it holds every
 rule, fact and behaviour the owner set, so the rebuild learns fast.
 Source of truth for behaviour is `bot.py`; this file is the human-readable
-record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 6).
+record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 7).
 
 ## Who Paxyo is
 - Paxyo is an Ethiopian service for ordering followers, likes, views,
@@ -83,6 +83,28 @@ record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 6).
 - CANCEL: cancelling a Confirm card clears the stored order — a
   fresh order after a cancel starts from scratch and asks for the
   link; the cancelled link/quantity are never auto-shown again.
+  The cancelled record clears only when an order is placed, not
+  when a fresh link merely appears in a turn that never becomes an
+  order.
+- A NEW METRIC REPLACES THE OLD DRAFT: a message naming a different
+  metric (views after followers) starts a fresh order — the old
+  draft's link/quantity are dropped unless the user typed them in
+  this message. A clarification of the same metric ("likes for my
+  comment" is still likes) does not reset.
+- A MESSAGE THAT PASTES A LINK AND NAMES A METRIC WITH AN ORDER VERB
+  ("I want TikTok followers for <link>") IS an order, even when the
+  AI calls it something else (it once called it a safety question).
+  Real questions (price, ban, payment, public account) are still
+  answered directly, and a message with no order verb is not an order.
+- ORDER NOW: "please order now 200 TikTok views for this video:
+  <link>" places the order at once — the 200 right before the metric
+  is the quantity. A stray number elsewhere in the message is never
+  the quantity.
+- "USE THE FASTEST ONE" button: offered when a named service is
+  refused AND when the bot asks which metric the user wants.
+- AMHARIC METRIC WORDS: እይታዎች = views, ተከታዮች = followers,
+  ላይኮች = likes, አስተያየቶች = comments — the message's own metric
+  always wins over what the AI guessed from history.
 - LINK MISMATCH: a pasted link always wins over the AI's link.
   A TikTok video link for a followers order (or a profile link
   for views/likes) gets ONE plain line explaining it and asking

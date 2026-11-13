@@ -7071,5 +7071,310 @@ class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
 
 
 
+class TestRoundSevenFixes(unittest.IsolatedAsyncioTestCase):
+    """The 13 Nov 2026 round-7 fixes (live retest of round-6,
+    22:58-23:12 EAT): a draft never leaks across turns — a new
+    metric replaces the old draft; "order now 200 TikTok views"
+    parses the quantity; a link mismatch is explained in the same
+    turn it is detected; the "Use the fastest one" button appears
+    when the bot asks which metric; Amharic metric words are read.
+    """
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _send(self, text, intent, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _turns(self, turns, paxyo=None):
+        """Send several messages in sequence, sharing one FakeMessage
+        so text_sent accumulates; returns (msg, fake_paxyo)."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _callback(self, data, paxyo=None):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def _build_pending(self, paxyo=None):
+        await self._send(
+            "I want 1000 Instagram followers https://instagram.com/p/x",
+            intent_of("order", platform="instagram",
+                      service_hint="followers",
+                      link="https://instagram.com/p/x", quantity=1000),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+
+    # (1) a new metric replaces the old draft -------------------------
+
+    async def test_new_metric_replaces_draft_instead_of_merging(self):
+        # Live case (13 Nov 2026): after a followers + video-link
+        # mismatch, "I want TikTok views" jumped straight to a
+        # Confirm card for the remembered 200-view draft instead of
+        # asking for the link. A different metric starts a fresh
+        # order — the old link and quantity must not be reused.
+        msg, _ = await self._turns([
+            ("1000 tiktok followers https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       service_hint="followers",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            ("I want TikTok views",
+             intent_of("order", platform="tiktok", service_hint="views",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("That link is a video", msg.text_sent[0])
+        self.assertIn(
+            "Please send the link the order is for.", msg.text_sent[1]
+        )
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_same_metric_clarification_keeps_draft(self):
+        # "likes for my comment" is still likes: clarifying the kind
+        # must not throw the stored link away.
+        msg, _ = await self._turns([
+            ("1000 tiktok likes https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint="likes",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+
+    # (2) Amharic metric words + the live followers/views leak -------
+
+    def test_kind_from_text_reads_amharic_metrics(self):
+        self.assertEqual(
+            bot.kind_from_text(
+                "እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ"
+            ),
+            "views",
+        )
+        self.assertEqual(bot.kind_from_text("ተከታዮች እፈልጋለሁ"), "followers")
+        self.assertEqual(bot.kind_from_text("ላይኮች"), "likes")
+        self.assertEqual(bot.kind_from_text("አስተያየቶች"), "comments")
+
+    async def test_amharic_views_order_gets_confirm_card(self):
+        # Live case (13 Nov 2026): the followers + video-link
+        # mismatch was answered with a safety line, and the correct
+        # explanation arrived two minutes late, in Amharic, attached
+        # to the next message — an Amharic views order that got NO
+        # Confirm card. The Amharic metric must win over the AI's
+        # history-poisoned followers hint.
+        msg, _ = await self._turns([
+            ("I want TikTok followers for https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("safety", platform="tiktok",
+                       service_hint="followers",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/")),
+            ("እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ: https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok followers",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=200)),
+        ], paxyo=TikTokPaxyo())
+        # Turn 1: the mismatch is explained in the same turn, in English.
+        self.assertIn("That link is a video", msg.text_sent[0])
+        self.assertIn("followers go to your profile", msg.text_sent[0])
+        # Turn 2: the Amharic views order gets its Confirm card.
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertIn("View", pending["service"]["name"])
+        self.assertEqual(pending["quantity"], 200)
+        self.assertNotIn("That link is a video", msg.text_sent[1])
+
+    # (3) the order guard: a misclassified order is still an order ---
+
+    async def test_order_guard_rescues_misclassified_order(self):
+        # Live case (13 Nov 2026): "I want TikTok followers for
+        # <video link>" came back from the AI as "safety", so the
+        # mismatch was never explained in that turn.
+        msg, _ = await self._turns([
+            ("I want TikTok followers for https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("safety", platform="tiktok",
+                       service_hint="followers",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("That link is a video", msg.text_sent[0])
+        self.assertIn("followers go to your profile", msg.text_sent[0])
+        self.assertNotIn(
+            "no one can guarantee zero risk", msg.text_sent[0]
+        )
+        self.assertEqual(bot.PENDING, {})
+
+    def test_order_guard_leaves_real_questions_alone(self):
+        self.assertFalse(bot.is_order_request(
+            "is this link safe for followers? "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        ))
+        self.assertFalse(bot.is_order_request(
+            "how much are tiktok views for this video? "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        ))
+        self.assertFalse(bot.is_order_request(
+            "can followers get me banned? "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        ))
+        self.assertTrue(bot.is_order_request(
+            "I want TikTok followers for https://vt.tiktok.com/ZSpQWTSmH/"
+        ))
+        self.assertTrue(bot.is_order_request(
+            "እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ: "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        ))
+
+    # (4) order-now parses the quantity before the metric ------------
+
+    def test_quantity_before_metric(self):
+        self.assertEqual(
+            bot.quantity_before_metric(
+                "please order now 200 TikTok views for this video: "
+                "https://vt.tiktok.com/ZSpQWTSmH/"
+            ),
+            200,
+        )
+        self.assertEqual(
+            bot.quantity_before_metric("200 የቲክቶክ እይታዎች"), 200
+        )
+        self.assertIsNone(bot.quantity_before_metric("my balance is 100"))
+        self.assertIsNone(bot.quantity_before_metric("I want tiktok views"))
+
+    async def test_order_now_parses_quantity_before_metric(self):
+        # Live case (13 Nov 2026): "please order now 200 TikTok
+        # views for this video: <link>" asked "How many?" instead
+        # of placing the order — the AI did not return the quantity.
+        msg, fake_paxyo = await self._turns([
+            ("please order now 200 TikTok views for this video: https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Order placed!", msg.text_sent[0])
+        self.assertIn("200", msg.text_sent[0])
+        self.assertIsNone(msg.markups[0])  # no Confirm card
+        self.assertEqual(len(fake_paxyo.orders_created), 1)
+        self.assertEqual(fake_paxyo.orders_created[0], (
+            2001, "https://vt.tiktok.com/ZSpQWTSmH/", 200,
+        ))
+
+    async def test_order_now_stray_number_is_not_quantity(self):
+        msg, _ = await self._turns([
+            ("please order now TikTok views for this video: https://vt.tiktok.com/ZSpQWTSmH/, my balance is 100",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("How many?", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    # (5) the cancelled record survives a turn that is not an order --
+
+    async def test_cancelled_record_survives_mismatched_turn(self):
+        # Live-adjacent hole (round 6): the cancelled record cleared
+        # as soon as the user gave ANY fresh link — even one in a
+        # turn that never became an order (a mismatch) — so the AI
+        # could resurrect the cancelled link from history next turn.
+        fake_paxyo = FakePaxyo()
+        await self._build_pending(paxyo=fake_paxyo)
+        confirm_id = next(iter(bot.PENDING))
+        await self._callback(f"cancel:{confirm_id}", paxyo=fake_paxyo)
+        self.assertEqual(bot.CANCELLED_DRAFT[1], {
+            "link": "https://instagram.com/p/x", "quantity": 1000,
+        })
+        msg, _ = await self._turns([
+            ("1000 tiktok followers https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       service_hint="followers",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            ("I want tiktok views",
+             intent_of("order", platform="tiktok", service_hint="views",
+                       link="https://instagram.com/p/x", quantity=1000)),
+        ], paxyo=fake_paxyo)
+        self.assertIn("That link is a video", msg.text_sent[0])
+        self.assertIn(
+            "Please send the link the order is for.", msg.text_sent[1]
+        )
+        self.assertEqual(bot.PENDING, {})
+
+    # (6) "Use the fastest one" appears when the metric is ambiguous -
+
+    async def test_fastest_button_appears_when_metric_ambiguous(self):
+        # Until round 7 the button only appeared when a service named
+        # by ID was refused, so in two live retests it never appeared
+        # at all. It is offered here too, when the bot asks which
+        # metric the user wants.
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Which one do you want", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the fastest button
+        token = next(iter(bot.FASTEST_FALLBACK))
+        query = await self._callback(
+            f"usefastest:{token}", paxyo=TikTokPaxyo()
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIn("Please confirm", query.message.text_sent[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

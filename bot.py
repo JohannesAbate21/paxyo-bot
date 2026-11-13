@@ -3273,6 +3273,58 @@ def is_order_now(text: str) -> bool:
     return any(p in s for p in _ORDER_NOW_PHRASES)
 
 
+# Order verbs the local order guard recognises (round 7,
+# 13 Nov 2026). Amharic እፈል- covers እፈልጋለሁ/እፈልግ/እፈልጋለች
+# ("I want"); ትዕዛዝ/ይዘዝ is "order", ይግዝ is "buy". "please"
+# is deliberately NOT here: "please, is this link safe?" is a
+# question, not an order.
+_ORDER_REQUEST_VERBS = (
+    "want", "order", "buy", "get me", "give me", "need",
+    "እፈል", "ትዕዛዝ", "ይዘዝ", "ይግዝ",
+)
+# Intent types the order guard may override: a message that pastes
+# a link and names a metric with an order verb IS an order, even
+# when the AI called it one of these. Anything more specific
+# (usual, batch, recurring, deposit, ...) is left alone.
+_ORDER_OVERRIDABLE = (
+    "safety", "paxyo_info", "unclear", "off_topic", "goal",
+    "content_help", "support_issue", "greeting", "help",
+    "refund_policy", "geo_target", "free_sample", "price_pushback",
+    "discount",
+)
+
+
+def is_order_request(text: str) -> bool:
+    """True when the message itself is an order: it pastes a link (or
+    an @handle) and names a metric or platform with an order verb
+    ("I want TikTok followers for <link>"). Used to rescue orders
+    the AI misclassified (round 7, 13 Nov 2026: that message came
+    back as "safety", so the link-mismatch answer never fired in
+    that turn and the followers draft leaked into the next one).
+    Genuine questions are untouched: a price, ban, payment or
+    public-account question is answered by its own check, and a
+    message with no order verb ("is this link safe?") is not an
+    order."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return False
+    if (is_price_question(text) or is_ban_question(text)
+            or is_pay_methods_question(text) or is_public_question(text)):
+        return False
+    links = extract_links(text)
+    has_target = bool(links) or any(
+        tok.startswith("@") and tok.lower() != "@paxyo_bot"
+        for tok in s.split()
+    )
+    if not has_target:
+        return False
+    if kind_from_text(text) is None and not any(
+        p in s.split() for p in _PLATFORMS
+    ):
+        return False
+    return any(v in s for v in _ORDER_REQUEST_VERBS)
+
+
 def _empty_intent(intent_type, **fields):
     out = {
         "intent": intent_type, "platform": None, "service_hint": None,
@@ -3381,6 +3433,33 @@ def quantity_from_text(text: str):
     for m in re.finditer(r"\d[\d,]*", text or ""):
         try:
             value = int(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if 10 <= value <= 1000000 and value % 10 == 0:
+            return value
+    return None
+
+
+def quantity_before_metric(text: str):
+    """Quantity written right before the metric it buys ("200 TikTok
+    views", "200 የቲክቶክ እይታዎች"), or None. Only a number
+    immediately before the metric counts, so a stray number
+    elsewhere in the message ("my balance is 100") is never read as
+    the quantity. (Round 7, 13 Nov 2026: "please order now 200
+    TikTok views" asked "How many?" because the AI did not return
+    the quantity.)"""
+    s = text or ""
+    am_words = "|".join(
+        sorted(_AMHARIC_METRICS, key=len, reverse=True)
+    )
+    pattern = (
+        r"(\d[\d,]*)\s+(?:[^\s]+\s+){0,2}?"
+        r"(views?|followers?|likes?|comments?|subscribers?|members?|shares?"
+        r"|" + am_words + r")\b"
+    )
+    for m in re.finditer(pattern, s, flags=re.IGNORECASE):
+        try:
+            value = int(m.group(1).replace(",", ""))
         except ValueError:
             continue
         if 10 <= value <= 1000000 and value % 10 == 0:
@@ -3741,6 +3820,8 @@ async def place_order_now(message, user_id: int, merged: dict, lang: str,
         "full_name": show_full_name,
     }
     PARTIAL.pop(user_id, None)
+    # A complete order was placed: the cancelled draft is history now.
+    CANCELLED_DRAFT.pop(user_id, None)
     await send_order_result(message, lang, pending, user_id)
     return True
 
@@ -3987,6 +4068,21 @@ def _hint_word_matches(word: str, hay: str) -> bool:
     return False
 
 
+# Amharic metric words (round 7, 13 Nov 2026): the bot reads
+# Amharic orders, but kind_from_text only saw Latin words, so an
+# Amharic views order inherited the previous turn's followers hint
+# from the AI and got the wrong answer.
+_AMHARIC_METRICS = {
+    "እይታ": "views", "እይታዎች": "views",
+    "ተከታይ": "followers", "ተከታዮች": "followers",
+    "ላይክ": "likes", "ላይኮች": "likes",
+    "አስተያየት": "comments", "አስተያየቶች": "comments",
+    "ኮሜንት": "comments", "ኮሜንቶች": "comments",
+    "ሰብስክራይበር": "subscribers", "ሰብስክራይበሮች": "subscribers",
+    "ሼር": "shares", "አባል": "members", "አባላት": "members",
+}
+
+
 def kind_from_text(text: str):
     """The service kind the message asks for, or None.
 
@@ -3996,12 +4092,35 @@ def kind_from_text(text: str):
     otherwise the first metric word in message order ("views",
     "likes", "followers", ...). Singular and plural count the same,
     so "tiktok comment" and "tiktok comments" are the same kind.
+    Amharic metric words count the same way ("እይታዎች" is views).
     """
     words = re.findall(r"[a-z]+", (text or "").lower())
     word_set = set(words)
+    am_words = re.findall(r"[\u1200-\u137c]+", text or "")
+    am_metrics = [
+        _AMHARIC_METRICS[w] for w in am_words if w in _AMHARIC_METRICS
+    ]
     if "comment" in word_set and ("like" in word_set or "likes" in word_set):
         return "comment likes"
+    if "comments" in am_metrics and "likes" in am_metrics:
+        return "comment likes"
     for w in words:
+        metric = _canonical_metric(w)
+        if metric is not None:
+            return metric
+    if am_metrics:
+        return am_metrics[0]
+    return None
+
+
+def _primary_metric(kind: str):
+    """The metric actually being bought in a kind string ("comment
+    likes" -> "likes", "views" -> "views"), or None. Used to tell a
+    new order (different metric) from a clarification of the same
+    one ("likes for my comment" is still likes)."""
+    if not kind:
+        return None
+    for w in reversed(str(kind).split()):
         metric = _canonical_metric(w)
         if metric is not None:
             return metric
@@ -4922,10 +5041,24 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 if found and found not in metrics:
                     metrics.append(found)
             if len(metrics) > 1:
+                # One-tap "Use the fastest one" (round 7, 13 Nov
+                # 2026): until now the button only appeared when a
+                # service named by ID was refused, so in two live
+                # retests it never appeared at all. It is offered
+                # here too, so the user can skip the choice and take
+                # the fastest service for the platform.
+                _token = uuid.uuid4().hex[:12]
+                FASTEST_FALLBACK[_token] = {
+                    "user_id": user_id,
+                    "merged": {
+                        k: v for k, v in merged.items() if v is not None
+                    },
+                }
                 await reply_message(
                     message,
                     t("ask_metric_choose", lang, metrics=", ".join(metrics)),
                     lang, voice=voice,
+                    reply_markup=fastest_fallback_keyboard(_token, lang),
                 )
                 return False
         service = picks[0]
@@ -6058,6 +6191,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if intent_type not in ("off_topic", "unclear"):
         OFF_TOPIC_COUNT.pop(user.id, None)
 
+    # A message that pastes a link and names a metric with an order
+    # verb IS an order, even when the AI called it something else
+    # (round 7, 13 Nov 2026: "I want TikTok followers for <video
+    # link>" came back as "safety", so the link-mismatch answer
+    # never fired in that turn and the followers draft leaked into
+    # the next one). Missing fields are filled from the message
+    # itself, so the order flow sees the link and the metric.
+    if intent_type in _ORDER_OVERRIDABLE and is_order_request(text):
+        _local = local_intent(text)
+        for _k in (
+            "platform", "service_hint", "link", "quantity", "service_id",
+        ):
+            if intent.get(_k) is None and _local.get(_k) is not None:
+                intent[_k] = _local[_k]
+        intent["intent"] = "order"
+        intent_type = "order"
+
     # A question about an order awaiting Confirm ("how fast would
     # those 1000 views actually arrive?") is answered from the
     # pending service whatever the classifier called it — paxyo_info,
@@ -6463,6 +6613,39 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
 
+    # A new order with a different metric REPLACES the old draft,
+    # never merges with it (round 7, 13 Nov 2026: a followers draft
+    # survived into the next turn, so a views order got the followers
+    # answer, and a remembered 200-view draft auto-showed a Confirm
+    # card). The metric is read from the message's own words first
+    # (Amharic included), then from the AI's hint. A clarification
+    # of the same metric ("likes for my comment" is still likes)
+    # does not reset.
+    metric_changed = False
+    _new_kind = kind_from_text(text) or kind_from_text(
+        intent.get("service_hint") or ""
+    )
+    _stored_kind = kind_from_text(stored.get("service_hint") or "")
+    _new_metric = _primary_metric(_new_kind)
+    _stored_metric = _primary_metric(_stored_kind)
+    if (
+        _new_metric is not None
+        and _stored_metric is not None
+        and _new_metric != _stored_metric
+    ):
+        stored = {}
+        metric_changed = True
+        for key in ("platform", "service_hint", "link", "quantity",
+                    "service_id", "named_by_id"):
+            merged[key] = intent.get(key)
+
+    # A bare number right before the metric ("200 TikTok views") is
+    # the quantity even when the AI did not return one (round 7:
+    # "please order now 200 TikTok views" asked "How many?"
+    # instead of placing the order).
+    if merged.get("quantity") is None:
+        merged["quantity"] = quantity_before_metric(text)
+
     # Metric-from-text safety net (13 Nov 2026): the classifier
     # sometimes returns an order intent with no service_hint (or only
     # the platform word), and then complete_order picks the fastest
@@ -6570,8 +6753,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # while the user has not typed them in this message (a link or
     # quantity the user just pasted is a deliberate fresh choice and
     # is kept). Values from the stored draft or from "that link" are
-    # never touched. The record clears as soon as the user gives a
-    # fresh link, or an order is placed (see complete_order).
+    # never touched. The record clears only when an order is placed
+    # (see complete_order / place_order_now): a fresh link in a turn
+    # that never becomes an order must not clear it (round 7), or
+    # the AI can resurrect the cancelled link from history on the
+    # next turn.
     cancelled_draft = CANCELLED_DRAFT.get(user.id) or {}
     if cancelled_draft:
         if (merged.get("link")
@@ -6584,8 +6770,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 and not _quantity_grounded_in_text(
                     text, merged["quantity"])):
             merged["quantity"] = stored.get("quantity")
-        if merged.get("link"):
-            CANCELLED_DRAFT.pop(user.id, None)
+    # A metric change starts a fresh order: a link or quantity the
+    # AI carried over from the old order's history is dropped unless
+    # the user typed it in this message (round 7, 13 Nov 2026: after
+    # a followers draft, "I want TikTok views" auto-showed a Confirm
+    # card for the remembered link and quantity). A reply to the
+    # bot's question is explicit context, not history, so it is
+    # never dropped. "That link" is resolved after this and can
+    # still bring the last order's link back.
+    if metric_changed and quoted_text is None:
+        if merged.get("link") and not _link_grounded_in_text(
+            text, merged.get("link")
+        ):
+            merged["link"] = None
+        if (merged.get("quantity") is not None
+                and not _quantity_grounded_in_text(
+                    text, merged.get("quantity"))):
+            merged["quantity"] = None
     # A link for the wrong platform ("YouTube subscribers" to a
     # TikTok URL): point it out and wait for the correction — never
     # place a mismatched order. Handles (@user1) have no domain, so

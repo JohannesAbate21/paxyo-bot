@@ -611,8 +611,9 @@ Four gaps found in the live retest, plus one the owner added:
   are dropped and the bot asks for the link instead of auto-showing
   the cancelled card. A link or quantity the user types in the new
   message is a deliberate fresh choice and is kept. The record
-  clears as soon as the user gives a fresh link or an order is
-  placed. The last PLACED order is untouched, so "the usual" keeps
+  clears when an order is placed (round 7 tightened this: a fresh
+  link in a turn that never becomes an order no longer clears it).
+  The last PLACED order is untouched, so "the usual" keeps
   working.
 - **"Same like as usual" reuses the link even when the AI
   misclassifies it.** The phrasing ("the usual", "same as
@@ -653,3 +654,53 @@ digits/links), the pay-methods guard swallowed "How do I add
 money?", and the kind check fired on the sample `instagram.com/p/x`
 link used for followers orders. All three were rescoped as above;
 the suite is green again (439 tests: 428 existing + 11 new).
+
+## Round 7 (13 Nov 2026 — live-test gaps: state leakage)
+
+- **A new metric replaces the old draft, never merges with it.**
+  The live retest found the main bug was state leaking across
+  turns: a followers draft survived into the next turn, so an
+  Amharic views order got the followers answer, and a remembered
+  200-view draft auto-showed a Confirm card. Now, when a message
+  names a metric different from the stored draft's metric, the
+  draft is dropped and the order starts fresh — and a link or
+  quantity the AI carried over from the old order's history is
+  dropped too, unless the user typed it in this message. A
+  clarification of the same metric ("likes for my comment" is still
+  likes) does not reset the draft, and a reply to the bot's question
+  is explicit context, never dropped.
+- **Amharic metric words are read.** `kind_from_text` only saw
+  Latin words, so an Amharic views order ("እይታዎች") inherited the
+  previous turn's followers hint from the AI. Amharic metric words
+  (እይታዎች views, ተከታዮች followers, ላይኮች likes, አስተያየቶች
+  comments, and more) now count the same way, so the message's own
+  metric wins over a history-poisoned AI hint.
+- **A misclassified order is still an order.** "I want TikTok
+  followers for <video link>" came back from the AI as "safety",
+  so the link-mismatch answer never fired in that turn. A local
+  guard now runs after classification: a message that pastes a link
+  (or @handle) and names a metric with an order verb ("want",
+  "order", "buy", "get me", "give me", "need", Amharic እፈል- /
+  ትዕዛዝ / ይዘዝ / ይግዝ) is forced to intent "order", with missing
+  fields filled from the message itself. Genuine questions are
+  untouched: price, ban, payment and public-account questions are
+  answered by their own checks, and a message with no order verb
+  ("is this link safe?") is not an order.
+- **"Order now" parses the quantity before the metric.** "please
+  order now 200 TikTok views for this video: <link>" asked "How
+  many?" because the AI did not return the quantity. A number
+  written right before the metric is now read as the quantity, so
+  the order is placed at once. Only a number immediately before
+  the metric counts — a stray number elsewhere ("my balance is
+  100") is never read as the quantity.
+- **"Use the fastest one" appears when the metric is ambiguous.**
+  Until now the button only appeared when a service named by ID was
+  refused, so in two live retests it never appeared at all. It is
+  now offered on the "Which one do you want — views, likes?"
+  question too, so the user can skip the choice and take the
+  fastest service for the platform.
+- **The cancelled record clears only on a placed order.** (See the
+  Round 6 note above.)
+
+450 tests: 439 existing + 11 new, all passing, no existing test
+changed.
