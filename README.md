@@ -407,3 +407,47 @@ Two bugs found live on 13 Nov, both fixed here:
   services()` now normalises the API shape to the bot's shape in
   one place, so prices, cheapest-first sorting, and order
   placement all see real values.
+
+## Round 4 (13 Nov 2026 — live-test gaps)
+
+Four gaps found in the live retest, plus one the owner added:
+
+- **Budget answers state quantities.** "How much views can 10 br
+  get me?" listed per-1000 prices but never said how many views.
+  The budget answer now says the quantity each option buys
+  (`qty_for_amount`: floor of amount / rate × 1000, rounded down
+  to a multiple of 10) — about 520 views on the fastest one,
+  about 6,620 on the cheapest.
+- **Speed questions are answered from the pending service.**
+  "How fast would those 1000 views arrive?" after a Confirm card
+  got a generic line, because the classifier called it
+  `paxyo_info` and the order flow never saw it. The question is
+  now intercepted before intent dispatch and answered from the
+  pending service's average time ("usually starts within
+  5 minutes"). A number equal to the pending quantity is a
+  reference to that order, not new information.
+- **A quantity change reuses the pending link.** "Could I get 200
+  views instead?" asked for the link again. It now updates the
+  Confirm card in place (same service, same link, new quantity
+  and total). A different platform or kind is still a new order.
+- **Cheapest stays on the platform.** "Something cheaper" in a
+  TikTok views chat offered Twitter Tweet Statistics. Cheaper /
+  discount / budget replies now fall back to the platform and
+  metric of the pending Confirm card or the order being built.
+- **The bot knows Paxyo.** `PAXYO_KNOWLEDGE` now carries the
+  owner (Yohannes Abate / William), paxyo.et, the Telegram
+  channel, @paxyo_bot, the mini app, support@paxyo.et, Telebirr /
+  CBE deposits via Chapa, and the 20% first-deposit bonus
+  (invite code REF3723FB335). `paxyo_facts_answer` answers
+  owner / what-is / how-to-pay / where-to-find questions from
+  those local facts when the AI is down. The secrecy rule is
+  unchanged: never the supplier, never what Paxyo pays.
+- **Video likes / comment likes / comments are three services.**
+  "Likes for my comment" must offer Tiktok Comment Likes, "likes
+  for my video" video likes, "comments on my video" a comments
+  service. `kind_from_text` reads the kind from the user's own
+  words (singular and plural count the same), and
+  `pick_services` only matches services whose name carries the
+  asked kinds — so a comments request never gets Comment Likes
+  (its name also says "likes") and a video-likes request never
+  gets a comment-likes service.

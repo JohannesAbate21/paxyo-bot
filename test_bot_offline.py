@@ -827,6 +827,9 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Never say where Paxyo's services come from", system)
 
     async def test_paxyo_info_falls_back_when_model_empty(self):
+        # Round-4 change: "What is Paxyo?" now has a local facts
+        # answer (see TestRoundFourFixes), so this generic-fallback
+        # test asks a question with no local fact instead.
         msg = FakeMessage()
         update = FakeUpdate(msg)
         with mock.patch(
@@ -835,7 +838,7 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
         ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
             "bot.gemini_generate", new=mock.AsyncMock(return_value="")
         ), mock.patch("bot.speak_reply"):
-            await bot.handle_order_text(update, None, "What is Paxyo?")
+            await bot.handle_order_text(update, None, "How long does delivery take?")
         self.assertEqual(
             msg.text_sent,
             ["Paxyo is a social media service — followers, likes "
@@ -4578,6 +4581,30 @@ TIKTOK_SERVICES = [
         "rate_etb_per_1000": 41.12, "min": 10, "max": 5000000,
         "average_time": "1 minute", "active": True, "provider_service_id": 2003,
     },
+    # Round 4 (13 Nov 2026): a real comments service, a video-likes
+    # service and a cheap views service, so the three-way split
+    # (video likes / comment likes / comments) and the budget
+    # quantities can be tested. All slower than the 5-minute views
+    # service, so the fastest-three order the ambiguity test relies
+    # on does not change.
+    {
+        "service": 2004, "name": "Tiktok Custom Comments | Fast",
+        "category": "Tiktok Comments", "type": "Default",
+        "rate_etb_per_1000": 30.0, "min": 10, "max": 10000,
+        "average_time": "10 minutes", "active": True, "provider_service_id": 2004,
+    },
+    {
+        "service": 2005, "name": "TikTok Likes | Fast",
+        "category": "TikTok Likes", "type": "Default",
+        "rate_etb_per_1000": 10.0, "min": 10, "max": 100000,
+        "average_time": "10 minutes", "active": True, "provider_service_id": 2005,
+    },
+    {
+        "service": 2006, "name": "TikTok Video Views | Cheap",
+        "category": "TikTok Video Views", "type": "Default",
+        "rate_etb_per_1000": 1.51, "min": 10, "max": 100000,
+        "average_time": "30 minutes", "active": True, "provider_service_id": 2006,
+    },
 ]
 
 
@@ -4983,11 +5010,13 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
 
     def test_pick_services_hint_requires_all_words(self):
         # William's live case: "tiktok views" must not match the
-        # Save service or the Comment Likes service.
+        # Save service or the Comment Likes service. Round 4 added
+        # a second views service (#2006, cheap), so both views
+        # services match now — fastest first.
         picks = bot.pick_services(
             TIKTOK_SERVICES, platform="tiktok", service_hint="tiktok views"
         )
-        self.assertEqual([s["service"] for s in picks], [2001])
+        self.assertEqual([s["service"] for s in picks], [2001, 2006])
 
     async def test_budget_for_views_offers_only_views(self):
         msg = await self._send(
@@ -5323,14 +5352,20 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("(#2001)", msg.text_sent[0])
 
     async def test_existing_metric_hint_is_not_overridden(self):
+        # Round-4 change (owner, 13 Nov 2026): "tiktok likes" is
+        # video likes, NOT comment likes — a plain likes hint now
+        # picks the video-likes service (#2005), and "Tiktok Comment
+        # Likes" (#2003) is only for likes on a comment. The hint
+        # itself is still left alone (not rewritten to views).
         msg, _ = await self._turns([
             ("I want 1000 tiktok likes https://vt.tiktok.com/ZSpQWTSmH/",
              intent_of("order", platform="tiktok", service_hint="tiktok likes",
                        link="https://vt.tiktok.com/ZSpQWTSmH/",
                        quantity=1000)),
         ], paxyo=TikTokPaxyo())
-        self.assertIn("Tiktok Comment Likes", msg.text_sent[0])
-        self.assertIn("(#2003)", msg.text_sent[0])
+        self.assertIn("TikTok Likes", msg.text_sent[0])
+        self.assertIn("(#2005)", msg.text_sent[0])
+        self.assertNotIn("Comment Likes", msg.text_sent[0])
 
     async def test_derived_hint_stored_when_asking_for_link(self):
         msg, _ = await self._turns([
@@ -5461,6 +5496,346 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Bearer ", joined)
         self.assertNotIn("gsk-test", joined)
         self.assertNotIn("key=", joined)
+
+
+class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
+    """The 13 Nov 2026 round-4 fixes: budget answers state quantities,
+    speed questions are answered from the pending service whatever the
+    classifier said, a quantity change reuses the pending link, the
+    cheapest reply stays on the platform in the conversation, the bot
+    knows Paxyo itself, and video likes / comment likes / comments
+    are three different services."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+        ):
+            store.clear()
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        """Send several messages in sequence, sharing one FakeMessage
+        so text_sent accumulates; returns (msg, fake_paxyo)."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _build_pending_views(self, paxyo=None):
+        """A Confirm card for 1000 TikTok views on the test link."""
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=paxyo or TikTokPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        return msg
+
+    # (1) budget answers state quantities ----------------------------
+
+    def test_qty_for_amount(self):
+        # William's live case: 10 ETB buys 520 of the 18.90/1000
+        # views service and 6,620 of the 1.51/1000 one — floor to a
+        # multiple of 10, because quantities must be multiples of 10.
+        self.assertEqual(bot.qty_for_amount(10, 18.9), 520)
+        self.assertEqual(bot.qty_for_amount(10, 1.51), 6620)
+        self.assertEqual(bot.qty_for_amount(500, 42.0), 11900)
+        self.assertEqual(bot.qty_for_amount(0.2, 21.0), 0)
+        self.assertEqual(bot.qty_for_amount(10, 0), 0)
+        self.assertEqual(bot.qty_for_amount(None, 18.9), 0)
+
+    async def test_budget_states_quantities(self):
+        # William's live question: "how much views can 10 br get me?"
+        # listed per-1000 prices but never said how many views.
+        msg, _ = await self._turns([
+            ("how much views can 10 br get me",
+             intent_of("budget", amount=10, platform="tiktok",
+                       service_hint="tiktok views")),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("6,620", msg.text_sent[0])
+        self.assertIn("520", msg.text_sent[0])
+        self.assertIn("per 1000", msg.text_sent[0])
+        self.assertIn("How many", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    # (2) speed questions answered from the pending service ----------
+
+    async def test_speed_question_with_paxyo_info_intent(self):
+        # Live case: the question was classified paxyo_info and got
+        # the generic line. It must be answered from the pending
+        # service's real time — even with "1000" in the question.
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            ("how fast would those 1000 views actually arrive?",
+             intent_of("paxyo_info")),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("5 minutes", msg.text_sent[1])
+        self.assertNotIn("will be shown before you confirm", msg.text_sent[1])
+        self.assertNotIn("exact speed can vary", msg.text_sent[1])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_speed_question_without_number_with_paxyo_info(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            ("how fast would those views arrive?",
+             intent_of("paxyo_info")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("5 minutes", msg.text_sent[1])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_drop_question_with_paxyo_info_intent(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+            ("wouldn't it drop?", intent_of("paxyo_info")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("TikTok Video Views", msg.text_sent[1])
+        self.assertIn("refill", msg.text_sent[1].lower())
+        self.assertEqual(len(bot.PENDING), 1)
+
+    def test_pending_question_with_known_quantity(self):
+        self.assertEqual(
+            bot.pending_order_question(
+                "how fast would those 1000 views actually arrive?", 1000
+            ),
+            "speed",
+        )
+        # A different number is new information, not a reference.
+        self.assertIsNone(
+            bot.pending_order_question(
+                "how fast would those 2000 views arrive?", 1000
+            )
+        )
+        self.assertEqual(
+            bot.pending_order_question("how fast can you deliver it"),
+            "speed",
+        )
+
+    # (3) quantity change reuses the pending link --------------------
+
+    async def test_quantity_change_updates_confirm_card(self):
+        await self._build_pending_views()
+        msg, _ = await self._turns([
+            ("could I just get 200 views instead for now?",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views", quantity=200)),
+        ], paxyo=TikTokPaxyo())
+        # The second turn is the only reply in this _turns call; the
+        # first turn built the pending card in _build_pending_views.
+        self.assertIn("Quantity updated: 200.", msg.text_sent[0])
+        self.assertIn("200", msg.text_sent[0])
+        self.assertIn("3.78", msg.text_sent[0])
+        self.assertIn("https://vt.tiktok.com/ZSpQWTSmH/", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["quantity"], 200)
+        self.assertEqual(pending["link"], "https://vt.tiktok.com/ZSpQWTSmH/")
+
+    async def test_bare_quantity_updates_confirm_card(self):
+        await self._build_pending_views()
+        msg, _ = await self._turns([
+            ("200", intent_of("order", quantity=200)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Quantity updated: 200.", msg.text_sent[0])
+        self.assertIn("3.78", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["quantity"], 200)
+
+    async def test_quantity_change_different_platform_asks_for_link(self):
+        await self._build_pending_views()
+        msg, _ = await self._turns([
+            ("I want 500 Instagram followers",
+             intent_of("order", platform="instagram",
+                       service_hint="followers", quantity=500)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link the order is for."
+        )
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["quantity"], 1000)
+
+    # (4) cheapest stays on the platform in the conversation ---------
+
+    async def test_cheaper_stays_on_platform_with_pending(self):
+        await self._build_pending_views()
+        msg, _ = await self._turns([
+            ("something cheaper", intent_of("discount")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertNotIn("Twitter", msg.text_sent[0])
+        self.assertNotIn("Tweet", msg.text_sent[0])
+
+    async def test_cheaper_stays_on_platform_with_partial(self):
+        bot.PARTIAL[1] = {
+            "platform": "tiktok", "service_hint": "tiktok views",
+        }
+        msg, _ = await self._turns([
+            ("something cheaper", intent_of("discount")),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertNotIn("Twitter", msg.text_sent[0])
+
+    # (5) the bot knows Paxyo ----------------------------------------
+
+    def test_paxyo_knowledge_has_owner_facts(self):
+        for fact in (
+            "Yohannes Abate", "REF3723FB335", "support@paxyo.et",
+            "paxyo.et", "t.me/paxyo251", "@paxyo_bot", "Telebirr",
+        ):
+            self.assertIn(fact, bot.PAXYO_KNOWLEDGE)
+        self.assertNotIn("GodOfPanel", bot.PAXYO_KNOWLEDGE)
+
+    async def _paxyo_info_with_ai_down(self, text, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("paxyo_info")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(side_effect=Exception("AI down")),
+        ), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def test_paxyo_facts_owner_when_ai_down(self):
+        msg = await self._paxyo_info_with_ai_down("who owns paxyo?")
+        self.assertIn("Yohannes Abate", msg.text_sent[0])
+        # And in Amharic too.
+        msg = await self._paxyo_info_with_ai_down(
+            "Paxyo ባለቤት ማን ነው?", user=FakeUser(language_code="am")
+        )
+        self.assertIn("Yohannes Abate", msg.text_sent[0])
+
+    async def test_paxyo_facts_what_is_when_ai_down(self):
+        msg = await self._paxyo_info_with_ai_down("what is paxyo?")
+        self.assertIn("paxyo.et", msg.text_sent[0])
+        self.assertIn("Ethiopian", msg.text_sent[0])
+
+    async def test_paxyo_facts_how_to_pay_when_ai_down(self):
+        msg = await self._paxyo_info_with_ai_down("how do I add money?")
+        self.assertIn("Telebirr", msg.text_sent[0])
+        self.assertIn("REF3723FB335", msg.text_sent[0])
+
+    async def test_paxyo_facts_where_to_find_when_ai_down(self):
+        msg = await self._paxyo_info_with_ai_down("where can I find Paxyo?")
+        self.assertIn("t.me/paxyo251", msg.text_sent[0])
+        self.assertIn("support@paxyo.et", msg.text_sent[0])
+
+    async def test_paxyo_facts_no_match_falls_back(self):
+        msg = await self._paxyo_info_with_ai_down(
+            "How long does delivery take?"
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["Paxyo is a social media service — followers, likes "
+             "and views at paxyo.et. What would you like to order?"],
+        )
+
+    # (6) video likes / comment likes / comments ---------------------
+
+    def test_kind_from_text(self):
+        self.assertEqual(
+            bot.kind_from_text("I want 100 likes for my tiktok comment"),
+            "comment likes",
+        )
+        self.assertEqual(bot.kind_from_text("like my comment"), "comment likes")
+        self.assertEqual(
+            bot.kind_from_text("comments on my video"), "comments"
+        )
+        self.assertEqual(bot.kind_from_text("tiktok comment"), "comments")
+        self.assertEqual(
+            bot.kind_from_text("I want 1000 tiktok views"), "views"
+        )
+        self.assertEqual(
+            bot.kind_from_text("likes for my video"), "likes"
+        )
+        self.assertIsNone(bot.kind_from_text("how fast can you deliver it"))
+
+    def test_local_intent_comment_likes(self):
+        result = bot.local_intent("I want 100 likes for my tiktok comment")
+        self.assertEqual(result["intent"], "order")
+        self.assertEqual(result["service_hint"], "tiktok comment likes")
+        result = bot.local_intent("tiktok comment")
+        self.assertEqual(result["service_hint"], "tiktok comments")
+
+    async def test_comment_likes_flow(self):
+        # Owner, 13 Nov 2026: likes ON a comment, not video likes
+        # and not the comments service. The classifier only said
+        # "tiktok likes" — the message itself carries "comment".
+        msg, _ = await self._turns([
+            ("I want 100 likes for my tiktok comment https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok likes",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=100)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Tiktok Comment Likes", msg.text_sent[0])
+        self.assertIn("(#2003)", msg.text_sent[0])
+        self.assertNotIn("TikTok Likes | Fast", msg.text_sent[0])
+
+    async def test_comments_flow(self):
+        msg, _ = await self._turns([
+            ("I want 100 tiktok comments https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=100)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Tiktok Custom Comments", msg.text_sent[0])
+        self.assertIn("(#2004)", msg.text_sent[0])
+        self.assertNotIn("Comment Likes", msg.text_sent[0])
+
+    async def test_singular_comment_flow(self):
+        msg, _ = await self._turns([
+            ("I want 100 tiktok comment https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=100)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Tiktok Custom Comments", msg.text_sent[0])
+        self.assertIn("(#2004)", msg.text_sent[0])
+
+    async def test_video_likes_flow(self):
+        msg, _ = await self._turns([
+            ("I want 100 likes for my tiktok video https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok likes",
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=100)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("TikTok Likes", msg.text_sent[0])
+        self.assertIn("(#2005)", msg.text_sent[0])
+        self.assertNotIn("Comment Likes", msg.text_sent[0])
 
 
 if __name__ == "__main__":

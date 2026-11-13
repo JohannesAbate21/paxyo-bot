@@ -314,7 +314,9 @@ Rules:
 - service_hint: a short phrase for the service, e.g. "followers", "likes",
   "views", "members". Use null when unclear. A description such as
   "cheapest instagram followers" goes here too (the bot picks the
-  cheapest match for "cheapest").
+  cheapest match for "cheapest"). "likes" is likes on a video;
+  "comment likes" is likes on a comment; "comments" is comments on a
+  video — these are three different services, never mix them up.
 - service_id: the ID number of the service the user asked for, or null
   when they did not name one. Examples:
     "use service 6139" -> 6139
@@ -358,8 +360,16 @@ Rules:
 # and never mentions the provider or Paxyo's costs.
 PAXYO_KNOWLEDGE = """Facts about Paxyo:
 - Paxyo (paxyo.et) is a service in Ethiopia where you order followers,
-  likes, views and members for Instagram, TikTok, Telegram, YouTube,
-  Facebook and X.
+  likes, views, comments, subscribers and more for TikTok, Instagram,
+  Telegram, YouTube, Facebook and Twitter/X.
+- Paxyo is owned by Yohannes Abate (William).
+- Website: paxyo.et. Telegram channel: https://t.me/paxyo251.
+  Customer bot: @paxyo_bot. Mini app: https://miniapp-one-1.onrender.com/
+- Support: support@paxyo.et (email), or this bot.
+- Orders are paid in ETB from your Paxyo balance. Add money by
+  depositing with Telebirr or CBE Birr through Chapa.
+- First deposit bonus: invite code REF3723FB335 gives 20% bonus on
+  your first deposit.
 - Prices are in ETB per 1000 and are shown before the user confirms.
 - The customer pays from their Paxyo balance; they deposit at paxyo.et
   with Telebirr or CBE Birr through Chapa.
@@ -379,7 +389,7 @@ PAXYO_KNOWLEDGE = """Facts about Paxyo:
 - The Paxyo mini app: https://miniapp-one-1.onrender.com/
 - Paxyo's Telegram channel: https://t.me/paxyo251. The customer bot
   is @paxyo_bot. Paxyo posts its updates on the Telegram channel.
-- Support: this bot, or paxyo.et.
+- Support: support@paxyo.et.
 """
 
 # ------------------------------------------------------ voice style ------
@@ -711,6 +721,51 @@ TEXT = {
     "paxyo_info_fallback": {
         "am": "Paxyo የsocial media service ነው — followers, likes, views በpaxyo.et ይገኛሉ። ምን ማዘዝ ይፈልጋሉ?",
         "en": "Paxyo is a social media service — followers, likes and views at paxyo.et. What would you like to order?",
+    },
+    # Answers about Paxyo itself from the local facts, used when the
+    # AI is down (owner, 13 Nov 2026 — "he dont even know paxyo,
+    # teach him that"). Only the public facts: never the supplier,
+    # never what Paxyo pays.
+    "paxyo_owner": {
+        "am": "Paxyo ባለቤት Yohannes Abate (William) ነው።",
+        "en": "Paxyo is owned by Yohannes Abate (William).",
+    },
+    "paxyo_what": {
+        "am": (
+            "Paxyo በኢትዮጵያ የሚገኝ service ነው — followers, likes, views, "
+            "comments እና ሌሎች በTikTok, Instagram, Telegram, YouTube, "
+            "Facebook እና Twitter/X በpaxyo.et ይገኛሉ። ምን ማዘዝ ይፈልጋሉ?"
+        ),
+        "en": (
+            "Paxyo is an Ethiopian service where you order followers, "
+            "likes, views, comments and more for TikTok, Instagram, "
+            "Telegram, YouTube, Facebook and Twitter/X — at paxyo.et. "
+            "What would you like to order?"
+        ),
+    },
+    "paxyo_pay": {
+        "am": (
+            "በPaxyo balanceዎ ይከፍላሉ — በቴሌብር ወይም በCBE Birr በChapa "
+            "deposit ያድርጉ። የመጀመሪያ depositዎ በREF3723FB335 invite code "
+            "20% bonus ያገኛል።"
+        ),
+        "en": (
+            "You pay from your Paxyo balance — add money by depositing "
+            "with Telebirr or CBE Birr through Chapa. Your first "
+            "deposit gets a 20% bonus with invite code REF3723FB335."
+        ),
+    },
+    "paxyo_find": {
+        "am": (
+            f"Paxyoን በpaxyo.et፣ በTelegram {CHANNEL_URL}፣ በmini app "
+            f"{MINIAPP_URL} ወይም እዚህ @paxyo_bot ያገኛሉ። Support: "
+            "support@paxyo.et።"
+        ),
+        "en": (
+            f"You can find Paxyo at paxyo.et, on Telegram at "
+            f"{CHANNEL_URL}, in the mini app {MINIAPP_URL}, or right "
+            "here at @paxyo_bot. Support: support@paxyo.et."
+        ),
     },
     # Asked where the services come from, or what Paxyo pays for
     # them: one short polite deflection. It never confirms or denies
@@ -1351,7 +1406,13 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
     or "Tiktok Comment Likes" just because they say "tiktok" (13 Nov
     2026 — the bot offered saves and comment likes for a views
     order). "cheapest" ranks by price (lowest first) instead of by
-    time.
+    time. A hint that names a kind ("tiktok comments", "tiktok
+    comment likes", "tiktok likes") only matches services of that
+    kind: every kind word in the service's NAME must be one the hint
+    asked for, so a comments request never gets "Tiktok Comment
+    Likes" (its name also says "likes") and a video-likes request
+    never gets a comment-likes service. A name with no kind word at
+    all still matches — the platform check above already ran.
     """
     wanted = (platform or "").strip().lower()
     hint = (service_hint or "").strip().lower()
@@ -1364,6 +1425,11 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
             continue
         else:
             words.append(word)
+    hint_kinds = set()
+    for word in words:
+        metric = _canonical_metric(word)
+        if metric is not None:
+            hint_kinds.add(metric)
     candidates = []
     for s in services:
         if not s.get("active", True):
@@ -1380,8 +1446,10 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
             continue
         if words:
             hay = name + " " + category
-            if not all(w in hay for w in words):
+            if not all(_hint_word_matches(w, hay) for w in words):
                 continue
+        if hint_kinds and not _name_kinds(name).issubset(hint_kinds):
+            continue
         candidates.append(s)
     if cheapest:
         candidates.sort(
@@ -1461,6 +1529,18 @@ def estimated_total_etb(rate_etb_per_1000, quantity):
     """Display-only estimate from the API's own rate. The server computes
     the real total on order creation; this is never the charged amount."""
     return round(float(rate_etb_per_1000) * int(quantity) / 1000, 2)
+
+
+def qty_for_amount(amount, rate_etb_per_1000):
+    """How much a budget buys: floor(amount / rate * 1000), rounded
+    down to a multiple of 10 (quantities must be multiples of 10).
+    Returns 0 when the amount or the rate is not positive — the
+    budget does not buy even the minimum."""
+    rate = float(rate_etb_per_1000 or 0)
+    if rate <= 0 or amount is None or float(amount) <= 0:
+        return 0
+    qty = int(float(amount) / (rate / 1000))
+    return (qty // 10) * 10
 
 
 def extract_json(text: str):
@@ -2198,7 +2278,7 @@ def local_intent(text: str) -> dict:
         intent["platform"] = next(
             (w for w in _PLATFORMS if w in words), None
         )
-    metric = next((w for w in _METRICS if w in words), None)
+    metric = kind_from_text(s)
     if intent["platform"] or metric:
         intent["service_hint"] = " ".join(
             p for p in (intent["platform"], metric) if p
@@ -2440,8 +2520,11 @@ async def answer_paxyo_question(text: str, lang: str) -> str:
     """Answer a question about Paxyo itself (paxyo_info intent).
 
     The AI answers from PAXYO_KNOWLEDGE only, in the user's language,
-    in 1-3 short sentences. Falls back to a short canned line when the
-    model gives nothing usable. Never mentions the provider or costs.
+    in 1-3 short sentences. When the AI is down (or gives nothing),
+    the local facts answer instead — the bot still knows who owns
+    Paxyo, what it is, how to pay and where to find it. Falls back
+    to a short canned line when neither has an answer. Never mentions
+    the provider or costs.
     """
     system = (
         PAXYO_KNOWLEDGE
@@ -2458,9 +2541,45 @@ async def answer_paxyo_question(text: str, lang: str) -> str:
         reply = await ai_generate(text, system=system)
     except Exception as exc:
         _log_ai_failure("paxyo_info answer failed", exc)
-        return t("paxyo_info_fallback", lang)
+        return paxyo_facts_answer(text, lang) or t("paxyo_info_fallback", lang)
     answer = (reply or "").strip()
-    return answer if answer else t("paxyo_info_fallback", lang)
+    if answer:
+        return answer
+    return paxyo_facts_answer(text, lang) or t("paxyo_info_fallback", lang)
+
+
+def paxyo_facts_answer(text: str, lang: str):
+    """Answer a Paxyo question from the local facts, without the AI.
+
+    Used when the AI is down or gives nothing: the bot still knows
+    who owns Paxyo, what it is, how to pay and where to find it.
+    Returns None when the question matches no local fact (the caller
+    then uses the generic fallback line). Only the public facts —
+    never the supplier, never what Paxyo pays.
+    """
+    s = " ".join((text or "").strip().lower().split())
+    if any(p in s for p in (
+        "who owns", "who is the owner", "who runs", "who created",
+        "who made", "who is william", "who is yohannes", "ባለቤት",
+    )):
+        return t("paxyo_owner", lang)
+    if any(p in s for p in (
+        "how do i add money", "how to add money", "how do i pay",
+        "how to pay", "how do i deposit", "how to deposit",
+        "add money", "top up", "recharge", "ገንዘብ ማስገባት",
+    )):
+        return t("paxyo_pay", lang)
+    if any(p in s for p in (
+        "where can i find", "website", "paxyo.et", "channel",
+        "mini app", "where is paxyo", "follow paxyo", "social",
+    )):
+        return t("paxyo_find", lang)
+    if any(p in s for p in (
+        "what is paxyo", "about paxyo", "what does paxyo do",
+        "tell me about paxyo", "ምንድን ነው",
+    )):
+        return t("paxyo_what", lang)
+    return None
 
 
 # ------------------------------------------------------- voice replies ----
@@ -2753,6 +2872,41 @@ def slowest_service(services, platform=None, service_hint=None):
     return max(pool, key=lambda s: parse_average_time(s.get("average_time")) or 0)
 
 
+def _platform_hint_of_service(service):
+    """(platform, service_hint) for a service dict, from its name and
+    category: the platform word and the kind phrase ("tiktok comment
+    likes", "tiktok views"). Word-based, so "x" never matches "max"."""
+    hay = (
+        str(service.get("name") or "") + " "
+        + str(service.get("category") or "")
+    ).lower()
+    words = re.findall(r"[a-z]+", hay)
+    platform = next((p for p in _PLATFORMS if p in words), None)
+    kind = kind_from_text(hay)
+    hint = " ".join(p for p in (platform, kind) if p) or None
+    return platform, hint
+
+
+def _conversation_context(user_id: int):
+    """(platform, service_hint) of the order the user is talking
+    about — the pending Confirm card first, then the order being
+    built. Used when a message ("something cheaper", "how much can
+    10 br get me") names no platform of its own: the cheapest reply
+    stays on the platform and metric already in the conversation
+    instead of wandering to another platform's cheapest service
+    (13 Nov 2026 — a TikTok views chat got Twitter Tweet
+    Statistics). Returns (None, None) when there is no context."""
+    _cid, pending = pending_for_user(user_id)
+    if pending is not None:
+        return _platform_hint_of_service(pending.get("service") or {})
+    partial = PARTIAL.get(user_id) or {}
+    platform = (partial.get("platform") or "").strip().lower() or None
+    hint = partial.get("service_hint")
+    if platform or hint:
+        return platform, hint
+    return None, None
+
+
 def extract_links(text: str):
     """URLs (and bare t.me links) in a message, in order, de-duped.
 
@@ -2802,22 +2956,92 @@ _PENDING_DROP_PHRASES = (
 )
 
 
+def _canonical_metric(word: str):
+    """Plural metric in _METRICS for a singular/plural word, or None.
+
+    "comment" -> "comments", "like" -> "likes", "view" -> "views",
+    "follower" -> "followers", "subscriber" -> "subscribers",
+    "share" -> "shares", "member" -> "members". Already-plural words
+    return themselves; anything else returns None.
+    """
+    w = (word or "").strip().lower()
+    for m in _METRICS:
+        if w == m or w == m[:-1]:
+            return m
+    return None
+
+
+def _name_kinds(name: str):
+    """Canonical kind words in a service name, as a set.
+
+    Word-based, not substring: "preview" never counts as "views",
+    and "comment" in "Tiktok Comment Likes" counts as "comments".
+    """
+    words = re.findall(r"[a-z]+", (name or "").lower())
+    kinds = set()
+    for w in words:
+        metric = _canonical_metric(w)
+        if metric is not None:
+            kinds.add(metric)
+    return kinds
+
+
+def _hint_word_matches(word: str, hay: str) -> bool:
+    """True when a hint word appears in a service name/category.
+
+    Kind words match in singular or plural ("views" matches a
+    service named "TikTok View", "comment" matches "Comments");
+    other words must appear exactly as written.
+    """
+    if word in hay:
+        return True
+    if _canonical_metric(word) is not None:
+        variant = word[:-1] if word.endswith("s") else word + "s"
+        return variant in hay
+    return False
+
+
+def kind_from_text(text: str):
+    """The service kind the message asks for, or None.
+
+    "comment likes" when the message asks for likes on a comment
+    ("likes for my comment", "like my comment"); "comments" for a
+    comments request ("comments on my video", "tiktok comment");
+    otherwise the first metric word in message order ("views",
+    "likes", "followers", ...). Singular and plural count the same,
+    so "tiktok comment" and "tiktok comments" are the same kind.
+    """
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    word_set = set(words)
+    if "comment" in word_set and ("like" in word_set or "likes" in word_set):
+        return "comment likes"
+    for w in words:
+        metric = _canonical_metric(w)
+        if metric is not None:
+            return metric
+    return None
+
+
 def metric_from_text(text: str):
-    """First metric word in the message text, or None.
+    """First metric kind in the message text, or None.
 
     The classifier sometimes drops the metric ("I want 1000 tiktok
     views" -> hint "tiktok" or none); the order flow reads the metric
-    back from the user's own words instead of guessing.
+    back from the user's own words instead of guessing. May return
+    the two-word kind "comment likes" for likes on a comment.
     """
-    words = re.findall(r"[a-z]+", (text or "").lower())
-    return next((w for w in words if w in _METRICS), None)
+    return kind_from_text(text)
 
 
-def pending_order_question(text: str):
+def pending_order_question(text: str, known_quantity=None):
     """'speed' / 'drop' / None: is this message a question about an
     order being built? A question carries no link and no
     quantity-like number, and is not a service choice ("use the
-    fastest one")."""
+    fastest one"). A number that equals a quantity already known
+    (the pending order's quantity, or the order being built) is a
+    reference to that order, not new information, so it does not
+    block the question: "how fast would those 1000 views arrive?"
+    is a question about the 1000-view order."""
     s = " ".join((text or "").strip().lower().split())
     if not s:
         return None
@@ -2829,6 +3053,8 @@ def pending_order_question(text: str):
         try:
             value = int(m.group(0).replace(",", ""))
         except ValueError:
+            continue
+        if value == known_quantity:
             continue
         if 10 <= value <= 1000000 and value % 10 == 0:
             return None
@@ -3855,6 +4081,12 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
         quantity = None
     platform = (intent.get("platform") or "").strip().lower() or None
     hint = intent.get("service_hint")
+    if not platform and not hint:
+        # A budget question in the middle of an order ("how much
+        # views can 10 br get me" after a TikTok views order) is
+        # about that platform and metric — not about every service
+        # Paxyo sells.
+        platform, hint = _conversation_context(user.id)
     try:
         services = await paxyo.services()
     except Exception as exc:
@@ -3882,16 +4114,53 @@ async def handle_budget_text(update, text, intent, lang, voice=False):
         seen.add(sid)
         options.append(svc)
     if quantity is None:
-        option_text = "; ".join(
-            f"{clean_service_name(s.get('name'))} — "
-            f"{format_money(s.get('rate_etb_per_1000', 0))} ETB per 1000"
-            for s in options
-        )
+        # State the quantity each option buys, not just the per-1000
+        # price: "how much views can 10 br get me" is a question
+        # about a number (13 Nov 2026 — the bot listed prices and
+        # never said how many views). An option the budget cannot
+        # buy at minimum is left out; when none is affordable, say
+        # so with the cheapest minimum instead.
+        shown = []
+        shown_services = []
+        for s in options:
+            qty = qty_for_amount(
+                budget, float(s.get("rate_etb_per_1000", 0) or 0)
+            )
+            if qty < int(s.get("min", 0) or 0):
+                continue
+            metric_word = (
+                kind_from_text(hint or "")
+                or kind_from_text(clean_service_name(s.get("name")) or "")
+                or "service"
+            )
+            shown.append(
+                f"{clean_service_name(s.get('name'))} — "
+                f"about {qty:,} {metric_word} "
+                f"({format_money(s.get('rate_etb_per_1000', 0))} ETB per 1000)"
+            )
+            shown_services.append(s)
+        if not shown:
+            await reply_message(
+                update.message,
+                t(
+                    "budget_too_small", lang, budget=format_money(budget),
+                    minimum=int(cheapest.get("min", 0) or 0),
+                    metric=metric,
+                    name=clean_service_name(cheapest.get("name")),
+                    total=format_money(estimated_total_etb(
+                        float(cheapest.get("rate_etb_per_1000", 0) or 0),
+                        int(cheapest.get("min", 0) or 0),
+                    )),
+                ),
+                lang, voice=voice,
+            )
+            return
+        option_text = "; ".join(shown)
         # Remember what was shown, in order, so "first one" /
         # "second one" picks it instead of starting a new order.
         BUDGET_OPTIONS[user.id] = {
             "platform": platform, "service_hint": hint,
-            "quantity": None, "options": options,
+            "quantity": None, "options": shown_services,
         }
         await reply_message(
             update.message,
@@ -4198,6 +4467,41 @@ async def handle_batch_text(update, text, intent, lang, voice=False):
     await show_batch_confirm(update.message, user.id, ready, lang, voice=voice)
 
 
+_CHANGE_PHRASES = (
+    "instead", "make it", "change", "just get", "rather",
+)
+
+
+def _is_quantity_change(text, merged, pending):
+    """True when a message with a new quantity is a change to the
+    order awaiting Confirm, not a new order: it says so ("200
+    instead", "make it 200"), or it names the same platform and kind
+    as the pending service (a bare "200" while a Confirm card is up
+    means "200 instead"). A different platform or kind is a new
+    order and still asks for its link."""
+    s = " ".join((text or "").strip().lower().split())
+    if any(p in s for p in _CHANGE_PHRASES):
+        return True
+    service = pending.get("service") or {}
+    hay = (
+        str(service.get("name") or "") + " "
+        + str(service.get("category") or "")
+    ).lower()
+    platform = (merged.get("platform") or "").strip().lower()
+    if platform:
+        words = re.findall(r"[a-z]+", hay)
+        if platform not in words:
+            return False
+    kind = kind_from_text(text)
+    if kind is not None:
+        kind_words = {
+            _canonical_metric(w) for w in kind.split()
+        } - {None}
+        if kind_words != _name_kinds(service.get("name")):
+            return False
+    return True
+
+
 async def handle_change_order(update, text, intent, lang, voice=False):
     """'Change the quantity from 5,000 to 2,000 before it starts.'
 
@@ -4467,6 +4771,11 @@ async def handle_cheapest_reply(update, intent, lang, voice, key):
     user = update.effective_user
     platform = (intent.get("platform") or "").strip().lower() or None
     hint = intent.get("service_hint")
+    if not platform and not hint:
+        # "Something cheaper" in the middle of an order names no
+        # platform of its own: stay on the platform and metric
+        # already in the conversation.
+        platform, hint = _conversation_context(user.id)
     quantity = intent.get("quantity")
     try:
         quantity = int(quantity) if quantity is not None else None
@@ -4670,6 +4979,30 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if intent is None:
         intent = await extract_intent(text)
     intent_type = (intent.get("intent") or "unclear").strip().lower()
+
+    # A question about an order awaiting Confirm ("how fast would
+    # those 1000 views actually arrive?") is answered from the
+    # pending service whatever the classifier called it — paxyo_info,
+    # unclear, anything. The round-3 fix only ran inside the order
+    # flow, so a paxyo_info classification answered it with the
+    # generic line instead of the real "about 1 minute". A number
+    # that equals the pending quantity is a reference to that order,
+    # not new information.
+    if intent_type in ("paxyo_info", "unclear", "order", "off_topic"):
+        _cid, _pending = pending_for_user(user.id)
+        if _pending is not None:
+            _question = pending_order_question(
+                text, _pending.get("quantity")
+            )
+            if _question is not None:
+                _answer = pending_confirm_answer(
+                    _pending.get("service"), _question, lang
+                )
+                if _answer is not None:
+                    await reply_message(
+                        update.message, _answer, lang, voice=voice
+                    )
+                    return
 
     # "First one" / "second one" after a budget list: the user picked
     # one of the options just shown. Resolve it to that service and
@@ -5022,6 +5355,27 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 f"{platform} {metric}" if platform else metric
             )
 
+    # "Likes for my comment" is a different kind from "likes for my
+    # video": the classifier often returns just "tiktok likes" for a
+    # comment-likes request, and the fastest pick would then be a
+    # video-likes service. When the message itself names a kind the
+    # hint does not carry, the message wins — the hint is rewritten
+    # to the kind the user actually asked for.
+    kind = kind_from_text(text)
+    if kind is not None:
+        kind_words = {
+            _canonical_metric(w) for w in kind.split()
+        } - {None}
+        hint_kind_words = {
+            _canonical_metric(w)
+            for w in (merged.get("service_hint") or "").split()
+        } - {None}
+        if kind_words != hint_kind_words:
+            platform = (merged.get("platform") or "").strip().lower()
+            merged["service_hint"] = (
+                f"{platform} {kind}" if platform else kind
+            )
+
     # A service the user named: Gemini's service_id first, the local
     # ID regex as fallback ("service 6139", "#6139", a bare "6139").
     # A bare number is a service ID, not a quantity — quantities must
@@ -5086,10 +5440,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # to work with" check, or the question would fall through to
     # the busy line while the AI is down.
     if not merged.get("link") and not merged.get("quantity"):
-        question = pending_order_question(text)
-        if question is not None:
-            _cid, _pending = pending_for_user(user.id)
-            if _pending is not None:
+        _cid, _pending = pending_for_user(user.id)
+        if _pending is not None:
+            question = pending_order_question(
+                text, _pending.get("quantity")
+            )
+            if question is not None:
                 answer = pending_confirm_answer(
                     _pending.get("service"), question, lang
                 )
@@ -5098,6 +5454,44 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         update.message, answer, lang, voice=voice
                     )
                     return
+
+    # A new quantity for the order already awaiting Confirm ("could I
+    # get 200 views instead?") updates that card — the link and the
+    # service are already known, so the bot never asks for the link
+    # again (13 Nov 2026 — it did ask, and the user had to paste the
+    # link a second time). A different platform or kind is a new
+    # order, not a change, and still asks for its link.
+    if not merged.get("link") and merged.get("quantity"):
+        _cid, _pending = pending_for_user(user.id)
+        if _pending is not None and _is_quantity_change(
+            text, merged, _pending
+        ):
+            service = _pending["service"]
+            new_qty = int(merged["quantity"])
+            error = validate_quantity(new_qty, service)
+            if error:
+                await reply_message(
+                    update.message,
+                    t("bad_quantity", lang, min=service.get("min"),
+                      max=service.get("max")),
+                    lang, voice=voice,
+                )
+                return
+            _pending["quantity"] = new_qty
+            _pending["total"] = estimated_total_etb(
+                float(service.get("rate_etb_per_1000", 0)), new_qty
+            )
+            await reply_message(
+                update.message,
+                confirm_card_text(
+                    lang, service, new_qty, _pending["total"],
+                    _pending["link"],
+                    note=t("change_note", lang, quantity=new_qty),
+                ),
+                lang,
+                reply_markup=confirm_keyboard(_cid),
+            )
+            return
 
     # Nothing to work with at all: not understood. (A bare number or a
     # bare link with no context still counts as something: it is stored
@@ -5133,7 +5527,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # no new order details — the helper checks that. The partial
     # stays open, so the next message still completes the order.
     if not merged.get("link") and (stored.get("platform") or stored.get("service_hint")):
-        question = pending_order_question(text)
+        question = pending_order_question(text, stored.get("quantity"))
         if question is not None:
             try:
                 services = await paxyo.services()
