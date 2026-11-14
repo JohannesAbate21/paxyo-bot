@@ -4604,7 +4604,16 @@ class TestEdgeHelpers(unittest.TestCase):
                       bot.pending_note(1, "en"))
         bot.PENDING.clear()
         bot.CANCELLED_DRAFT.clear()
-        bot.PARTIAL[1] = {"platform": "instagram"}
+        # Owner, 14 Nov 2026: a link-less draft left by a price
+        # question (platform + quantity, no link) is NOT an order
+        # being built — no note on info answers.
+        bot.PARTIAL[1] = {"platform": "instagram", "quantity": 1000}
+        self.assertEqual(bot.pending_note(1, "en"), "")
+        # A draft WITH a link is a real order in progress.
+        bot.PARTIAL[1] = {
+            "platform": "instagram",
+            "link": "https://instagram.com/p/x",
+        }
         self.assertIn("still building an order",
                       bot.pending_note(1, "en"))
         bot.PARTIAL.clear()
@@ -6330,6 +6339,14 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bot.is_price_question("what's the price of 1000 views?"))
         self.assertFalse(bot.is_price_question("how much views can 10 br get me"))
         self.assertFalse(bot.is_price_question("what is my balance?"))
+        # Owner fix round, 14 Nov 2026: shapes that used to miss
+        # the fast path and fall through to a price-less free reply.
+        self.assertTrue(bot.is_price_question("what's the rate for tiktok followers?"))
+        self.assertTrue(bot.is_price_question("how much for 1000 followers?"))
+        self.assertTrue(bot.is_price_question("how much is it?"))
+        self.assertTrue(bot.is_price_question("how much is this?"))
+        self.assertTrue(bot.is_price_question("how much are instagram likes?"))
+        self.assertTrue(bot.is_price_question("የቴሌግራም reactions ዋጋ ስንት ነው?"))
 
     # (6) replies / quotes ----------------------------------------------
 
@@ -6387,7 +6404,10 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         ], paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, second]))
         table = msg.text_sent[0]
         self.assertIn("Your orders:", table)
-        self.assertIn("```", table)
+        # Owner, 14 Nov 2026: last 5 only, one line per order, no
+        # monospace block that wraps badly on a phone.
+        self.assertNotIn("```", table)
+        self.assertEqual(len(table.strip().split("\n")), 3)
         self.assertIn("1827", table)
         self.assertIn("1826", table)
         self.assertLess(table.index("1827"), table.index("1826"))
@@ -6534,6 +6554,10 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         # a free AI answer plus the steer-back line — never the
         # canned deflection, however many turns it takes. (Was:
         # the third off-topic turn steered back with no answer.)
+        # The Telegram post-link question used to be the third
+        # question here; it is now a deterministic answer (owner
+        # fix round, 14 Nov 2026), so a different off-topic
+        # question takes its place.
         msg = FakeMessage()
         update = FakeUpdate(msg)
         with mock.patch(
@@ -6546,7 +6570,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
             for text in (
                 "Who will win the football tonight?",
                 "What is the weather like?",
-                "How do I get the link of a Telegram post?",
+                "What is the capital of Spain?",
             ):
                 await bot.handle_order_text(update, None, text)
         self.assertEqual(len(msg.text_sent), 3)
@@ -9554,11 +9578,11 @@ class RealReactionsPaxyo(FakePaxyo):
     """FakePaxyo plus Telegram reactions services modelled on the
     real 12 Nov 2026 catalogue rows (provider rate x420 ETB):
     #6541 Thumbs up 5.46, #1717 Like 12.60, #2026 Like 16.46,
-    #6537 Heart 5.46, #6540 Fire 5.46, #6534 Positive mix 5.46 —
-    and the two services that must NEVER be picked for a
-    reactions order: #216 Bot Start 81.90 (fastest of all, 1
-    minute) and #1758 Auto 10 Future Posts 336.00 (also 1
-    minute)."""
+    #6537 Heart 5.46, #6540 Fire 5.46, #6534 Positive mix 5.46,
+    #1723 Pray 12.60 — and the two services that must NEVER be
+    picked for a reactions order: #216 Bot Start 81.90 (fastest
+    of all, 1 minute) and #1758 Auto 10 Future Posts 336.00
+    (also 1 minute)."""
 
     REACTIONS_SERVICES = [
         {
@@ -9600,6 +9624,17 @@ class RealReactionsPaxyo(FakePaxyo):
             "type": "Default", "rate_etb_per_1000": 5.46,
             "min": 10, "max": 1000000, "average_time": "20 minutes",
             "active": True, "provider_service_id": 6540,
+        },
+        {
+            # Owner fix round, 14 Nov 2026: the 🙏-only service.
+            # The owner ordered 🙏 and got the Positive mix because
+            # no fixture (and no mapping) knew about it.
+            "service": 1723,
+            "name": "Telegram Reactions + Free Views | Pray 🙏 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 1723,
         },
         {
             "service": 6534,
@@ -11532,18 +11567,20 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
         # Telegram post?" got no reply — the classifier called it
         # off_topic, and from the third turn the bot only sent the
         # steer line ("I'm the Paxyo order bot — I can only help
-        # with Paxyo orders."). A real question must get a free AI
-        # answer on EVERY turn, not just the first two.
+        # with Paxyo orders."). Fix round, 14 Nov 2026: the answer
+        # is now DETERMINISTIC (the AI kept getting the steps
+        # wrong, and the free answer was desktop-flavoured) — the
+        # AI is never called for it, on any turn.
         msg = FakeMessage()
         update = FakeUpdate(msg)
+        ai = mock.AsyncMock(
+            return_value="Tap the post, then tap Copy Link."
+        )
         with mock.patch(
             "bot.extract_intent",
             new=mock.AsyncMock(return_value=intent_of("off_topic")),
         ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
-            "bot.ai_generate",
-            new=mock.AsyncMock(
-                return_value="Tap the post, then tap Copy Link."
-            ),
+            "bot.ai_generate", new=ai,
         ), mock.patch("bot.speak_reply"):
             for _ in range(3):
                 await bot.handle_order_text(
@@ -11551,8 +11588,11 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
                     "how do I get the link of a Telegram post?",
                 )
         self.assertEqual(len(msg.text_sent), 3)
+        ai.assert_not_called()
         for reply in msg.text_sent:
             self.assertIn("Copy Link", reply)
+            self.assertIn("share", reply.lower())
+            self.assertNotIn("right-click", reply)
 
     async def test_off_topic_question_gets_answer_plus_steer_back(self):
         # Rule, 14 Nov 2026: an off-topic question is answered
@@ -11581,7 +11621,9 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
 
     async def test_how_to_intent_gets_free_answer_without_steer(self):
         # On-topic how-tos need no steer-back line: the question
-        # itself is about ordering.
+        # itself is about ordering. (The Telegram post-link
+        # question is now deterministic — it has its own test —
+        # so this one uses a different how-to.)
         msg = FakeMessage()
         update = FakeUpdate(msg)
         with mock.patch(
@@ -11590,15 +11632,16 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
         ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
             "bot.ai_generate",
             new=mock.AsyncMock(
-                return_value="Tap the post, then tap Copy Link."
+                return_value="Open your TikTok profile — your username is under your photo."
             ),
         ), mock.patch("bot.speak_reply"):
             await bot.handle_order_text(
                 update, None,
-                "how do I get the link of a Telegram post?",
+                "how do I find my TikTok username?",
             )
         self.assertEqual(
-            msg.text_sent, ["Tap the post, then tap Copy Link."]
+            msg.text_sent,
+            ["Open your TikTok profile — your username is under your photo."],
         )
 
     def test_is_question(self):
@@ -11727,6 +11770,377 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
                 update, None, "የቴሌግራም ፖስት ሊንክ እንዴት አገኛለሁ?"
             )
         self.assertEqual(msg.text_sent, ["AMHARIC-LINK-ANSWER"])
+
+
+class PricePaxyo(FakePaxyo):
+    """FakePaxyo plus the two services the owner's price shapes
+    need: TikTok Followers and Instagram Likes. Both exist in the
+    real catalogue; no fixture had them, so a price question for
+    them used to fall through to a price-less free reply."""
+
+    EXTRA = [
+        {
+            "service": 3001, "name": "TikTok Followers | Fast",
+            "category": "TikTok Followers", "type": "Default",
+            "rate_etb_per_1000": 25.20, "min": 10, "max": 100000,
+            "average_time": "10 minutes", "active": True,
+            "provider_service_id": 3001,
+        },
+        {
+            "service": 3002, "name": "Instagram Likes | Fast",
+            "category": "Instagram Likes", "type": "Default",
+            "rate_etb_per_1000": 8.40, "min": 10, "max": 100000,
+            "average_time": "10 minutes", "active": True,
+            "provider_service_id": 3002,
+        },
+    ]
+
+    async def services(self):
+        return SAMPLE_SERVICES + self.EXTRA
+
+
+class TestOwnerFixRound14Nov(_LanguageRoundBase):
+    """The owner's own live test, 14 Nov 2026 — five faults, one
+    fix round. (1) Never moralize about fake followers. (2) A
+    price question always gets a price. (3) The Telegram
+    post-link answer is deterministic and mobile-first. (4)
+    Order history shows only the last 5 orders, one line each.
+    (5) Info answers never append a stray order-state line; a
+    reaction emoji picks its exact service, a correction re-picks
+    the card, and a quantity rejection names its service."""
+
+    async def _turns(self, turns, paxyo=None, ai_reply=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        ai = mock.AsyncMock(
+            return_value=ai_reply if ai_reply is not None else ""
+        )
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()), mock.patch(
+            "bot.speak_reply",
+        ), mock.patch("bot.ai_generate", new=ai):
+            for text, intent in turns:
+                with mock.patch(
+                    "bot.extract_intent",
+                    new=mock.AsyncMock(return_value=intent),
+                ):
+                    await bot.handle_order_text(update, None, text)
+        return msg
+
+    # (1) never moralize about fake followers ---------------------
+
+    def test_strip_moralizing_removes_fake_follower_lines(self):
+        self.assertEqual(
+            bot.strip_moralizing(
+                "Instagram followers start at 42 ETB per 1000. "
+                "You should avoid buying fake followers — they can "
+                "hurt your account."
+            ),
+            "Instagram followers start at 42 ETB per 1000.",
+        )
+        self.assertEqual(
+            bot.strip_moralizing(
+                "Don't buy fake likes, they disappear."
+            ),
+            "",
+        )
+        # The established ban answer is not moralizing: it stays.
+        self.assertIn(
+            "can't be banned",
+            bot.strip_moralizing(
+                "No — anybody can buy followers for you, so you "
+                "can't be banned without your permission."
+            ),
+        )
+
+    async def test_free_answer_never_moralizes_about_fake_followers(self):
+        msg = await self._turns([
+            ("what do you think about buying followers?",
+             intent_of("off_topic")),
+        ], ai_reply=(
+            "You should avoid buying fake followers — they can "
+            "hurt your account and get you banned."
+        ))
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertNotIn("avoid buying fake followers", reply)
+        self.assertNotIn("fake followers", reply)
+        self.assertTrue(reply.strip())
+
+    async def test_ban_question_keeps_established_no_answer(self):
+        msg = await self._turns([
+            ("can I get banned for buying followers?",
+             intent_of("safety")),
+        ])
+        self.assertIn(
+            "anybody can buy followers for you", msg.text_sent[0]
+        )
+        self.assertIn("can't be banned", msg.text_sent[0])
+
+    # (2) a price question always gets a price --------------------
+
+    async def test_price_thumbs_up_wording(self):
+        msg = await self._turns([
+            ("how much is 1000 👍 reactions?",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       reaction_emoji="👍", quantity=1000)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("5.46", msg.text_sent[0])
+
+    async def test_price_tiktok_followers(self):
+        msg = await self._turns([
+            ("how much are TikTok followers?",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok followers")),
+        ], paxyo=PricePaxyo())
+        self.assertIn("25.20", msg.text_sent[0])
+
+    async def test_price_instagram_likes_1000(self):
+        msg = await self._turns([
+            ("how much is 1000 Instagram likes?",
+             intent_of("order", platform="instagram",
+                       service_hint="instagram likes", quantity=1000)),
+        ], paxyo=PricePaxyo())
+        self.assertIn("8.40", msg.text_sent[0])
+
+    async def test_price_amharic_with_bridge_down(self):
+        # The bridge is down (Gemini nearly out of its daily
+        # limit), so the Ge'ez text reaches the detector unchanged
+        # — the price must still come from the catalogue.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                side_effect=lambda text, **kw: text
+            ),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=lambda text, **kw: text
+            ),
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "order", platform="instagram",
+                service_hint="instagram likes")),
+        ), mock.patch("bot.paxyo", PricePaxyo()), mock.patch(
+            "bot.speak_reply",
+        ):
+            await bot.handle_order_text(
+                update, None, "የ Instagram likes ዋጋ ስንት ነው?"
+            )
+        self.assertIn("8.40", msg.text_sent[0])
+
+    # (3) deterministic Telegram post-link answer -----------------
+
+    async def test_telegram_post_link_deterministic_amharic(self):
+        # Ge'ez question, bridge down: the deterministic Amharic
+        # template answers it — the AI is never called.
+        ai = mock.AsyncMock(
+            return_value="Click the post and click copy link."
+        )
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                side_effect=lambda text, **kw: text
+            ),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=lambda text, **kw: text
+            ),
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("off_topic")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate", new=ai,
+        ), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "የቴሌግራም ፖስት ሊንክ እንዴት አገኛለሁ?"
+            )
+        ai.assert_not_called()
+        reply = msg.text_sent[0]
+        self.assertIn("Copy Link", reply)
+        self.assertIn("share", reply.lower())
+        self.assertNotIn("right-click", reply)
+        self.assertIn("t.me/", reply)
+
+    # (4) order history: last 5 only ------------------------------
+
+    def _history_orders(self, n):
+        orders = []
+        for i in range(n):
+            orders.append({
+                "id": 1830 - i,
+                "service_id": 1001,
+                "service_name": "Instagram Followers | Fast",
+                "link": "https://instagram.com/p/x",
+                "quantity": 1000 + i,
+                "charge": 42.0,
+                "status": "completed" if i % 2 else "pending",
+                "created_at": "2026-11-13T10:00:00Z",
+            })
+        return orders
+
+    async def test_history_shows_last_five_of_eight(self):
+        msg = await self._turns([
+            ("show my orders", intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=self._history_orders(8)))
+        table = msg.text_sent[0]
+        self.assertIn("Your orders:", table)
+        self.assertNotIn("```", table)
+        lines = table.strip().split("\n")
+        self.assertEqual(len(lines), 6)  # title + 5 orders
+        for order_id in ("1830", "1829", "1828", "1827", "1826"):
+            self.assertIn(order_id, table)
+        for order_id in ("1825", "1824", "1823"):
+            self.assertNotIn(order_id, table)
+        for line in lines[1:]:
+            self.assertIn("Instagram Followers", line)
+            self.assertIn("42.00", line)
+        self.assertIn("pending", table)
+        self.assertIn("completed", table)
+
+    async def test_history_shows_two_of_two(self):
+        msg = await self._turns([
+            ("show my orders", intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=self._history_orders(2)))
+        lines = msg.text_sent[0].strip().split("\n")
+        self.assertEqual(len(lines), 3)  # title + 2 orders
+
+    # (5a) no stray order-state line on info answers --------------
+
+    async def test_info_answer_with_price_draft_has_no_order_note(self):
+        # A price question left platform + quantity in PARTIAL
+        # (no link): the next info answer must not claim an order
+        # is being built.
+        bot.PARTIAL[1] = {"platform": "instagram", "quantity": 1000}
+        msg = await self._turns([
+            ("what do I need for comment likes?",
+             intent_of("paxyo_info")),
+        ])
+        self.assertNotIn("still building", msg.text_sent[0])
+        self.assertIn("comment", msg.text_sent[0].lower())
+
+    # (5b) exact-emoji reactions ----------------------------------
+
+    def test_reaction_emoji_pray_is_contextual(self):
+        # 🙏 on its own is thanks, not a reaction type (pinned).
+        self.assertIsNone(bot.reaction_emoji("thank you 🙏"))
+        # In a reactions order it counts.
+        self.assertEqual(
+            bot.reaction_emoji("add 10 🙏 of tg reaction"), "🙏"
+        )
+        self.assertEqual(
+            bot.reaction_emoji("I want only 🙏 reaction"), "🙏"
+        )
+        self.assertEqual(
+            bot.reaction_emoji("add 10 👎 reactions"), "👎"
+        )
+
+    def test_reactions_pool_matches_emoji_only_service_name(self):
+        # A service named with the emoji alone ("Telegram
+        # Reactions 👍 | Fast") is a thumbs-up service; a
+        # multi-emoji name is a mix and never matches one emoji.
+        services = [
+            {"service": 2001, "name": "Telegram Reactions 👍 | Fast",
+             "category": "Telegram Reactions", "type": "Default",
+             "rate_etb_per_1000": 5.46, "min": 10, "max": 1000000,
+             "average_time": "5 minutes", "active": True,
+             "provider_service_id": 2001},
+            {"service": 6534,
+             "name": "Telegram Reactions Positive 👍❤️🔥🎉😄",
+             "category": "Telegram Reactions", "type": "Default",
+             "rate_etb_per_1000": 5.46, "min": 10, "max": 1000000,
+             "average_time": "25 minutes", "active": True,
+             "provider_service_id": 6534},
+        ]
+        picked = bot._reactions_pool(services, "👍")
+        self.assertEqual([s["service"] for s in picked], [2001])
+        self.assertEqual(bot._reactions_pool(services, "😮"), [])
+
+    async def test_pray_order_picks_pray_service(self):
+        # The owner's exact test, 14 Nov 2026: 10 🙏 on a post
+        # must pick the 🙏-only service, never the Positive mix.
+        msg = await self._turns([
+            ("For this please add 10 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="🙏")),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 1723)
+        self.assertIn("Pray", msg.text_sent[0])
+        self.assertNotIn("Positive", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+
+    async def test_correction_to_heart_re_picks_new_card(self):
+        msg = await self._turns([
+            ("For this please add 10 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="🙏")),
+            ("I want only ❤️ reaction", intent_of("order")),
+        ], paxyo=RealReactionsPaxyo())
+        # One card only — the old 🙏 card is dropped, so its
+        # buttons cannot place the old service.
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 6537)
+        self.assertIn("Heart", msg.text_sent[1])
+        self.assertNotIn("Pray", msg.text_sent[1])
+
+    async def test_no_exact_reaction_service_says_so_honestly(self):
+        # 😮 has no dedicated service: say so instead of silently
+        # selling the Positive mix.
+        msg = await self._turns([
+            ("add 10 😮 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="😮")),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("don't have a 😮-only service", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_quantity_rejection_names_service_and_limits(self):
+        msg = await self._turns([
+            ("add 5 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=5, reaction_emoji="🙏")),
+        ], paxyo=RealReactionsPaxyo())
+        reply = msg.text_sent[0]
+        self.assertIn("Pray", reply)
+        self.assertIn("between 10 and 100000", reply)
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_draft_survives_quantity_rejection(self):
+        msg = await self._turns([
+            ("add 5 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=5, reaction_emoji="🙏")),
+            ("Ok 10", intent_of("order", quantity=10)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 1723)
+        self.assertEqual(pending["quantity"], 10)
+        self.assertIn("Pray", msg.text_sent[1])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,9 @@ This file is the bot's memory of everything its owner taught it. If the bot
 ever has to be rebuilt from scratch, read this file first: it holds every
 rule, fact and behaviour the owner set, so the rebuild learns fast.
 Source of truth for behaviour is `bot.py`; this file is the human-readable
-record of *why* it behaves that way. Last updated: 14 Nov 2026 (language round: reply in the user's current language + Oromo/Tigrinya; price fast path: price questions answered before the classifier).
+record of *why* it behaves that way. Last updated: 14 Nov 2026 (owner fix
+round: never moralize about fake followers; price always; deterministic
+Telegram post-link answer; last-5 order history; exact-emoji reactions).
 
 ## Who Paxyo is
 - Paxyo is an Ethiopian service for ordering followers, likes, views,
@@ -32,6 +34,32 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (language round: 
 ## Ordering rules
 - The bot picks the FASTEST service for the platform + metric the user
   asked for. Cheapest stays on the same platform + metric.
+- REACTIONS ARE EXACT (owner, 14 Nov 2026): a reaction emoji maps
+  ONLY to a service for that one emoji — 🙏 maps only to the
+  🙏-only (Pray) service, never to the Positive mix; 👍 only to
+  thumbs-up/like, ❤️ only to heart, 🔥 only to fire, and so on
+  (👎 thumbs down, 😡 angry face, 😎 cool, 🤔 thinking, 🎉
+  celebration, 😍 heart eyes). A service named with the emoji
+  alone ("Telegram Reactions 👍 | Fast") is that emoji's service
+  too, as long as it carries no other reaction emoji — a
+  multi-emoji name is a mix, never a single type. If NO service
+  exists for the emoji the user named (😮 has none), the bot says
+  so honestly — "I don't have a 😮-only service. The closest is
+  the Positive mix" — instead of silently selling the mix.
+  A bare "thank you 🙏" is thanks, not a reaction order: 🙏 only
+  counts as a reaction when the message is about reactions.
+- A CORRECTION RE-PICKS THE CARD (owner, 14 Nov 2026): while a
+  Confirm card is waiting, "I want only 🙏 reaction" (or any other
+  single emoji) re-picks the service for that emoji and shows a
+  NEW Confirm card — never the old card unchanged — and the old
+  card is dropped so its buttons cannot place the old service.
+  The link and quantity come from the pending order.
+- A QUANTITY REJECTION NAMES THE SERVICE (owner, 14 Nov 2026):
+  "For [service name], quantity must be between X and Y, and a
+  multiple of 10." — so a changing limit always makes sense to the
+  user. The draft survives a rejection: the next turn ("Ok 50")
+  continues the SAME service instead of re-picking a different
+  one.
 - NEVER sell blacklisted services 5379 and 5834.
 - A Confirm card ALWAYS shows service, quantity, link and total before an
   order is placed — EXCEPT when the user explicitly says "order now" /
@@ -83,19 +111,20 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (language round: 
 - HOW-TO / GENERAL QUESTIONS — ANSWER FREELY (owner, 14 Nov 2026,
   course correction): do NOT prepare canned answers for every
   possible question. When a user asks how to do something (how to
-  get a Telegram post link, how to make an Instagram account
-  public, how to copy a link, how to find a username), DeepSeek
-  answers FREELY, like a normal AI — no deflection, no silence, no
-  canned "I only help with orders" reply. A real question always
-  gets an answer, however many turns it takes. (14 Nov 2026 repro:
-  "how do I get the link of a Telegram post?" got no reply
-  because the classifier called it off_topic and from the third
-  turn the bot only sent the steer line.) New intent "how_to"
-  routes these to the AI. Off-topic questions are answered freely
-  first, then brought back to ordering with ONE short line ("By
-  the way — what would you like to order?"). On-topic how-tos get
-  no steer-back line. Only non-question chit-chat is capped
-  (2 turns, then the steer).
+  make an Instagram account public, how to copy a link, how to
+  find a username), DeepSeek answers FREELY, like a normal AI — no
+  deflection, no silence, no canned "I only help with orders"
+  reply. A real question always gets an answer, however many turns
+  it takes. EXCEPTION: "how do I get the link of a Telegram post?"
+  has a deterministic mobile-first answer (see above) — the AI is
+  never called for it. (14 Nov 2026 repro: it got no reply because
+  the classifier called it off_topic and from the third turn the
+  bot only sent the steer line.) New intent "how_to" routes these
+  to the AI. Off-topic questions are answered freely first, then
+  brought back to ordering with ONE short line ("By the way — what
+  would you like to order?"). On-topic how-tos get no steer-back
+  line. Only non-question chit-chat is capped (2 turns, then the
+  steer).
 - DETERMINISTIC PAXYO FACTS ONLY: prices (above), comment likes
   (the video/post link plus either the comment's link or the
   username), private accounts must be public (a private account
@@ -138,9 +167,40 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (language round: 
 - TERMS: answer from `paxyo-terms.md` (the real Paxyo Terms &
   Conditions). If the terms don't cover a question, say so and offer
   support. Full terms live on paxyo.et.
-- ORDER HISTORY: show all orders as a table — ID, short service name,
-  quantity, total in ETB (e.g. "3.78 ETB"), status — newest first,
-  up to 20.
+- NEVER MORALIZE ABOUT FAKE FOLLOWERS (owner, 14 Nov 2026): Paxyo
+  sells followers, likes, views and reactions — the bot NEVER warns
+  a user against buying them, NEVER says "avoid buying fake
+  followers" or anything like it. The system prompt forbids it, and
+  any such line the AI writes anyway is stripped from the reply
+  before it is sent. The ban question keeps its established answer
+  only: "No — anybody can buy followers for you, so you can't be
+  banned without your permission."
+- PRICE ALWAYS (owner, 14 Nov 2026): a price question NEVER gets a
+  free AI reply without a price. Price detection runs before the
+  free-answer paths; if a service can be named, the deterministic
+  price is shown; if the question names a platform/metric but no
+  exact service, the cheapest price for it is shown. Shapes that
+  used to miss and fall through: "what's the rate", "how much for
+  1000" (no platform named), "how much is it / this / that", and
+  Amharic (ዋጋ = price, ስንት = how much) when the translate bridge
+  is down and the Ge'ez text reaches the detector unchanged.
+- TELEGRAM POST LINK — DETERMINISTIC ANSWER (owner, 14 Nov 2026):
+  "how do I get the link of a Telegram post?" is NOT left to the
+  AI (it kept getting the steps wrong, and the free answer was
+  desktop-flavoured). The bot always gives the same mobile-first
+  steps, in English or Amharic: open the channel or group, find
+  the post, tap the SHARE arrow next to the post (or press and
+  hold the post), then tap "Copy Link". The link looks like
+  t.me/channelname/1234. Only public channels/groups have a post
+  link — a private one doesn't. No "right-click" as the main way.
+- ORDER HISTORY: show ONLY THE LAST 5 ORDERS, one line per order —
+  order ID, short service name, quantity, status, total in ETB —
+  newest first. No extra fields, no long text, no monospace table.
+- INFO ANSWERS NEVER APPEND AN ORDER-STATE LINE unless the user is
+  actually mid-order: a draft only counts as "building an order"
+  when it has a LINK. A link-less draft left by a price question
+  (platform + quantity) is not an order, and naming it on an info
+  answer is a stray confusing line.
 - "The usual" / "same as usual" / "same like as usual please order 1k
   views": use the last order's service and link, with the new quantity,
   and show the Confirm card. "Same as yesterday but double" = last order

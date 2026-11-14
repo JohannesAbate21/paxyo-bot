@@ -320,6 +320,7 @@ Rules:
 - orders: list of {"platform", "service_hint", "link", "quantity"} — one per order; a bare @handle goes in "link". Null otherwise.
 - split: {"quantity": 5000, "count": 5, "platform": "instagram", "service_hint": "likes"} for splitting one quantity across posts. Null otherwise.
 - Never place an order, never confirm an order, never quote a price.
+- Never warn the user against buying followers, likes, views, members or reactions, and never call them "fake" — Paxyo sells these services. If the user asks whether they are real, say they come from Paxyo's network.
 - Never say where Paxyo's services come from, and never talk about what Paxyo pays for them. Only quote Paxyo's own ETB prices. If the user asks about that, use the "source_question" intent.
 - For a message that is not an order, still classify the intent; do not return "order" with empty fields."""
 
@@ -552,8 +553,16 @@ TEXT = {
         "en": "⚡ Use the fastest one",
     },
     "bad_quantity": {
-        "am": "Quantity ከ {min} እስከ {max} መሆን አለበት, እና የ10 እጥፍ መሆን አለበት።",
-        "en": "Quantity must be between {min} and {max}, and a multiple of 10.",
+        "am": "ለ{service}፣ Quantity ከ {min} እስከ {max} መሆን አለበት, እና የ10 እጥፍ መሆን አለበት።",
+        "en": "For {service}, quantity must be between {min} and {max}, and a multiple of 10.",
+    },
+    # A specific reaction emoji with no dedicated service (owner,
+    # 14 Nov 2026): say so honestly instead of silently selling
+    # the Positive mix. The mix is named as the closest option —
+    # asking for reactions without naming one emoji orders it.
+    "no_exact_reaction": {
+        "am": "የ{emoji} ብቻ service የለኝም። በጣም ቅርቡ Positive mix ነው (👍❤️🔥🎉😁) — ያንን ከፈልጉ emoji ሳይጠቅሱ reactions ብቻ ይጠይቁ።",
+        "en": "I don't have a {emoji}-only service. The closest is the Positive mix (👍❤️🔥🎉😁) — just ask for reactions without naming one emoji and I'll order that.",
     },
     "insufficient": {
         "am": "Balance አይበቃም። Balance: {balance} ETB, ያስፈልጋል: {total} ETB። እባክዎ paxyo.et ላይ deposit ያድርጉ።",
@@ -1255,6 +1264,33 @@ TEXT = {
     "ban_no": {
         "am": "አይ — ማንም ሰው ለእርስዎ followers መግዛት ይችላል፣ ስለዚህ ያለእርስዎ ፈቃድ accountዎ ሊታገድ ወይም shadow ban ሊደረግበት አይችልም።",
         "en": "No — anybody can buy followers for you, so your account can't be banned or shadowbanned for it without your permission.",
+    },
+    # How to get the link of a Telegram post (owner, 14 Nov 2026):
+    # a DETERMINISTIC answer — the AI kept getting it wrong
+    # ("click the post and click copy link" skips the real step;
+    # "right-click" is useless on a phone). Verified against
+    # Telegram help and current guides (dslink.me, techwiser):
+    # on a phone you tap the SHARE arrow next to the post (or
+    # press and hold the post), then choose Copy Link. Only
+    # public channels/groups have a post link. Mobile first;
+    # desktop is a footnote, never the main way.
+    "telegram_post_link": {
+        "am": (
+            "የቴሌግራም ፖስት link ለማግኘት፦ ቻናሉን ወይም ግሩፑን ይክፈቱና "
+            "ፖስቱን ያግኙ። ከፖስቱ ቀጥሎ ያለውን share (➡️) ምልክት ይንኩ — "
+            "ወይም ፖስቱን ረዘም ብለው ይጫኑ — ከዚያ “Copy Link” ይምረጡ። "
+            "linkው t.me/channelname/1234 የሚመስል ነው። ይህ የሚሰራው "
+            "public ቻናል ወይም ግሩፕ ላይ ብቻ ነው — private ቻናል ወይም "
+            "ግሩፕ የፖስት link የለውም።"
+        ),
+        "en": (
+            "To get the link of a Telegram post, open the channel or "
+            "group and find the post. Tap the share arrow (➡️) next "
+            "to the post — or press and hold the post — then tap "
+            "“Copy Link”. The link looks like t.me/channelname/1234. "
+            "This only works for public channels and groups — a "
+            "private channel or group has no post link."
+        ),
     },
     # Terms & Conditions (paxyo-terms.md, fetched from paxyo.et
     # 13 Nov 2026): answers from the actual terms, never invented.
@@ -1962,9 +1998,18 @@ def _kinds_compatible(name_kinds, hint_kinds):
 
 
 # Reaction-type words in a service name, per emoji (round 8.1,
-# 14 Nov 2026). The emoji character itself is never a family word:
-# a "Positive" mix also carries 👍 in its name, so matching on the
-# emoji alone would pick the mix for a thumbs-up order.
+# 14 Nov 2026; extended 14 Nov 2026 — the owner ordered 🙏 and got
+# the Positive mix, because 🙏 had no family at all). The emoji
+# character itself is never a family word: a "Positive" mix also
+# carries 👍 in its name, so matching on the emoji alone would
+# pick the mix for a thumbs-up order. Families exist only for
+# emoji with a dedicated single-emoji service in the catalogue:
+# 🙏 -> Pray #1723 (12.60 ETB/1000), 👎 -> Thumbs down / DisLike,
+# 😡 -> Angry Face, 😎 -> Cool, 🤔 -> Thinking, 🎉 -> Celebration,
+# 😍 -> Heart Eyes. An emoji with no dedicated service (😮 wow)
+# has a family word that matches nothing, so the pool falls
+# through to the honest "no exact service" answer instead of
+# silently selling the mix.
 REACTION_FAMILY_WORDS = {
     "👍": ("thumbs up", "like"),
     "❤️": ("heart",),
@@ -1974,6 +2019,13 @@ REACTION_FAMILY_WORDS = {
     "🤣": ("laugh",),
     "😮": ("wow",),
     "😢": ("crying",),
+    "🙏": ("pray",),
+    "👎": ("thumbs down", "dislike"),
+    "😡": ("angry face",),
+    "😎": ("cool",),
+    "🤔": ("thinking",),
+    "🎉": ("celebration",),
+    "😍": ("heart eyes",),
 }
 
 
@@ -1986,10 +2038,14 @@ def _is_reactions_hint(hint, hint_kinds):
 
 
 def _reaction_emoji_in_hint(hint):
-    """The reaction emoji in a hint string, or None."""
+    """The reaction emoji in a hint string, or None. 🙏 counts
+    here: a hint only reaches this helper for a reactions request,
+    so the thanks-vs-reaction ambiguity does not apply."""
     for emoji in REACTION_EMOJI:
         if emoji in (hint or ""):
             return emoji
+    if "🙏" in (hint or ""):
+        return "🙏"
     return None
 
 
@@ -2002,9 +2058,14 @@ def _reactions_pool(candidates, emoji):
     Future Posts" service: that reacts to ten future posts, not
     the one post the user is ordering for. Within the pool the
     emoji picks the family (👍 -> thumbs up / like, ❤️ -> heart,
-    🔥 -> fire); a generic request gets the Positive mix. When
-    the family has no service, the whole single-post pool is used
-    instead of returning nothing."""
+    🔥 -> fire, 🙏 -> pray); a generic request gets the Positive
+    mix. A service named with the emoji alone ("Telegram Reactions
+    👍 | Fast") is that emoji's service too, as long as it carries
+    no other reaction emoji — a multi-emoji name is a mix, never a
+    single type. When the family has no service, the pool is EMPTY
+    instead of falling back to the whole pool (owner, 14 Nov 2026:
+    a 🙏 order silently got the Positive mix) — the caller then says
+    honestly that there is no {emoji}-only service."""
     pool = []
     for s in candidates:
         name = str(s.get("name") or "").lower()
@@ -2022,12 +2083,24 @@ def _reactions_pool(candidates, emoji):
     else:
         family = ("positive",)
     if family:
-        matched = [
-            s for s in pool
-            if any(w in str(s.get("name") or "").lower() for w in family)
-        ]
+        matched = []
+        for s in pool:
+            lname = str(s.get("name") or "").lower()
+            if any(w in lname for w in family):
+                matched.append(s)
+                continue
+            # A service named with the emoji alone ("Telegram
+            # Reactions 👍 | Fast") is that emoji's service too —
+            # as long as it carries no other reaction emoji: a
+            # multi-emoji name is a mix, never a single type.
+            if emoji is not None:
+                found = emoji_meanings(str(s.get("name") or ""))
+                if len(found) == 1 and found[0][0] == emoji:
+                    matched.append(s)
         if matched:
             return matched
+        if emoji is not None:
+            return []
     return pool
 
 
@@ -3393,8 +3466,16 @@ EMOJI_MEANINGS = {
     "😡": "angry",
     "👎": "thumbs-down",
 }
-# Emoji that pick a Telegram reaction type when the user orders one.
-REACTION_EMOJI = ("👍", "❤️", "❤", "🔥", "😂", "🤣", "😮", "😢")
+# Emoji that pick a Telegram reaction type when the user orders one
+# (round 8.1, 14 Nov 2026; extended 14 Nov 2026 — 👎 😡 😎 🤔 🎉 😍
+# have dedicated single-emoji services). 🙏 is deliberately NOT in
+# this tuple: on its own it is thanks ("thank you 🙏" -> None,
+# pinned by test), and only counts as a reaction in a
+# reactions-order context — see reaction_emoji.
+REACTION_EMOJI = (
+    "👍", "❤️", "❤", "🔥", "😂", "🤣", "😮", "😢",
+    "👎", "😡", "😎", "🤔", "🎉", "😍",
+)
 # Emoji that are just chat (a laugh, a smile) — never an order.
 _CHAT_EMOJI = ("😂", "🤣", "😄", "😊")
 
@@ -3424,10 +3505,21 @@ def emoji_meanings(text: str):
 
 
 def reaction_emoji(text: str):
-    """The reaction emoji in the text (👍 ❤️ 🔥 ...), or None."""
+    """The reaction emoji in the text (👍 ❤️ 🔥 🙏 ...), or None.
+    🙏 counts only when the message is about reactions ("add 10 🙏
+    of tg reaction", "I want only 🙏 reaction"): on its own 🙏 is
+    thanks, not a reaction type, so "thank you 🙏" still returns
+    None."""
+    found_pray = None
     for emoji, _meaning in emoji_meanings(text):
         if emoji in REACTION_EMOJI:
             return emoji
+        if emoji == "🙏" and found_pray is None:
+            found_pray = emoji
+    if found_pray is not None:
+        s = " ".join((text or "").strip().lower().split())
+        if "reaction" in s or "telegram" in s or " tg " in f" {s} ":
+            return found_pray
     return None
 
 
@@ -3754,7 +3846,10 @@ async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> st
         "ordering get a one-line steer back to ordering. "
         "Never say where Paxyo's services come from, and never talk "
         "about what Paxyo pays for them. Never quote a price; say "
-        "prices are shown in ETB per 1000 before confirming. If the "
+        "prices are shown in ETB per 1000 before confirming. Never "
+        "warn the user against buying followers, likes, views, "
+        "members or reactions, and never call them fake — Paxyo sells "
+        "these services. If the "
         "question is how long delivery takes, never say the time is "
         "only shown before confirming."
     )
@@ -3771,7 +3866,7 @@ async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> st
     except Exception as exc:
         _log_ai_failure("paxyo_info answer failed", exc)
         return paxyo_facts_answer(text, lang) or t("paxyo_info_fallback", lang)
-    answer = (reply or "").strip()
+    answer = strip_moralizing((reply or "").strip())
     if answer:
         return answer
     return paxyo_facts_answer(text, lang) or t("paxyo_info_fallback", lang)
@@ -4144,11 +4239,61 @@ def _record_bot_reply(bot_text: str) -> None:
 OFF_TOPIC_COUNT = {}  # telegram_id -> consecutive off-topic turns
 
 
+# --- no fake-follower moralizing (owner, 14 Nov 2026) --------------
+# Paxyo sells followers/likes/views, so the bot must NEVER lecture
+# a user about "fake followers" or warn them off buying. The AI's
+# free answers sometimes do exactly that ("avoid buying fake
+# followers"), so the rule is in every free-answer prompt AND in a
+# sanitizer that strips any such sentence if the AI still writes
+# one. The ban answer keeps the owner's established NO line.
+_MORALIZING_RES = (
+    re.compile(
+        r"avoid\s+(buying\s+)?(fake\s+)?(followers|likes|views|members|reactions)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(don't|do not|never|shouldn't|should not)\s+buy\s+(fake\s+)?"
+        r"(followers|likes|views|members|reactions)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bfake\s+(followers|likes|views|members|reactions)\b.{0,80}\b"
+        r"(harm|hurt|risk|ban|damage|penal|danger|unsafe|bad for)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(beware|be careful|watch out)\b.{0,60}\bfake\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"buying\s+(fake\s+)?(followers|likes|views)\b.{0,60}\b"
+        r"(against|violates|breaks|harm|risk|danger)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def strip_moralizing(text: str) -> str:
+    """Drop any sentence that lectures the user against buying
+    followers/likes/views (owner, 14 Nov 2026). Returns the cleaned
+    text, or "" when nothing is left. A sentence that merely says
+    the followers are real ("these are not fake followers") has no
+    warning words and survives."""
+    if not text:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [p for p in parts if not any(rx.search(p) for rx in _MORALIZING_RES)]
+    return " ".join(kept).strip()
+
+
 async def answer_general_question(text: str, lang: str):
     """A brief general-knowledge answer (1-2 short sentences) from
     the AI, or None when the AI is down. Never about Paxyo's supplier
     or costs — the system prompt says so, and the caller steers back
-    to ordering right after."""
+    to ordering right after. Never moralizes about fake followers
+    (owner, 14 Nov 2026): the prompt forbids it and the reply is
+    sanitized, so a warning the AI writes anyway never reaches the
+    user."""
     system = (
         "Answer briefly (1-2 short sentences) from your own general "
         "knowledge, in "
@@ -4158,14 +4303,17 @@ async def answer_general_question(text: str, lang: str):
             "om": "Oromo (Afaan Oromo, Latin script)",
         }.get(lang, "English")
         + ". Never mention where Paxyo's services come from, what "
-        "Paxyo pays for them, or any supplier. Never quote a price."
+        "Paxyo pays for them, or any supplier. Never quote a price. "
+        "Never warn the user against buying followers, likes, views, "
+        "members or reactions, and never call them fake — Paxyo sells "
+        "these services."
     )
     try:
         reply = await ai_generate(text, system=system)
     except Exception as exc:
         _log_ai_failure("general answer failed", exc)
         return None
-    return (reply or "").strip() or None
+    return strip_moralizing((reply or "").strip()) or None
 
 
 # --- offensive users: firm and blunt, never polite -------------------
@@ -4556,10 +4704,19 @@ def is_price_question(text: str) -> bool:
     """True when the user asks the price of a service ('how much are
     tiktok views?', "what's the price of 1000 views?"). A budget
     ('how much views can 10 br get me') carries a currency amount
-    and is not a price question; neither is a link, a balance or a
-    deposit question."""
+    and is not a price question; neither is a balance or a deposit
+    question. A pasted link is not a price question only when the
+    message also has an order verb ("I want 1000 views for
+    <link>") — a link with a bare price question ("how much for
+    1000 views on this <link>?") still is one. Shapes the owner
+    hit live (14 Nov 2026): "what's the rate", "how much for
+    1000" (no platform named), "how much is it", and Amharic
+    (ዋጋ is price, ስንት is how much) when the translate bridge
+    fails and the Ge'ez text reaches this detector unchanged."""
     s = " ".join(normalize_text(text or "").split())
-    if extract_links(text):
+    if extract_links(text) and any(
+        v in s for v in _ORDER_REQUEST_VERBS
+    ):
         return False
     if parse_money_amount(s) is not None:
         return False
@@ -4567,16 +4724,51 @@ def is_price_question(text: str) -> bool:
         return False
     if "price" in s or "cost" in s:
         return True
+    if any(w in s.split() for w in ("rate", "rates", "pricing", "charge", "charges")):
+        return True
+    if "ዋጋ" in s:
+        return True
+    if "ስንት" in s and (
+        kind_from_text(text) is not None
+        or any(p in s.split() for p in _PLATFORMS)
+    ):
+        return True
     if "how much" in s and (
         kind_from_text(s) is not None
         or any(p in s.split() for p in _PLATFORMS)
+        or re.search(r"\d", s) is not None
+        # Word-boundary match: "how much is it?" ends in "it?",
+        # and a split() comparison ("it" != "it?") misses it.
+        or re.search(r"\b(it|this|that|one|them)\b", s) is not None
     ):
         return True
     return False
 
 
+def _service_price_line(service, quantity, lang: str) -> str:
+    """The deterministic price line for one service, straight from
+    the catalogue: "Thumbs up 👍: 5.46 ETB for 1,000 (5.46 ETB per
+    1000)." when a quantity was asked for, else the per-1000 rate."""
+    rate = float(service.get("rate_etb_per_1000", 0) or 0)
+    name = short_service_name(service.get("name"))
+    if quantity is not None:
+        try:
+            qty = int(quantity)
+        except (TypeError, ValueError):
+            qty = None
+        if qty:
+            return t(
+                "price_total", lang, service=name, quantity=f"{qty:,}",
+                rate=format_money(rate),
+                total=format_money(estimated_total_etb(rate, qty)),
+            )
+    return t(
+        "price_per_1000", lang, service=name, rate=format_money(rate)
+    )
+
+
 async def _price_line(user_id: int, text: str, platform, hint, quantity,
-                      lang: str, reaction_emoji=None):
+                      lang: str, reaction_emoji=None, services=None):
     """The deterministic price line for an identified service, straight
     from the catalogue (rate x420 ETB): "Thumbs up 👍: 5.46 ETB for
     1,000 (5.46 ETB per 1000)." when a quantity was asked for, else
@@ -4605,48 +4797,52 @@ async def _price_line(user_id: int, text: str, platform, hint, quantity,
         hint = " ".join(p for p in (platform, metric) if p) or None
     if not platform and not hint:
         return None, platform, hint
-    try:
-        services = await paxyo.services()
-    except Exception as exc:
-        log.warning("price lookup failed: %s", exc)
-        return None, platform, hint
+    if services is None:
+        try:
+            services = await paxyo.services()
+        except Exception as exc:
+            log.warning("price lookup failed: %s", exc)
+            return None, platform, hint
     picks = pick_services(
         services, platform=platform, service_hint=hint, limit=100,
         reaction_emoji=reaction_emoji,
     )
     if not picks:
         return None, platform, hint
-    service = picks[0]
-    rate = float(service.get("rate_etb_per_1000", 0) or 0)
-    name = short_service_name(service.get("name"))
-    if quantity is not None:
-        try:
-            qty = int(quantity)
-        except (TypeError, ValueError):
-            qty = None
-        if qty:
-            return t(
-                "price_total", lang, service=name, quantity=f"{qty:,}",
-                rate=format_money(rate),
-                total=format_money(estimated_total_etb(rate, qty)),
-            ), platform, hint
-    return t(
-        "price_per_1000", lang, service=name, rate=format_money(rate)
-    ), platform, hint
+    return _service_price_line(picks[0], quantity, lang), platform, hint
 
 
 async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
     """The price, straight from the catalogue: ETB per 1000, and the
-    total when a quantity was asked for. Returns None when no
-    service can be named (the caller then falls through). Never
-    asks for the link first."""
+    total when a quantity was asked for. Never asks for the link
+    first. Always answers a price question with a price line, the cheapest price for the platform/metric, or
+    the ask-which-service line — never None once the catalogue is
+    fetched (owner, 14 Nov 2026: a price question that fell
+    through to a free AI reply got no price at all, because the
+    free-answer prompts forbid quoting prices). None only when the
+    catalogue itself cannot be fetched, so the caller falls through
+    to the classifier and retries — the flaky-lookup tests pin the
+    fetch count, so this fetches exactly once per call."""
     platform = (intent.get("platform") or "").strip().lower() or None
     hint = intent.get("service_hint")
     quantity = intent.get("quantity")
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("price lookup failed: %s", exc)
+        return None
     line, platform, hint = await _price_line(
         user_id, text, platform, hint, quantity, lang,
-        reaction_emoji=reaction_emoji(text),
+        reaction_emoji=reaction_emoji(text), services=services,
     )
+    if line is None and (platform or hint):
+        # No fastest pick for this platform/metric: offer the
+        # cheapest price for it instead of silence.
+        cheapest = cheapest_service(
+            services, platform=platform, service_hint=hint
+        )
+        if cheapest is not None:
+            line = _service_price_line(cheapest, quantity, lang)
     if line is not None:
         if quantity is not None:
             try:
@@ -4656,9 +4852,7 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
             if qty:
                 _remember_price_question(user_id, platform, hint, qty, text)
         return line
-    if not platform and not hint:
-        return t("price_ask_service", lang)
-    return None
+    return t("price_ask_service", lang)
 
 
 def _remember_price_question(user_id: int, platform, hint, qty, text):
@@ -4757,6 +4951,27 @@ def is_comment_likes_question(text: str) -> bool:
     )
 
 
+def is_telegram_post_link_question(text: str) -> bool:
+    """True when the user asks how to get the link of a Telegram
+    post (owner, 14 Nov 2026): "how do I get the link of a
+    Telegram post?", "how to copy a telegram post link". A
+    deterministic Paxyo fact — the AI kept getting the steps
+    wrong ("click the post and click copy link" skips the share
+    step; "right-click" is useless on a phone), so the answer is
+    a template, never a free reply. A comment-link question
+    ("link of a comment") is not a post-link question, and a
+    channel-link question ("link of my channel") is not one
+    either."""
+    s = " ".join((text or "").strip().lower().split())
+    has_telegram = (
+        "telegram" in s or "ቴሌግራም" in s or " tg " in f" {s} "
+    )
+    has_link = "link" in s or "ሊንክ" in s
+    has_post = "post" in s or "ፖስት" in s
+    has_how = "how" in s.split() or "እንዴት" in s or "እንደምን" in s
+    return has_telegram and has_link and has_post and has_how
+
+
 async def speed_answer_text(user_id: int, text: str, intent: dict, lang: str):
     """A REAL delivery-time answer for a speed question (owner,
     13 Nov 2026): the pending Confirm card's service first (round
@@ -4809,12 +5024,13 @@ _ORDER_STATUS_ICONS = {
 
 
 async def orders_history_text(user_id: int, lang: str) -> str:
-    """ALL of the user's orders as a monospace table (owner,
-    13 Nov 2026): one row per order — ID, short service name,
-    quantity, total in ETB, status with an icon. Newest first, up
-    to 20 (the API max)."""
+    """The user's LAST 5 orders only (owner, 14 Nov 2026 — the
+    20-row monospace table was ugly and confusing on a phone):
+    one line per order — ID, short service name, quantity, status
+    with an icon, total in ETB. Newest first. No extra fields,
+    no long text, no monospace block that wraps badly."""
     try:
-        orders = await paxyo.recent_orders(user_id, limit=20)
+        orders = await paxyo.recent_orders(user_id, limit=5)
     except Exception as exc:
         log.warning("orders history failed: %s", exc)
         return t("not_understood", lang)
@@ -4822,20 +5038,16 @@ async def orders_history_text(user_id: int, lang: str) -> str:
         # The API has nothing, but this session placed an order
         # (tracked in memory): show its status line.
         return await last_order_status_text(user_id, lang)
-    lines = [t("orders_history_title", lang), "```"]
-    lines.append(f"{'ID':<7}{'Service':<21}{'Qty':>6}  {'Total':>13}  Status")
-    for o in orders:
+    lines = [t("orders_history_title", lang)]
+    for o in orders[:5]:
         status = str(o.get("status") or "?").strip().lower()
         icon = _ORDER_STATUS_ICONS.get(status, "ℹ️")
         name = short_service_name(o.get("service_name") or "") or f"service {o.get('service_id')}"
         lines.append(
-            f"{str(o.get('id') or o.get('order_id') or '?'):<7}"
-            f"{name[:20]:<21}"
-            f"{int(o.get('quantity') or 0):>6}  "
-            f"{format_money(o.get('charge', 0) or 0) + ' ETB':>13}  "
-            f"{icon} {status}"
+            f"#{o.get('id') or o.get('order_id') or '?'} {name} "
+            f"×{int(o.get('quantity') or 0)} — {icon} {status} — "
+            f"{format_money(o.get('charge', 0) or 0)} ETB"
         )
-    lines.append("```")
     return "\n".join(lines)
 
 
@@ -4979,7 +5191,11 @@ def pending_note(user_id: int, lang: str) -> str:
     A Confirm card waiting for Confirm is named first; otherwise a
     half-built order (what the bot already has). Used after an
     interruption (a question mid-flow) so the user is never left
-    wondering whether their order survived it."""
+    wondering whether their order survived it. Only a draft with a
+    LINK counts as an order being built (owner, 14 Nov 2026): a
+    link-less draft left by a price question ("how much 1k" stores
+    platform + quantity) is not an order, and naming it on an info
+    answer is a stray confusing line."""
     _cid, pending = pending_for_user(user_id)
     if pending is not None:
         return t(
@@ -4988,6 +5204,8 @@ def pending_note(user_id: int, lang: str) -> str:
             quantity=pending["quantity"],
         )
     partial = PARTIAL.get(user_id) or {}
+    if not partial.get("link"):
+        return ""
     given = [k for k in ("platform", "link", "quantity") if partial.get(k)]
     if given:
         return t("partial_reminder", lang, given=", ".join(given))
@@ -6652,6 +6870,7 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
             t(
                 "bad_quantity",
                 lang,
+                service=short_service_name(service.get("name")),
                 min=service.get("min"),
                 max=service.get("max"),
             ),
@@ -6667,6 +6886,7 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
             t(
                 "bad_quantity",
                 lang,
+                service=short_service_name(service.get("name")),
                 min=service.get("min"),
                 max=service.get("max"),
             ),
@@ -6856,6 +7076,16 @@ async def complete_order(message, user_id, merged, lang, voice=False,
             reaction_emoji=merged.get("reaction_emoji"),
         )
         if not picks:
+            # A specific reaction emoji with no dedicated service:
+            # say so honestly (owner, 14 Nov 2026) — never
+            # silently sell the Positive mix.
+            if merged.get("reaction_emoji") and "reaction" in (merged.get("service_hint") or "").lower():
+                await reply_message(
+                    message,
+                    t("no_exact_reaction", lang, emoji=merged["reaction_emoji"]),
+                    lang, voice=voice,
+                )
+                return False
             await reply_message(message, t("no_service", lang), lang, voice=voice)
             return False
         if ask_metric and not merged.get("service_hint"):
@@ -6903,6 +7133,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
             t(
                 "bad_quantity",
                 lang,
+                service=short_service_name(service.get("name")),
                 min=service.get("min"),
                 max=service.get("max"),
             ),
@@ -7244,7 +7475,8 @@ async def resolve_batch_drafts(drafts, user_id):
         error = validate_quantity(qty, service)
         if error:
             missing.append(
-                f"{link} — quantity must be between "
+                f"{link} — {short_service_name(service.get('name'))}: "
+                f"quantity must be between "
                 f"{service.get('min')} and {service.get('max')}"
             )
             continue
@@ -7482,6 +7714,92 @@ def _is_quantity_change(text, merged, pending):
     return True
 
 
+async def try_reaction_correction(update, text, lang, voice=False):
+    """A different reaction emoji for the order already awaiting
+    Confirm ("I want only 🙏 reaction") re-picks the service for
+    that emoji and shows a NEW card — never the old card unchanged
+    (owner, 14 Nov 2026: a 🙏 correction re-showed the Positive mix
+    card). The link and quantity come from the pending order, and
+    the old card is dropped so its buttons cannot place the old
+    service. Returns True when a correction was handled. Only when
+    the pending service is a reactions service and the new emoji
+    differs from it. The message's OWN fields decide: a link or a
+    quantity in the message is a new order, not a correction — the
+    merged draft still carries the old link and quantity (PARTIAL
+    survives the card), so merged must not be consulted here."""
+    user = update.effective_user
+    _cid, _pending = pending_for_user(user.id)
+    if _pending is None:
+        return False
+    _pending_name = str(_pending["service"].get("name") or "")
+    if "reaction" not in _pending_name.lower():
+        return False
+    _own = local_intent(text)
+    if _own.get("link") or _own.get("quantity"):
+        return False
+    _new_emoji = reaction_emoji(text)
+    _old_emoji = reaction_emoji(_pending_name)
+    if (
+        _new_emoji is None
+        or _old_emoji is None
+        or _new_emoji == _old_emoji
+    ):
+        return False
+    try:
+        _services = await paxyo.services()
+    except Exception as exc:
+        log.warning("correction services failed: %s", exc)
+        _services = []
+    _picks = pick_services(
+        _services, platform="telegram",
+        service_hint="telegram reactions",
+        reaction_emoji=_new_emoji,
+    ) if _services else []
+    if not _picks:
+        await reply_message(
+            update.message,
+            t("no_exact_reaction", lang, emoji=_new_emoji),
+            lang, voice=voice,
+        )
+        return True
+    _service = _picks[0]
+    _new_qty = int(_pending["quantity"])
+    _error = validate_quantity(_new_qty, _service)
+    if _error:
+        await reply_message(
+            update.message,
+            t(
+                "bad_quantity", lang,
+                service=short_service_name(_service.get("name")),
+                min=_service.get("min"), max=_service.get("max"),
+            ),
+            lang, voice=voice,
+        )
+        return True
+    _new_total = estimated_total_etb(
+        float(_service.get("rate_etb_per_1000", 0)), _new_qty
+    )
+    _new_id = uuid.uuid4().hex[:12]
+    PENDING.pop(_cid, None)
+    PENDING[_new_id] = {
+        "user_id": user.id, "service": _service,
+        "link": _pending["link"], "quantity": _new_qty,
+        "total": _new_total,
+        "full_name": _pending.get("full_name", False),
+    }
+    await reply_message(
+        update.message,
+        confirm_card_text(
+            lang, _service, _new_qty, _new_total, _pending["link"],
+            note=t("change_note", lang, quantity=_new_qty),
+            full_name=_pending.get("full_name", False),
+        ),
+        lang,
+        reply_markup=confirm_keyboard(_new_id),
+    )
+    return True
+
+
 async def handle_change_order(update, text, intent, lang, voice=False):
     """'Change the quantity from 5,000 to 2,000 before it starts.'
 
@@ -7505,6 +7823,11 @@ async def handle_change_order(update, text, intent, lang, voice=False):
             except ValueError:
                 new_qty = None
     if new_qty is None:
+        # No number: maybe a different reaction emoji for the
+        # pending order ("I want only 🙏 reaction") — that re-picks
+        # the service instead of failing with "not understood".
+        if await try_reaction_correction(update, text, lang, voice=voice):
+            return
         await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
         return
     confirm_id, pending = pending_for_user(user.id)
@@ -7514,8 +7837,11 @@ async def handle_change_order(update, text, intent, lang, voice=False):
         if error:
             await reply_message(
                 update.message,
-                t("bad_quantity", lang, min=service.get("min"),
-                  max=service.get("max")),
+                t(
+                    "bad_quantity", lang,
+                    service=short_service_name(service.get("name")),
+                    min=service.get("min"), max=service.get("max"),
+                ),
                 lang, voice=voice,
             )
             return
@@ -8156,6 +8482,16 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if price is not None:
             await reply_message(update.message, price, lang, voice=voice)
             return
+    # How to get a Telegram post link: a deterministic answer,
+    # before the classifier (owner, 14 Nov 2026 — the AI kept
+    # getting the steps wrong, and the free answer was
+    # desktop-flavoured). Never a free AI reply for this one.
+    if intent is None and is_telegram_post_link_question(text):
+        await reply_message(
+            update.message, t("telegram_post_link", lang), lang,
+            voice=voice,
+        )
+        return
     # `intent` is injected by the photo handler (a picture's link is
     # already classified by Gemini vision, so a second text
     # classification of the bare link would be wasted and could
@@ -8266,6 +8602,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # the username. A deterministic Paxyo fact — the AI must
         # never invent a different requirement.
         await reply_message(update.message, with_pending_note(user.id, lang, t("comment_likes_need", lang)), lang, voice=voice)
+        return
+    if is_telegram_post_link_question(text):
+        # Deterministic Telegram post-link steps (owner, 14 Nov
+        # 2026): the AI kept getting them wrong. Runs here too so
+        # a classifier that already ran (photo intent) cannot send
+        # the question to a free AI reply.
+        await reply_message(update.message, t("telegram_post_link", lang), lang, voice=voice)
         return
     _terms = terms_answer(text, lang)
     if _terms is not None:
@@ -8972,8 +9315,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             if error:
                 await reply_message(
                     update.message,
-                    t("bad_quantity", lang, min=service.get("min"),
-                      max=service.get("max")),
+                    t(
+                        "bad_quantity", lang,
+                        service=short_service_name(service.get("name")),
+                        min=service.get("min"), max=service.get("max"),
+                    ),
                     lang, voice=voice,
                 )
                 return
@@ -8993,6 +9339,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 reply_markup=confirm_keyboard(_cid),
             )
             return
+
+    # A different reaction emoji for the order already awaiting
+    # Confirm ("I want only 🙏 reaction") re-picks the service for
+    # that emoji and shows a NEW card — never the old card
+    # unchanged (owner, 14 Nov 2026: a 🙏 correction re-showed the
+    # Positive mix card). See try_reaction_correction.
+    if await try_reaction_correction(update, text, lang, voice=voice):
+        return
 
     # Nothing to work with at all: not understood. (A bare number or a
     # bare link with no context still counts as something: it is stored
