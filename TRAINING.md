@@ -216,14 +216,22 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (paused services:
 
 ## AI providers (the brain is replaceable — the lessons live here)
 - DeepSeek is the primary AI (model deepseek-chat, V4.1 Flash) since
-  the evening of 13 Nov 2026, Qwen-Turbo second (model qwen-turbo,
-  $0.05/$0.20 per 1M tokens, ~3x cheaper than DeepSeek), Groq third,
-  OpenAI fourth, Gemini fifth, Kilo sixth (model kilo-auto/free —
+  the evening of 13 Nov 2026, OpenCode Zen second (model
+  deepseek-v4.1-flash-free — free tier, email-only signup, no card,
+  10 requests/minute; the free roster rotates, so the model is a
+  ZEN_MODEL env var; a Zen failure falls through to Qwen),
+  Qwen-Turbo third (model qwen-turbo,
+  $0.05/$0.20 per 1M tokens, ~3x cheaper than DeepSeek), Mistral
+  fourth (model mistral-small-latest — pay-as-you-go, owner approved
+  14 Nov 2026: $0.10/$0.30 per 1M tokens, PAYG needs $10 prepaid
+  credits first, no monthly minimum; a Mistral failure falls through to Groq), Groq
+  fifth, OpenAI sixth, Gemini seventh, Kilo eighth (model
+  kilo-auto/free —
   the router picks a currently-free model automatically; $0, no key,
   no signup, no Authorization header, 200 requests/hour per IP —
   it only runs after Gemini failed, so it never burns its per-IP
   hourly cap; a Kilo failure falls through to OpenRouter), OpenRouter
-  seventh (model openrouter/free — the router picks a currently-free
+  ninth (model openrouter/free — the router picks a currently-free
   model automatically; free :free models cost $0/token, 50
   requests/day, 1,000/day after a one-time $10 credit purchase,
   owner's choice 14 Nov 2026 — it only runs after Kilo failed, so
@@ -250,8 +258,8 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (paused services:
   + knowledge). Paid Groq (Developer, pay-as-you-go) is $0.15/$0.60 per
   1M tokens, no monthly fee, first bill at $1 usage. (Note: on 13 Nov
   2026 Groq had temporarily disabled Developer upgrades — retry later.)
-- If DeepSeek fails, the bot falls back to Qwen, then Groq, then
-  OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM, then to local rules. It gets less
+- If DeepSeek fails, the bot falls back to Zen, then Qwen, then Mistral, then
+  Groq, then OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM, then to local rules. It gets less
   clever at understanding messy language, but it does NOT lose any
   lesson.
 

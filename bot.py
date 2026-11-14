@@ -119,7 +119,23 @@ GROQ_URL = "https://api.groq.com/openai/v1"
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_URL = "https://api.deepseek.com/v1"
-# Qwen-Turbo (Alibaba) — the SECOND AI since 13 Nov 2026: ~3x
+# OpenCode Zen — the SECOND AI since 14 Nov 2026 (owner, 14 Nov
+# 2026): a free gateway (email-only signup, no card) that serves
+# free models via an OpenAI-compatible API
+# (https://opencode.ai/zen/v1). Default model
+# "deepseek-v4.1-flash-free" — the owner's favourite model, free
+# here. 10 requests/minute on the free tier. The free roster
+# rotates constantly, so the model is an env var on purpose: if
+# Zen retires the model, switch ZEN_MODEL in Render, not the code.
+# Amharic is unproven on Zen — Amharic messages go through the
+# Gemini translate-bridge (see below) instead. It only runs after
+# DeepSeek failed, and a Zen failure falls through to Qwen, then
+# Mistral, then Groq, then OpenAI, then Gemini, then Kilo, then
+# OpenRouter, then GLM. The key is a Render env var, never in code.
+ZEN_API_KEY = os.environ.get("ZEN_API_KEY", "")
+ZEN_MODEL = os.environ.get("ZEN_MODEL", "deepseek-v4.1-flash-free")
+ZEN_URL = os.environ.get("ZEN_URL", "https://opencode.ai/zen/v1")
+# Qwen-Turbo (Alibaba) — the THIRD AI since 13 Nov 2026: ~3x
 # cheaper than DeepSeek ($0.05/1M input, $0.20/1M output) via the
 # international DashScope endpoint, which is OpenAI-compatible
 # (same chat-completions shape as DeepSeek/Groq/OpenAI). Amharic is
@@ -166,6 +182,23 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 # any provider, so nothing sensitive goes there.
 KILO_MODEL = os.environ.get("KILO_MODEL", "kilo-auto/free")
 KILO_URL = "https://api.kilo.ai/api/gateway"
+# Mistral (La Plateforme) — the fourth provider since 14 Nov 2026:
+# pay-as-you-go (owner's choice, 14 Nov 2026 — $0.10/$0.30 per 1M
+# tokens; PAYG needs $10 prepaid credits first (min buy $10,
+# no monthly minimum; he adds the card himself). The Free plan has no API access, so a key needs billing
+# on. ~1 request/second on the free tier, higher once billing is
+# on. Default model "mistral-small-latest" via an OpenAI-compatible
+# API (https://api.mistral.ai/v1). The bot sends no secrets,
+# balances, orders, phone numbers or payment details to any
+# provider, so nothing sensitive goes there. Amharic is unproven on
+# Mistral — Amharic messages go through the Gemini translate-bridge
+# (see below) instead. It only runs after Qwen failed, and a
+# Mistral failure falls through to Groq, then OpenAI, then Gemini,
+# then Kilo, then OpenRouter, then GLM. The key is a Render env
+# var, never in code.
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
+MISTRAL_URL = "https://api.mistral.ai/v1"
 # Google Cloud Text-to-Speech (voice replies). The API key comes from a
 # Google Cloud project with the Cloud Text-to-Speech API enabled and
 # billing on; the AI Studio (Gemini) key does NOT work for it.
@@ -2949,6 +2982,116 @@ async def kilo_generate(prompt: str, system: str = None) -> str:
         return ""
 
 
+# --------------------------------------------------------------- Zen ----
+# OpenCode Zen mirrors the OpenRouter provider exactly (same inputs,
+# same outputs, same retry shape), with Zen's base URL and its own
+# key/model env vars. The default model "deepseek-v4.1-flash-free"
+# is the free DeepSeek V4.1 Flash served by Zen. It sits between
+# DeepSeek and Qwen in ai_generate — only after DeepSeek failed; a
+# Zen failure falls through to Qwen, then Mistral, then Groq, then
+# OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM.
+
+async def _zen_post(path: str, headers=None, json=None) -> dict:
+    """One POST to the OpenCode Zen API, with retries on rate limits
+    and server errors. Same shape as _openrouter_post (two retries,
+    after 5s then 15s; 500 joins 429/503). The client shape is
+    identical (timeout 120s, trust_env False)."""
+    url = ZEN_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning(
+                    "Zen %s, retrying (attempt %d of 3)", status, attempt + 2
+                )
+                continue
+            raise
+
+
+def _zen_headers() -> dict:
+    return {"Authorization": f"Bearer {ZEN_API_KEY}"}
+
+
+async def zen_generate(prompt: str, system: str = None) -> str:
+    """One Zen text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _zen_post(
+        "/chat/completions",
+        headers=_zen_headers(),
+        json={"model": ZEN_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+# -------------------------------------------------------------- Mistral --
+# Mistral mirrors the OpenRouter provider exactly (same inputs,
+# same outputs, same retry shape), with Mistral's base URL and its
+# own key/model env vars. The default model "mistral-small-latest"
+# is Mistral's small chat model. It sits between Qwen and Groq in
+# ai_generate — only after Qwen failed; a Mistral failure falls
+# through to Groq, then OpenAI, then Gemini, then Kilo, then
+# OpenRouter, then GLM.
+
+async def _mistral_post(path: str, headers=None, json=None) -> dict:
+    """One POST to the Mistral API, with retries on rate limits
+    and server errors. Same shape as _openrouter_post (two retries,
+    after 5s then 15s; 500 joins 429/503). The client shape is
+    identical (timeout 120s, trust_env False)."""
+    url = MISTRAL_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning(
+                    "Mistral %s, retrying (attempt %d of 3)", status, attempt + 2
+                )
+                continue
+            raise
+
+
+def _mistral_headers() -> dict:
+    return {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
+
+
+async def mistral_generate(prompt: str, system: str = None) -> str:
+    """One Mistral text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _mistral_post(
+        "/chat/completions",
+        headers=_mistral_headers(),
+        json={"model": MISTRAL_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 def _log_ai_failure(message: str, exc) -> None:
     """Log an AI-provider failure: message + HTTP status only.
 
@@ -2967,14 +3110,21 @@ def _log_ai_failure(message: str, exc) -> None:
 
 async def ai_generate(prompt: str, system: str = None) -> str:
     """Text from the AI: DeepSeek when DEEPSEEK_API_KEY is set, else
-    Qwen when QWEN_API_KEY is set, else Groq when GROQ_API_KEY is
-    set, else ChatGPT when OPENAI_API_KEY is set, else Gemini, else
-    Kilo (no key — free gateway, only after Gemini failed, so it
-    never burns its per-IP hourly cap), else OpenRouter when
-    OPENROUTER_API_KEY is set (free :free models — only after
-    Kilo failed, so it never burns its daily cap), else
-    GLM when GLM_API_KEY is set (free last resort — slow and
-    rate-limited, so it only runs when every other provider failed).
+    Zen when ZEN_API_KEY is set (model deepseek-v4.1-flash-free —
+    free tier, no card, owner approved 14 Nov 2026; a Zen failure
+    falls through to Qwen), else Qwen when QWEN_API_KEY is set,
+    else Mistral when MISTRAL_API_KEY is set (model
+    mistral-small-latest — pay-as-you-go, owner approved 14 Nov
+    2026: $0.10/$0.30 per 1M tokens, PAYG needs $10 prepaid credits
+    first, no monthly minimum; a Mistral failure falls through to
+    Groq), else Groq when GROQ_API_KEY is set, else ChatGPT when
+    OPENAI_API_KEY is set, else Gemini, else Kilo (no key — free
+    gateway, only after Gemini failed, so it never burns its per-IP
+    hourly cap), else OpenRouter when OPENROUTER_API_KEY is set
+    (free :free models — only after Kilo failed, so it never burns
+    its daily cap), else GLM when GLM_API_KEY is set (free last
+    resort — slow and rate-limited, so it only runs when every other
+    provider failed).
     Every caller uses this, so the provider switch is one env var
     and the fallback is automatic. A provider that raises after its
     own retries falls through to the next one; only when every
@@ -2989,11 +3139,23 @@ async def ai_generate(prompt: str, system: str = None) -> str:
         except Exception as exc:
             _log_ai_failure("DeepSeek generate failed, trying next provider", exc)
             last_exc = exc
+    if ZEN_API_KEY:
+        try:
+            return await zen_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("Zen generate failed, trying next provider", exc)
+            last_exc = exc
     if QWEN_API_KEY:
         try:
             return await qwen_generate(prompt, system=system)
         except Exception as exc:
             _log_ai_failure("Qwen generate failed, trying next provider", exc)
+            last_exc = exc
+    if MISTRAL_API_KEY:
+        try:
+            return await mistral_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("Mistral generate failed, trying next provider", exc)
             last_exc = exc
     if GROQ_API_KEY:
         try:
@@ -3393,8 +3555,8 @@ def local_intent(text: str) -> dict:
 
 
 async def extract_intent(text: str, user_id: int = None) -> dict:
-    """Ask the AI (DeepSeek, then Qwen, Groq, ChatGPT, Gemini, Kilo,
-    OpenRouter, GLM — see ai_generate) to classify the message and extract the order intent.
+    """Ask the AI (DeepSeek, then Zen, Qwen, Mistral, Groq, ChatGPT, Gemini,
+    Kilo, OpenRouter, GLM — see ai_generate) to classify the message and extract the order intent.
 
     The text is normalised first (typos/slang fixed, URLs kept
     verbatim), so "let me deposit 10 br by teleirr" still classifies

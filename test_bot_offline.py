@@ -8148,6 +8148,613 @@ class TestKiloProvider(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("key=", joined)
 
 
+class TestZenProvider(unittest.IsolatedAsyncioTestCase):
+    """OpenCode Zen is second in the chain (owner, 14 Nov 2026):
+    a free gateway (email-only signup, no card) serving free models
+    via an OpenAI-compatible API. Default model
+    "deepseek-v4.1-flash-free" — the owner's favourite model, free
+    here. 10 requests/minute on the free tier; the free roster
+    rotates, so the model is an env var (ZEN_MODEL). It only runs
+    after DeepSeek failed, and a Zen failure falls through to Qwen,
+    then Mistral, then Groq, then OpenAI, then Gemini, then Kilo,
+    then OpenRouter, then GLM. The provider mirrors OpenRouter
+    exactly."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://opencode.ai/zen/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_zen_default_model_is_deepseek_v4_1_flash_free(self):
+        self.assertEqual(bot.ZEN_MODEL, "deepseek-v4.1-flash-free")
+
+    def test_zen_default_url_is_opencode_zen(self):
+        self.assertEqual(bot.ZEN_URL, "https://opencode.ai/zen/v1")
+
+    async def test_zen_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"):
+            self.assertEqual(await bot.zen_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith("https://opencode.ai/zen/v1")
+        )
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer sk-zen-test"
+        )
+        self.assertEqual(post["json"]["model"], "deepseek-v4.1-flash-free")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_zen_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"):
+            await bot.zen_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_zen_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.zen_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_zen_generate_model_env_honoured(self):
+        # A pinned model (ZEN_MODEL) replaces the default
+        # "deepseek-v4.1-flash-free" in the posted request — the free
+        # roster rotates, so this is how a retired model is swapped.
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
+             mock.patch.object(
+                 bot, "ZEN_MODEL", "glm-5.3-flash-free",
+             ):
+            await bot.zen_generate("hi")
+        self.assertEqual(
+            client.posts[0]["json"]["model"], "glm-5.3-flash-free"
+        )
+
+    async def test_ai_generate_calls_zen_when_deepseek_fails(self):
+        # DeepSeek fails: Zen answers, Qwen, Mistral, Groq,
+        # OpenAI, Gemini, Kilo, OpenRouter and GLM are never
+        # reached, each provider tried once.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.zen_generate",
+                 new=mock.AsyncMock(return_value="zen"),
+             ) as zen, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(return_value="qwen"),
+             ) as qwen, \
+             mock.patch(
+                 "bot.mistral_generate",
+                 new=mock.AsyncMock(return_value="mistral"),
+             ) as mistral, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="groq"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="openai"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="gemini"),
+             ) as gem, \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(return_value="kilo"),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "zen")
+        for fn in (deepseek, zen):
+            fn.assert_awaited_once()
+        qwen.assert_not_awaited()
+        mistral.assert_not_awaited()
+        groq.assert_not_awaited()
+        gen.assert_not_awaited()
+        gem.assert_not_awaited()
+        kilo.assert_not_awaited()
+        router.assert_not_awaited()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_skips_zen_without_key(self):
+        # No ZEN_API_KEY: the chain jumps straight from DeepSeek
+        # to Qwen, and zen_generate is never called.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "ZEN_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.zen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("z")),
+             ) as zen, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(return_value="qwen"),
+             ) as qwen, \
+             mock.patch(
+                 "bot.mistral_generate",
+                 new=mock.AsyncMock(return_value="mistral"),
+             ) as mistral, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="groq"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="openai"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="gemini"),
+             ) as gem, \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(return_value="kilo"),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "qwen")
+        zen.assert_not_awaited()
+        qwen.assert_awaited_once()
+        mistral.assert_not_awaited()
+        groq.assert_not_awaited()
+        gen.assert_not_awaited()
+        gem.assert_not_awaited()
+        kilo.assert_not_awaited()
+        router.assert_not_awaited()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_falls_back_to_qwen_when_zen_raises(self):
+        # Zen fails after DeepSeek: Qwen answers, Mistral, Groq,
+        # OpenAI, Gemini, Kilo, OpenRouter and GLM are never
+        # reached.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.zen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("z")),
+             ) as zen, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(return_value="qwen"),
+             ) as qwen, \
+             mock.patch(
+                 "bot.mistral_generate",
+                 new=mock.AsyncMock(return_value="mistral"),
+             ) as mistral, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="groq"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="openai"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="gemini"),
+             ) as gem, \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(return_value="kilo"),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "qwen")
+        zen.assert_awaited_once()
+        qwen.assert_awaited_once()
+        mistral.assert_not_awaited()
+        groq.assert_not_awaited()
+        gen.assert_not_awaited()
+        gem.assert_not_awaited()
+        kilo.assert_not_awaited()
+        router.assert_not_awaited()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_zen_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", ""), \
+             mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch.object(
+                 bot, "mistral_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("m")),
+             ), \
+             mock.patch.object(
+                 bot, "gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ), \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            self.assertEqual(await bot.ai_generate("hi"), "glm")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "Zen generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("sk-zen-test", joined)
+        self.assertNotIn("key=", joined)
+
+
+class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
+    """Mistral is third in the chain (owner, 14 Nov 2026): La
+    Plateforme pay-as-you-go — $0.10/$0.30 per 1M tokens, no minimum
+    deposit, no monthly minimum; ~1 request/second on the free tier,
+    higher once billing is on. Default model "mistral-small-latest"
+    via an OpenAI-compatible API. It only runs after DeepSeek and
+    Qwen failed — both are dead/unpaid right now, so on live days it
+    answers first — and a Mistral failure falls through to Groq,
+    then OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM.
+    The provider mirrors OpenRouter exactly."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.mistral.ai/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_mistral_default_model_is_mistral_small_latest(self):
+        self.assertEqual(bot.MISTRAL_MODEL, "mistral-small-latest")
+
+    def test_mistral_default_url_is_mistral_api(self):
+        self.assertEqual(bot.MISTRAL_URL, "https://api.mistral.ai/v1")
+
+    async def test_mistral_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"):
+            self.assertEqual(await bot.mistral_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith("https://api.mistral.ai/v1")
+        )
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer sk-mistral-test"
+        )
+        self.assertEqual(post["json"]["model"], "mistral-small-latest")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_mistral_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"):
+            await bot.mistral_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_mistral_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.mistral_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_mistral_generate_model_env_honoured(self):
+        # A pinned model (MISTRAL_MODEL) replaces the default
+        # "mistral-small-latest" in the posted request.
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(
+                 bot, "MISTRAL_MODEL", "mistral-medium-latest",
+             ):
+            await bot.mistral_generate("hi")
+        self.assertEqual(
+            client.posts[0]["json"]["model"], "mistral-medium-latest"
+        )
+
+    async def test_ai_generate_calls_mistral_when_qwen_fails(self):
+        # Every provider before Mistral fails: Mistral answers,
+        # Groq, OpenAI, Gemini, Kilo, OpenRouter and GLM are never
+        # reached, each provider tried once.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ) as qwen, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="groq"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="openai"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="gemini"),
+             ) as gem, \
+             mock.patch(
+                 "bot.mistral_generate",
+                 new=mock.AsyncMock(return_value="mistral"),
+             ) as mistral, \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(return_value="kilo"),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "mistral")
+        for fn in (deepseek, qwen, mistral):
+            fn.assert_awaited_once()
+        groq.assert_not_awaited()
+        gen.assert_not_awaited()
+        gem.assert_not_awaited()
+        kilo.assert_not_awaited()
+        router.assert_not_awaited()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_skips_mistral_without_key(self):
+        # No MISTRAL_API_KEY: the chain jumps straight from
+        # Qwen to Groq, and mistral_generate is never called.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", ""), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="groq"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="openai"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="gemini"),
+             ) as gem, \
+             mock.patch(
+                 "bot.mistral_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("m")),
+             ) as mistral, \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(return_value="kilo"),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "groq")
+        mistral.assert_not_awaited()
+        groq.assert_awaited_once()
+        gen.assert_not_awaited()
+        gem.assert_not_awaited()
+        kilo.assert_not_awaited()
+        router.assert_not_awaited()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_falls_back_to_groq_when_mistral_raises(self):
+        # Mistral fails after Qwen: Groq answers, OpenAI,
+        # Gemini, Kilo, OpenRouter and GLM are never reached.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="groq"),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(return_value="openai"),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(return_value="gemini"),
+             ) as gem, \
+             mock.patch(
+                 "bot.mistral_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("m")),
+             ) as mistral, \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(return_value="kilo"),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "groq")
+        mistral.assert_awaited_once()
+        groq.assert_awaited_once()
+        gen.assert_not_awaited()
+        gem.assert_not_awaited()
+        kilo.assert_not_awaited()
+        router.assert_not_awaited()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_mistral_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", ""), \
+             mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ), \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            self.assertEqual(await bot.ai_generate("hi"), "glm")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "Mistral generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("sk-mistral-test", joined)
+        self.assertNotIn("key=", joined)
+
+
 class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
     """The Amharic translate-bridge (owner, 13 Nov 2026): a message
     in Ethiopic fidels is translated to English by Gemini first, the
