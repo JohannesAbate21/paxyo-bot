@@ -260,10 +260,38 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (deterministic pr
   words or Amharic reply templates — those still apply when
   translation fails.
 - Groq free tier: 1,000 requests/day, 200,000 tokens/day. The TOKEN limit
-  binds first (~2,700 tokens per chat — each call sends the service list
-  + knowledge). Paid Groq (Developer, pay-as-you-go) is $0.15/$0.60 per
+  binds first. Paid Groq (Developer, pay-as-you-go) is $0.15/$0.60 per
   1M tokens, no monthly fee, first bill at $1 usage. (Note: on 13 Nov
   2026 Groq had temporarily disabled Developer upgrades — retry later.)
+- PROMPT SHRINK (owner approved, 14 Nov 2026): the classifier prompt
+  used to send the whole SYSTEM_PROMPT (~2,460 tokens) plus up to 10
+  turns of history — about ~2,700-2,900 tokens per chat. CORRECTION
+  to the old note here: the service catalogue was NEVER in the AI
+  prompt; the bulk was the classifier instructions and the history.
+  The shrink, in bot.py: SYSTEM_PROMPT compacted (11,511 chars /
+  ~2,460 tokens -> 7,357 chars / ~1,567 tokens — same 35 intents,
+  same JSON shape, same disambiguation rules, just shorter lines);
+  history in the prompt is the last 3 turns, not 10; and when a
+  message names BOTH a platform and a metric, the prompt also
+  carries the matching services only (build_classify_prompt,
+  detect_platform_metric, services_for_prompt — deterministic
+  keywords/regex, never the AI; at most 30, fastest first, short
+  name + id + ETB/1000 + average time; reactions limited to the
+  emoji's single-post family). When platform or metric cannot be
+  read, there is NO services section — the full catalogue is never
+  pasted into a prompt (7,176 services would be ~100k tokens) and
+  the deterministic code (pick_services, price) still works from
+  the full catalogue, exactly as before. Measured after the shrink:
+  ~1,800 tokens/chat for non-order turns, ~2,200 for order turns
+  (was ~2,900) — roughly 1.5x more chats per token budget, NOT the
+  5x once estimated from the wrong catalogue premise. Groq free
+  covers ~110 chats/day (was ~74); DeepSeek $2 lasts ~1.5x longer.
+  Prices, order placement, the deterministic fastest-pick, the
+  deterministic price fix and all guardrails are untouched by the
+  shrink. Do NOT re-expand SYSTEM_PROMPT with long examples — the
+  compact form is load-bearing for cost and speed; a live retest
+  after any prompt edit is mandatory because the offline tests mock
+  the AI and cannot catch classification drift.
 - If DeepSeek fails, the bot falls back to Zen, then Qwen, then Mistral, then
   Groq, then OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM, then to local rules. It gets less
   clever at understanding messy language, but it does NOT lose any

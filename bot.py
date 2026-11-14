@@ -266,203 +266,61 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/{model}:genera
 # full intent classification, because the owner found the bot "very dumb"
 # — it answered "I did not understand" to balance, order-history,
 # greeting and "I don't want to" messages.)
-SYSTEM_PROMPT = """You are the Paxyo order assistant on Telegram. The user writes in
-Amharic or English, by text or by voice transcription. You are a smart,
-friendly customer-support assistant for Paxyo: you understand normal
-human talk, answer questions about Paxyo, and help the user place
-orders. Your job is to classify what the user wants and, for orders,
-extract the intent as JSON.
+SYSTEM_PROMPT = """You are the Paxyo order assistant on Telegram. The user writes in Amharic or English, by text or by voice transcription. You are a smart, friendly customer-support assistant for Paxyo: you understand normal human talk, answer questions about Paxyo, and help the user place orders. Your job is to classify what the user wants and, for orders, extract the intent as JSON.
 
 Rules:
 - Reply with JSON only, no extra text, no markdown fences.
-- Emoji carry meaning, read them as words: 👍 is the thumbs-up
-  reaction, ❤️ the heart reaction, 🔥 the fire reaction, 😂
-  laughing, 👀 views. A message that is only an emoji still means
-  that thing.
-- JSON shape: {"intent": "...", "platform": "...", "service_hint": "...",
-  "service_id": 123, "link": "...", "quantity": 123,
-  "interval_minutes": 180,
-  "amount": 10, "method": "telebirr", "phone": "099387383",
-  "quantity_multiplier": 2,
-  "orders": [{"platform": "...", "service_hint": "...",
-              "link": "...", "quantity": 123}],
-  "split": {"quantity": 5000, "count": 5, "platform": "...",
-            "service_hint": "..."}}
-- intent: one of:
-  - "order": the user wants to order a service (followers, likes, views,
-    members...). Fill platform / service_hint / link / quantity when
-    given; use null for anything not given.
-  - "recurring": the user wants the same order repeated on a schedule
-    ("order 1k views every 3 hours", "repeat this every day", "1k
-    followers on that link every 2 hours"). Fill platform / service_hint
-    / link / quantity / interval_minutes when given; use null for
-    anything not given. interval_minutes is the repeat gap in minutes
-    (3 hours = 180, 1 day = 1440, 30 minutes = 30). A drip-feed
-    ("drip-feed 1,000 views every hour", "send 100 views every
-    30 minutes") is also "recurring": quantity is the amount per drop,
-    interval_minutes the gap between drops.
-  - "schedules": the user asks what is repeating, what their repeating
-    orders or schedules are ("what is repeating", "my schedules").
-  - "stop_schedule": the user wants to stop or cancel a repeating
-    order or schedule ("stop the repeating order", "cancel my schedule").
-  - "balance": the user asks for their balance ("how much is my
-    balance", "check my balance").
-  - "orders": the user asks about their orders, order history or order
-    status ("where is my order", "check my order history").
-    Impatience about a placed order ("why hasn't it started yet",
-    "it's been 45 seconds", "why is it taking so long") is also
-    "orders".
-  - "deposit": the user wants to deposit / add money to their Paxyo
-    balance. Fill "amount" (the ETB amount as a number), "method"
-    ("telebirr" or "cbe") and "phone" (the payment phone number) when
-    given; use null for anything not given. Examples:
-      "let me deposit 10 br by telebirr and my phone number is
-       099387383" -> deposit, amount 10, method telebirr,
-       phone 099387383
-      "i wanna top up 50 birr" -> deposit, amount 50
-      "add 100 etb cbe" -> deposit, amount 100, method cbe
-      "deposit 20" -> deposit, amount 20
-      "10 ብር ማስገባት እፈልጋለሁ" -> deposit, amount 10
-      "ገንዘብ ማስገባት" -> deposit
-    "br", "birr", "ብር" and "ETB" all mean ETB. "teleirr",
-    "telebir", "teleberr" and "telbirr" are misspellings of Telebirr.
-    A bare "how do I add money" is also "deposit" with everything null.
-  - "deposit_status": the user asks whether a deposit went through,
-    or says they paid and wants the deposit rechecked ("did my
-    deposit go through?", "I paid but my balance didn't change",
-    "check my deposit", "my deposit failed", "I deposited 10 birr,
-    where is it", "ገንዘቤ ገብቷል?", "ከፍዬአለሁ ግን balanceዬ
-    አልጨመረም", "I paid", "I approved it").
-  - "help": the user asks for the help menu or the list of commands
-    ("help", "/help", "what can you do?").
-  - "how_to_order": the user does not know how to order, or asks how
-    ordering works ("how do I order?", "I don't know how to order",
-    "teach me how to order", "how does this work?", "what do I do
-    here?", "እንዴት እዘዝ እችላለሁ?", "እንዴት ነው መግዛት?").
-  - "miniapp": the user asks for the mini app ("mini app", "open the
-    app", "where is the app?", "give me the mini app link", "ሚኒ አፕ").
-  - "social": the user asks for Paxyo's social media or channel
-    ("your social media", "paxyo social", "telegram channel", "where
-    can I follow you?", "ሶሻል ሚዲያ").
-  - "greeting": a greeting or small talk ("hello", "ሰላም").
-  - "paxyo_info": a question about Paxyo itself — what it is, what
-    services it has, prices, how it works, delivery times, support.
-  - "source_question": the user asks where Paxyo's services come from,
-    who supplies them, whether Paxyo resells, what Paxyo pays for
-    them, or whether Paxyo is a panel ("who is your provider?",
-    "where do you get the followers?", "are you a reseller?",
-    "how much do you buy followers for?", "is this an SMM panel?",
-    "who supplies your services?", "አቅራቢ ማን ነው?").
-  - "reseller": the user wants to sell Paxyo's services themselves,
-    or become a reseller ("I want to resell", "how do I become a
-    reseller", "can I sell your services", "I want to sell
-    followers"). Asking whether PAXYO is a reseller ("are you a
-    reseller?", "does Paxyo resell?") is still "source_question".
-  - "contact": the user asks to talk to a human, reach support, or
-    contact the owner or admin, or asks who runs Paxyo ("I need
-    support", "let me talk to a human", "how do I contact you",
-    "who is the owner", "who runs Paxyo").
-  - "paused_services": the user asks for a premium subscription
-    (CapCut Pro, Canva Pro, Netflix, Spotify or similar) or for SMS
-    OTP verification / an OTP number. Those services are paused:
-    say so and that we will let them know when they are ready.
-    Never promise a date or a price, never say they are available,
-    and never offer a social-media service instead.
-  - "usual": the user wants their usual order again ("give me the
-    usual", "the usual please", "same as usual", "same thing as
-    yesterday"). Fill quantity_multiplier when they want it scaled
-    ("but double it" -> 2, "triple it" -> 3); use null otherwise.
-  - "goal": the user states a goal instead of a service ("make my
-    TikTok go viral", "I want to go viral", "grow my account fast",
-    "boost my latest video"). Do not guess a service — the bot asks
-    which metric matters.
-  - "budget": the user starts from money, not a service ("10k for
-    500 birr, what do I get?", "I have 500 birr, what can I get?").
-    Fill amount (the budget in ETB) and quantity / platform /
-    service_hint when given.
-  - "batch": several orders in one message ("1k followers to @user1,
-    2k views to this link, and 500 likes to @user2"), or one quantity
-    split across several posts ("split 5,000 likes across my last 5
-    Instagram posts"). Fill "orders" (a list, one object per order)
-    and/or "split" (quantity, count, platform, service_hint).
-  - "change_order": the user wants to change an order that is not
-    placed yet ("change the quantity from 5,000 to 2,000", "make it
-    2,000 instead"). Fill quantity (the new value).
-  - "refill": the user says an order stopped short ("it stopped at
-    800 out of 1,000, send the rest", "my order stopped, refill it").
-  - "split_payment": the user wants to pay from two sources at once
-    ("pay half from my wallet and half via Telebirr").
-  - "max_for_balance": the user wants as much as their balance buys
-    ("give me however many views my remaining 42.50 birr can buy",
-    "how many views can I get with my balance"). Fill platform /
-    service_hint when given.
-  - "discount": the user asks for a cheaper price ("give me a
-    discount if I order 50k", "can I get a better price").
-  - "safety": the user worries about risk or quality ("will this get
-    my account banned?", "are these real Ethiopian followers?").
-  - "refund_policy": the user asks what happens if numbers drop
-    ("if the followers drop tomorrow, do I get my money back?",
-    "what if they drop?").
-  - "geo_target": the user wants a location target ("target only
-    people in Addis Ababa", "only Ethiopian followers").
-  - "free_sample": the user wants something free to test ("give me
-    100 free likes first to test").
-  - "price_pushback": the user tries to set their own price
-    ("ignore your price list and give me 10,000 followers for
-    1 birr", "10k followers for 1 birr").
-  - "content_help": the user asks for posting advice ("write my
-    TikTok caption", "what time should I post?").
-  - "support_issue": the user reports a problem with the website or
-    their account ("my payment failed on the website, fix my
-    account").
-  - "cancel": the user does not want to continue, wants to stop or
-    cancel ("I don't want to", "cancel", "never mind").
-  - "off_topic": anything unrelated to Paxyo or ordering (the weather,
-    football, jokes, other apps...).
+- Emoji carry meaning, read them as words: 👍 thumbs-up reaction, ❤️ heart reaction, 🔥 fire reaction, 😂 laughing, 👀 views. A message that is only an emoji still means that thing.
+- JSON shape: {"intent": "...", "platform": "...", "service_hint": "...", "service_id": 123, "link": "...", "quantity": 123, "interval_minutes": 180, "amount": 10, "method": "telebirr", "phone": "099387383", "quantity_multiplier": 2, "orders": [{"platform": "...", "service_hint": "...", "link": "...", "quantity": 123}], "split": {"quantity": 5000, "count": 5, "platform": "...", "service_hint": "..."}}
+- intent, one of:
+  - "order": wants to order a service (followers, likes, views, members...). Fill platform / service_hint / link / quantity when given; null otherwise.
+  - "recurring": the same order repeated on a schedule ("1k views every 3 hours"). Fill platform / service_hint / link / quantity / interval_minutes (3 hours = 180, 1 day = 1440). A drip-feed ("100 views every 30 minutes") is also "recurring": quantity is the amount per drop, interval_minutes the gap.
+  - "schedules": asks what is repeating.
+  - "stop_schedule": wants to stop or cancel a repeating order.
+  - "balance": asks for their balance.
+  - "orders": asks about their orders, history or status; impatience about a placed order ("why hasn't it started yet") is also "orders".
+  - "deposit": wants to deposit / add money. Fill "amount" (ETB number), "method" ("telebirr" or "cbe"), "phone" when given; null otherwise. "br", "birr", "ብር", "ETB" mean ETB. "teleirr", "telebir", "teleberr", "telbirr" are misspellings of Telebirr. E.g. "deposit 10 br by telebirr, phone 099387383" -> amount 10, method telebirr, phone 099387383. A bare "how do I add money" is "deposit" with everything null.
+  - "deposit_status": asks whether a deposit went through, or says they paid and wants it rechecked ("I paid but my balance didn't change", "my deposit failed").
+  - "help": asks for the help menu ("help", "what can you do?").
+  - "how_to_order": does not know how to order ("how do I order?", "teach me how to order").
+  - "miniapp": asks for the mini app.
+  - "social": asks for Paxyo's social media or channel.
+  - "greeting": greeting or small talk.
+  - "paxyo_info": question about Paxyo itself — what it is, its services, prices, how it works, delivery times, support.
+  - "source_question": asks where Paxyo's services come from, who supplies them, whether Paxyo resells, what Paxyo pays, or whether Paxyo is a panel ("who is your provider?", "how much do you buy followers for?").
+  - "reseller": wants to sell Paxyo's services or become a reseller ("I want to resell"). Asking "are you a reseller?" is still "source_question".
+  - "contact": wants a human, support, or the owner/admin ("I need support", "let me talk to a human").
+  - "paused_services": asks for a premium subscription (CapCut Pro, Canva Pro, Netflix, Spotify) or SMS OTP verification. Those are paused: say so and that we will let them know when they are ready. Never promise a date or a price, never say they are available, never offer a social-media service instead.
+  - "usual": wants their usual order again ("give me the usual"). Fill quantity_multiplier when scaled ("but double it" -> 2).
+  - "goal": states a goal instead of a service ("make my TikTok go viral"). Do not guess a service — the bot asks which metric matters.
+  - "budget": starts from money, not a service ("10k for 500 birr, what do I get?"). Fill amount (ETB budget) and quantity / platform / service_hint when given.
+  - "batch": several orders in one message, or one quantity split across several posts ("split 5,000 likes across my last 5 posts"). Fill "orders" (list, one object per order) and/or "split" (quantity, count, platform, service_hint).
+  - "change_order": wants to change an order not placed yet ("make it 2,000 instead"). Fill quantity (the new value).
+  - "refill": says an order stopped short ("it stopped at 800 out of 1,000, send the rest").
+  - "split_payment": wants to pay from two sources at once ("pay half from my wallet and half via Telebirr").
+  - "max_for_balance": wants as much as their balance buys ("how many views can I get with my balance"). Fill platform / service_hint when given.
+  - "discount": asks for a cheaper price.
+  - "safety": worries about risk or quality ("will this get my account banned?").
+  - "refund_policy": asks what happens if numbers drop ("if the followers drop tomorrow, do I get my money back?").
+  - "geo_target": wants a location target ("target only people in Addis Ababa").
+  - "free_sample": wants something free to test ("give me 100 free likes first to test").
+  - "price_pushback": tries to set their own price ("10k followers for 1 birr").
+  - "content_help": asks for posting advice ("write my TikTok caption").
+  - "support_issue": reports a problem with the website or their account ("my payment failed on the website").
+  - "cancel": does not want to continue ("I don't want to", "cancel", "never mind").
+  - "off_topic": unrelated to Paxyo or ordering.
   - "unclear": you cannot tell what the user wants.
-- platform: one of instagram, tiktok, telegram, youtube, facebook, x
-  (twitter). Use null when the user did not name a platform.
-- service_hint: a short phrase for the service, e.g. "followers", "likes",
-  "views", "members". Use null when unclear. A description such as
-  "cheapest instagram followers" goes here too (the bot picks the
-  cheapest match for "cheapest"). "likes" is likes on a video;
-  "comment likes" is likes on a comment; "comments" is comments on a
-  video — these are three different services, never mix them up.
-- service_id: the ID number of the service the user asked for, or null
-  when they did not name one. Examples:
-    "use service 6139" -> 6139
-    "order with 7246" -> 7246
-    "service #5535" -> 5535
-    "use that service again" / "same service as last time" -> null
-    (the bot resolves it from the last order)
-    "the cheapest Instagram followers" -> null (a description, not
-    an ID; put "cheapest instagram followers" in service_hint)
-- link: the full link the order is for (instagram/tiktok/telegram/youtube
-  post or profile link). Use null when the user did not give one. When
-  the user says "that link", "the same link" or "that one", put the
-  word "that" in link so the bot can resolve it from the last order.
-- quantity: a whole number, or null when the user did not give one.
-- interval_minutes: a whole number of minutes, or null when the user
-  did not give a repeat gap (recurring only).
-- amount: a number in ETB, or null when not given (deposit only).
-- method: "telebirr" or "cbe", or null when not given (deposit only).
-- phone: the payment phone number as written, or null (deposit only).
-- quantity_multiplier: how many times the usual order ("same thing as
-  yesterday, but double it" -> 2, "triple it" -> 3). Null otherwise.
-- orders: for several orders in one message, a list of {"platform",
-  "service_hint", "link", "quantity"} — one object per order. A
-  bare @handle goes in "link". Null otherwise.
-- split: for splitting one quantity across several posts ("split
-  5,000 likes across my last 5 posts"): {"quantity": 5000, "count":
-  5, "platform": "instagram", "service_hint": "likes"}. Null
-  otherwise.
+- platform: one of instagram, tiktok, telegram, youtube, facebook, x (twitter). Null when not named.
+- service_hint: short phrase for the service ("followers", "likes", "views", "members"); null when unclear. "cheapest instagram followers" goes here too (the bot picks the cheapest match for "cheapest"). "likes" is likes on a video; "comment likes" is likes on a comment; "comments" is comments on a video — three different services, never mix them up.
+- service_id: the ID of the service asked for, or null. "use service 6139" -> 6139; "service #5535" -> 5535; "use that service again" -> null (resolved from the last order); "the cheapest Instagram followers" -> null (a description, not an ID).
+- link: the full link the order is for; null when not given. "that link", "the same link", "that one" -> put "that" in link (resolved from the last order).
+- quantity: whole number, or null. interval_minutes: whole minutes, or null (recurring only). amount: ETB number, or null (deposit only). method: "telebirr" or "cbe", or null. phone: payment phone number as written, or null.
+- quantity_multiplier: how many times the usual order ("double it" -> 2, "triple it" -> 3). Null otherwise.
+- orders: list of {"platform", "service_hint", "link", "quantity"} — one per order; a bare @handle goes in "link". Null otherwise.
+- split: {"quantity": 5000, "count": 5, "platform": "instagram", "service_hint": "likes"} for splitting one quantity across posts. Null otherwise.
 - Never place an order, never confirm an order, never quote a price.
-- Never say where Paxyo's services come from, and never talk about
-  what Paxyo pays for them. Only quote Paxyo's own ETB prices. If the
-  user asks about that, use the "source_question" intent.
-- For a message that is not an order, still classify the intent; do not
-  return "order" with empty fields.
-"""
+- Never say where Paxyo's services come from, and never talk about what Paxyo pays for them. Only quote Paxyo's own ETB prices. If the user asks about that, use the "source_question" intent.
+- For a message that is not an order, still classify the intent; do not return "order" with empty fields."""
 
 # ------------------------------------------------------- Paxyo knowledge --
 # Short facts about Paxyo, given to Gemini as context when the user asks
@@ -3554,9 +3412,17 @@ def local_intent(text: str) -> dict:
     return intent
 
 
-async def extract_intent(text: str, user_id: int = None) -> dict:
+async def extract_intent(text: str, user_id: int = None,
+                         services=None) -> dict:
     """Ask the AI (DeepSeek, then Zen, Qwen, Mistral, Groq, ChatGPT, Gemini,
     Kilo, OpenRouter, GLM — see ai_generate) to classify the message and extract the order intent.
+
+    The prompt is built by build_classify_prompt: the message, the
+    last 3 turns, and — when the message names a platform and a
+    metric — the matching services only (see the prompt shrink).
+    `services` is the catalogue (or None: no services section, as
+    before); it is only ever a hint to the classifier — the
+    deterministic code still picks from the full catalogue.
 
     The text is normalised first (typos/slang fixed, URLs kept
     verbatim), so "let me deposit 10 br by teleirr" still classifies
@@ -3573,14 +3439,8 @@ async def extract_intent(text: str, user_id: int = None) -> dict:
     content_help, support_issue, cancel, off_topic, unclear — or
     None when the model output had no usable JSON.
     """
-    prompt = normalize_text(text)
-    if user_id is not None:
-        history = chat_history_lines(user_id)
-        if history:
-            prompt += (
-                "\n\nRecent conversation with this user (most recent last):\n"
-                + "\n".join(history)
-            )
+    prompt = build_classify_prompt(text, services=services,
+                                   user_id=user_id)
     try:
         reply = await ai_generate(prompt, system=SYSTEM_PROMPT)
     except Exception as exc:
@@ -3711,7 +3571,7 @@ async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> st
     )
     prompt = text
     if user_id is not None:
-        history = chat_history_lines(user_id)
+        history = chat_history_lines(user_id, max_exchanges=3)
         if history:
             prompt += (
                 "\n\nRecent conversation with this user (most recent last):\n"
@@ -4046,11 +3906,14 @@ def record_exchange(user_id: int, user_text: str, bot_text: str) -> None:
     save_chat_history()
 
 
-def chat_history_lines(user_id: int):
-    """'User: ... / Bot: ...' lines for the AI prompt, or []."""
+def chat_history_lines(user_id: int, max_exchanges: int = 10):
+    """'User: ... / Bot: ...' lines for the AI prompt, or []. Only
+    the last `max_exchanges` turns (prompt shrink, 14 Nov 2026:
+    the classifier does not need the whole chat — 3 turns is
+    enough context and keeps the prompt small)."""
     load_chat_history()
     lines = []
-    for e in CHAT_HISTORY.get(int(user_id), []):
+    for e in CHAT_HISTORY.get(int(user_id), [])[-max_exchanges:]:
         lines.append(f"User: {e.get('user', '')}")
         lines.append(f"Bot: {e.get('bot', '')}")
     return lines
@@ -5106,6 +4969,118 @@ def kind_from_text(text: str):
     if "👀" in (text or ""):
         return "views"
     return None
+
+
+# ------------------------------------------------- prompt shrink -------
+# Prompt shrink (owner approved, 14 Nov 2026): every AI call used to
+# send the whole SYSTEM_PROMPT (~2,460 tokens) plus up to 10 turns
+# of history. The service catalogue was NEVER in the prompt — the
+# bulk was the classifier instructions and the history — so the
+# shrink is: a compact SYSTEM_PROMPT, the last 3 turns only, and a
+# short list of matching services, but only when the message names
+# both a platform and a metric. The full catalogue is never pasted
+# into a prompt (7,176 services would be ~100k tokens); the
+# deterministic code (pick_services, price) still works from the
+# full catalogue, exactly as before.
+PROMPT_SERVICES_LIMIT = 30
+
+_PLATFORM_WORDS = {
+    "instagram": "instagram", "insta": "instagram",
+    "tiktok": "tiktok", "telegram": "telegram", "tg": "telegram",
+    "youtube": "youtube", "yt": "youtube",
+    "facebook": "facebook", "fb": "facebook",
+    "twitter": "x",
+}
+
+
+def detect_platform_metric(text):
+    """(platform, metric) the message asks for, deterministically —
+    words and links only, never the AI. Platform from a platform
+    word ("tiktok", "telegram", ...) or a link's domain; metric
+    from kind_from_text (words, Amharic words, or a reaction emoji).
+    Returns (None, None) when neither can be read — the caller then
+    sends no services section and the deterministic code still
+    works from the full catalogue."""
+    norm = normalize_text(text or "")
+    words = set(re.findall(r"[a-z]+", norm.lower()))
+    platform = None
+    for word, plat in _PLATFORM_WORDS.items():
+        if word in words:
+            platform = plat
+            break
+    if platform is None:
+        for token in re.findall(r"https?://\S+|t\.me/\S+", norm):
+            platform = platform_from_link(token)
+            if platform:
+                break
+    if platform is None and "x.com" in norm.lower():
+        platform = "x"
+    metric = kind_from_text(norm)
+    return platform, metric
+
+
+def services_for_prompt(services, platform=None, metric=None,
+                        limit=PROMPT_SERVICES_LIMIT, reaction_emoji=None):
+    """Services to show the AI for this message: the matching ones
+    only (same matching as pick_services — fastest first, inactive
+    and blacklisted excluded, reactions limited to the emoji's
+    single-post family). When platform or metric is unknown, returns
+    the FULL catalogue unchanged: the caller must then NOT paste it
+    into the prompt — it omits the section, and the deterministic
+    code (pick_services, price) still works from the full catalogue,
+    exactly as today."""
+    if not platform or not metric:
+        return list(services or [])
+    hint = " ".join(p for p in (platform, metric) if p)
+    return pick_services(
+        services or [], platform=platform, service_hint=hint,
+        limit=limit, reaction_emoji=reaction_emoji,
+    )
+
+
+def build_classify_prompt(text, services=None, user_id=None,
+                          max_history=3):
+    """The prompt extract_intent sends the AI: the message, the last
+    few turns, and — only when the message names BOTH a platform and
+    a metric — the matching services, at most 30, fastest first (id,
+    short name, ETB per 1000, average time). When platform or metric
+    cannot be read, there is no services section at all: the
+    deterministic code still picks from the full catalogue, exactly
+    as before. The full catalogue is never pasted into a prompt."""
+    prompt = normalize_text(text)
+    if user_id is not None:
+        history = chat_history_lines(user_id, max_exchanges=max_history)
+        if history:
+            prompt += (
+                "\n\nRecent conversation with this user (most recent last):\n"
+                + "\n".join(history)
+            )
+    if services:
+        platform, metric = detect_platform_metric(text)
+        if platform and metric:
+            shown = services_for_prompt(
+                services, platform, metric,
+                reaction_emoji=reaction_emoji(text),
+            )
+            if shown:
+                lines = [
+                    "Candidate services for this request "
+                    "(id, name, ETB per 1000, average time):"
+                ]
+                for s in shown:
+                    rate = s.get("rate_etb_per_1000")
+                    try:
+                        rate_text = format_money(rate)
+                    except (TypeError, ValueError):
+                        rate_text = "?"
+                    avg = s.get("average_time") or "no time listed"
+                    lines.append(
+                        f"#{s.get('service')} "
+                        f"{short_service_name(s.get('name'))} — "
+                        f"{rate_text} ETB per 1000, {avg}"
+                    )
+                prompt += "\n\n" + "\n".join(lines)
+    return prompt
 
 
 def _primary_metric(kind: str):
@@ -7915,9 +7890,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # `intent` is injected by the photo handler (a picture's link is
     # already classified by Gemini vision, so a second text
     # classification of the bare link would be wasted and could
-    # misread it). Otherwise the text is classified here.
+    # misread it). Otherwise the text is classified here — with the
+    # catalogue as a hint when it is available (cached 10 minutes;
+    # a fetch failure just means no services section, as before).
     if intent is None:
-        intent = await extract_intent(text, user_id=user.id)
+        try:
+            _services = await paxyo.services() if paxyo is not None else None
+        except Exception:
+            _services = None
+        intent = await extract_intent(
+            text, user_id=user.id, services=_services
+        )
     intent_type = (intent.get("intent") or "unclear").strip().lower()
     # Off-topic steering counts consecutive off-topic turns; any
     # Paxyo topic resets it.

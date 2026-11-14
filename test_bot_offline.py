@@ -10573,9 +10573,10 @@ class TestPausedServices(unittest.IsolatedAsyncioTestCase):
 
 
 class FlakyReactionsPaxyo(RealReactionsPaxyo):
-    """Catalogue fails on the first call, works after — the direct
-    price answer finds nothing, so the order flow must still carry
-    the price into the link-asking reply."""
+    """Catalogue fails on the first call, works after — since the
+    prompt shrink (14 Nov 2026) the first call is the pre-fetch for
+    the classifier hint, which fails silently, so the direct price
+    answer still finds the price on its own lookup."""
 
     def __init__(self):
         self._calls = 0
@@ -10583,6 +10584,22 @@ class FlakyReactionsPaxyo(RealReactionsPaxyo):
     async def services(self):
         self._calls += 1
         if self._calls == 1:
+            raise RuntimeError("catalogue hiccup")
+        return await super().services()
+
+
+class FlakyTwiceReactionsPaxyo(RealReactionsPaxyo):
+    """Catalogue fails on the first TWO calls, works after — the
+    pre-fetch fails and the direct price answer finds nothing, so
+    the order flow must still carry the price into the
+    link-asking reply (the link-ask safety net)."""
+
+    def __init__(self):
+        self._calls = 0
+
+    async def services(self):
+        self._calls += 1
+        if self._calls <= 2:
             raise RuntimeError("catalogue hiccup")
         return await super().services()
 
@@ -10722,8 +10739,9 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(msg.text_sent[0].count("5.46 ETB for 1,000"), 1)
 
-    # (4) the link-asking reply carries the price when the first
-    # lookup fails ------------------------------------------------------
+    # (4) the price still quotes when the first lookup fails --------
+    # (the pre-fetch for the classifier hint absorbs the hiccup, so
+    # the direct price answer still finds the price) ------------------
 
     async def test_link_ask_reply_carries_price_when_lookup_fails_once(self):
         paxyo = FlakyReactionsPaxyo()
@@ -10735,6 +10753,26 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(paxyo._calls, 2)
         reply = msg.text_sent[0]
+        # The direct price answer quotes 5.46 exactly once, even
+        # though the first catalogue lookup failed.
+        self.assertIn("Thumbs up 👍", reply)
+        self.assertIn("5.46 ETB for 1,000", reply)
+        self.assertEqual(reply.count("5.46 ETB for 1,000"), 1)
+        self.assertNotIn("Please send the link", reply)
+
+    # (5) the link-asking reply carries the price when the direct
+    # answer finds nothing (first TWO lookups fail) -------------------
+
+    async def test_link_ask_reply_carries_price_when_lookup_fails_twice(self):
+        paxyo = FlakyTwiceReactionsPaxyo()
+        msg = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=paxyo,
+        )
+        self.assertEqual(paxyo._calls, 3)
+        reply = msg.text_sent[0]
         # The price line is there, once, ahead of the link ask —
         # and the emoji acknowledgement survived intact.
         self.assertIn("Thumbs up 👍", reply)
@@ -10742,6 +10780,266 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.count("5.46 ETB for 1,000"), 1)
         self.assertIn("Got it — 👍 reactions", reply)
         self.assertIn("Send the link to the post", reply)
+
+
+SHRINK_SERVICES = [
+    {
+        "service": 2001, "name": "TikTok Followers | Fast",
+        "category": "TikTok Followers", "type": "Default",
+        "rate_etb_per_1000": 10.50, "min": 10, "max": 10000,
+        "average_time": "5 minutes", "active": True,
+    },
+    {
+        "service": 2002, "name": "TikTok Followers | Slow",
+        "category": "TikTok Followers", "type": "Default",
+        "rate_etb_per_1000": 8.40, "min": 10, "max": 10000,
+        "average_time": "2 hours", "active": True,
+    },
+    {
+        "service": 2003, "name": "TikTok Views | Fast",
+        "category": "TikTok Views", "type": "Default",
+        "rate_etb_per_1000": 4.20, "min": 10, "max": 100000,
+        "average_time": "1 minute", "active": True,
+    },
+    {
+        "service": 2004, "name": "TikTok Likes | Fast",
+        "category": "TikTok Likes", "type": "Default",
+        "rate_etb_per_1000": 6.30, "min": 10, "max": 10000,
+        "average_time": "1 minute", "active": True,
+    },
+    {
+        "service": 2005, "name": "Instagram Followers | Fast",
+        "category": "Instagram Followers", "type": "Default",
+        "rate_etb_per_1000": 42.00, "min": 10, "max": 10000,
+        "average_time": "12 minutes", "active": True,
+    },
+    {
+        "service": 2006, "name": "Instagram Likes | Fast",
+        "category": "Instagram Likes", "type": "Default",
+        "rate_etb_per_1000": 12.60, "min": 10, "max": 10000,
+        "average_time": "5 minutes", "active": True,
+    },
+    {
+        "service": 6541,
+        "name": "Telegram Reactions + Free Views — Thumbs up 👍",
+        "category": "Telegram Reactions", "type": "Default",
+        "rate_etb_per_1000": 5.46, "min": 10, "max": 1000,
+        "average_time": "5 minutes", "active": True,
+    },
+    {
+        "service": 6537,
+        "name": "Telegram Reactions + Free Views — Heart ❤️",
+        "category": "Telegram Reactions", "type": "Default",
+        "rate_etb_per_1000": 5.46, "min": 10, "max": 1000,
+        "average_time": "5 minutes", "active": True,
+    },
+    {
+        "service": 6540,
+        "name": "Telegram Reactions + Free Views — Fire 🔥",
+        "category": "Telegram Reactions", "type": "Default",
+        "rate_etb_per_1000": 5.46, "min": 10, "max": 1000,
+        "average_time": "5 minutes", "active": True,
+    },
+    {
+        "service": 6534,
+        "name": "Telegram Reactions + Free Views — Positive 👍❤️🔥",
+        "category": "Telegram Reactions", "type": "Default",
+        "rate_etb_per_1000": 5.46, "min": 10, "max": 1000,
+        "average_time": "5 minutes", "active": True,
+    },
+    {
+        "service": 2007, "name": "Telegram Post Views",
+        "category": "Telegram Views", "type": "Default",
+        "rate_etb_per_1000": 2.10, "min": 10, "max": 100000,
+        "average_time": "1 minute", "active": True,
+    },
+    {
+        "service": 2008, "name": "YouTube Views | Fast",
+        "category": "YouTube Views", "type": "Default",
+        "rate_etb_per_1000": 21.00, "min": 10, "max": 100000,
+        "average_time": "10 minutes", "active": True,
+    },
+    {
+        "service": 2009, "name": "Facebook Likes | Fast",
+        "category": "Facebook Likes", "type": "Default",
+        "rate_etb_per_1000": 16.80, "min": 10, "max": 10000,
+        "average_time": "15 minutes", "active": True,
+    },
+]
+
+
+class _ShrinkPaxyo:
+    """Minimal catalogue stand-in for the shrink tests."""
+
+    def __init__(self, services):
+        self._services = services
+
+    async def services(self):
+        return self._services
+
+
+class TestPromptShrink(unittest.IsolatedAsyncioTestCase):
+    """Prompt shrink (owner approved, 14 Nov 2026): the classifier
+    prompt used to carry the whole SYSTEM_PROMPT (~2,460 tokens)
+    plus up to 10 turns of history. Now the system prompt is
+    compact, history is the last 3 turns, and — only when the
+    message names both a platform and a metric — the prompt also
+    carries the matching services only (at most 30, fastest first).
+    The full catalogue is never pasted into a prompt; the
+    deterministic code still picks from it, exactly as before."""
+
+    def setUp(self):
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = True
+        for store in (bot.PARTIAL, bot.PENDING, bot.LAST_ORDER):
+            store.clear()
+
+    def tearDown(self):
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        for store in (bot.PARTIAL, bot.PENDING, bot.LAST_ORDER):
+            store.clear()
+
+    # (1) TikTok followers: only TikTok follower services -----------
+
+    def test_tiktok_followers_prompt_has_only_tiktok_followers(self):
+        self.assertEqual(
+            bot.detect_platform_metric("I want 1000 tiktok followers"),
+            ("tiktok", "followers"),
+        )
+        prompt = bot.build_classify_prompt(
+            "I want 1000 tiktok followers", services=SHRINK_SERVICES
+        )
+        self.assertIn("#2001", prompt)
+        self.assertIn("#2002", prompt)
+        self.assertNotIn("#2003", prompt)  # TikTok views
+        self.assertNotIn("#2004", prompt)  # TikTok likes
+        self.assertNotIn("#2005", prompt)  # Instagram followers
+        self.assertNotIn("#2008", prompt)  # YouTube views
+        # Two services shown out of thirteen in the catalogue.
+        self.assertEqual(
+            len([ln for ln in prompt.splitlines() if ln.startswith("#")]),
+            2,
+        )
+
+    # (2) Telegram 👍 reactions: reaction services only -------------
+
+    def test_telegram_reactions_prompt_has_reactions_only(self):
+        self.assertEqual(
+            bot.detect_platform_metric(
+                "I want 👍 reaction for my telegram channel post how much 1k"
+            ),
+            ("telegram", "reactions"),
+        )
+        prompt = bot.build_classify_prompt(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            services=SHRINK_SERVICES,
+        )
+        self.assertIn("#6541", prompt)  # Thumbs up, the 👍 family
+        self.assertNotIn("#6537", prompt)  # Heart
+        self.assertNotIn("#6540", prompt)  # Fire
+        self.assertNotIn("#6534", prompt)  # Positive mix
+        self.assertNotIn("#2007", prompt)  # Telegram views, not reactions
+        self.assertEqual(
+            len([ln for ln in prompt.splitlines() if ln.startswith("#")]),
+            1,
+        )
+
+    # (3) unclear platform: full catalogue fallback, no section ------
+
+    def test_unclear_message_falls_back_to_full_catalogue(self):
+        self.assertEqual(bot.detect_platform_metric("hello"), (None, None))
+        self.assertEqual(
+            bot.detect_platform_metric("what can you do?"), (None, None)
+        )
+        # The filter returns the whole catalogue unchanged — the
+        # deterministic code still picks from it, exactly as before.
+        self.assertEqual(
+            [s["service"] for s in bot.services_for_prompt(
+                SHRINK_SERVICES, None, None
+            )],
+            [s["service"] for s in SHRINK_SERVICES],
+        )
+        # ... but the prompt carries no services section at all: the
+        # full list is never pasted into a prompt.
+        prompt = bot.build_classify_prompt(
+            "hello", services=SHRINK_SERVICES
+        )
+        self.assertNotIn("Candidate services", prompt)
+        self.assertNotIn("#2001", prompt)
+
+    # (4) prices still quote correctly after the shrink --------------
+
+    async def test_price_still_quotes_after_shrink(self):
+        with mock.patch("bot.paxyo", _ShrinkPaxyo(SHRINK_SERVICES)):
+            line = await bot.price_answer_text(
+                1,
+                "I want 👍 reaction for my telegram channel post how much 1k",
+                {"intent": "order", "platform": "telegram",
+                 "service_hint": "telegram reactions", "quantity": 1000},
+                "en",
+            )
+        self.assertIn("5.46", line)
+        self.assertIn("1,000", line)
+        self.assertIn("Thumbs up", line)
+
+    # (5) the system prompt really shrank, nothing dropped out ------
+
+    def test_system_prompt_is_compact_but_complete(self):
+        # Was 11,511 chars / ~2,460 tokens; now ~7,400 / ~1,570.
+        self.assertLess(len(bot.SYSTEM_PROMPT), 8000)
+        self.assertLess(len(bot.SYSTEM_PROMPT.split()) * 1.33, 1800)
+        # Every intent the code switches on is still listed.
+        for intent in (
+            "order", "recurring", "schedules", "stop_schedule",
+            "balance", "orders", "deposit", "deposit_status", "help",
+            "how_to_order", "miniapp", "social", "greeting",
+            "paxyo_info", "source_question", "reseller", "contact",
+            "paused_services", "usual", "goal", "budget", "batch",
+            "change_order", "refill", "split_payment",
+            "max_for_balance", "discount", "safety", "refund_policy",
+            "geo_target", "free_sample", "price_pushback",
+            "content_help", "support_issue", "cancel", "off_topic",
+            "unclear",
+        ):
+            with self.subTest(intent=intent):
+                self.assertIn(f'"{intent}"', bot.SYSTEM_PROMPT)
+
+    # (6) history in the prompt is the last 3 turns only -------------
+
+    def test_prompt_carries_only_last_three_turns(self):
+        bot.CHAT_HISTORY[1] = [
+            {"user": f"turn {n} user", "bot": f"turn {n} bot"}
+            for n in range(1, 11)
+        ]
+        prompt = bot.build_classify_prompt("hello", user_id=1)
+        for n in range(1, 8):
+            self.assertNotIn(f"turn {n} user", prompt)
+        for n in (8, 9, 10):
+            self.assertIn(f"turn {n} user", prompt)
+
+    # (7) the classifier really gets the filtered prompt -------------
+
+    async def test_extract_intent_sends_filtered_services(self):
+        payload = json.dumps({
+            "intent": "order", "platform": "tiktok",
+            "service_hint": "followers", "link": None, "quantity": 1000,
+            "interval_minutes": None, "amount": None, "method": None,
+            "phone": None, "quantity_multiplier": None,
+            "orders": None, "split": None,
+        })
+        with mock.patch(
+            "bot.ai_generate", new=mock.AsyncMock(return_value=payload)
+        ) as gen:
+            result = await bot.extract_intent(
+                "I want 1000 tiktok followers", services=SHRINK_SERVICES
+            )
+        sent_prompt = gen.call_args.args[0]
+        self.assertIn("#2001", sent_prompt)
+        self.assertNotIn("#2003", sent_prompt)
+        self.assertNotIn("#2005", sent_prompt)
+        self.assertEqual(result["intent"], "order")
+        self.assertEqual(result["platform"], "tiktok")
 
 
 if __name__ == "__main__":
