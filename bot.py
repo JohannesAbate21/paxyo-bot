@@ -8837,11 +8837,10 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
 
     # A bare non-reaction emoji is a media reaction (owner, 14
-    # Nov 2026): it is answered from the user's situation — a
-    # delayed order, a completed order, a pending Confirm card,
-    # or nothing at all — never with the same canned line twice,
-    # and it never touches the draft or the Confirm card.
-    # Reaction emoji take the reactions path below instead.
+    # Nov 2026): the AI reacts first, naturally — only a genuinely
+    # delayed or failed order adds one short line. It never touches
+    # the draft or the Confirm card. Reaction emoji take the
+    # reactions path below instead.
     _media_emoji = _bare_non_reaction_emoji(text)
     if _media_emoji is not None:
         if await media_reply_for_text(update, _media_emoji, lang, voice=voice):
@@ -8920,9 +8919,9 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # (owner, 14 Nov 2026 — "he also misunderstood the emoji"): a
     # bare 👀, 💔, 🤗 ... is a reaction, not a failed order, and a
     # bare reaction emoji while a Confirm card is pending is an
-    # acknowledgement, not a new order. Both get a sensible
-    # emoji-aware reply from the user's situation, like a GIF —
-    # never "I did not understand". A bare reaction emoji while a
+    # acknowledgement, not a new order. Both get the AI's natural
+    # reaction, like a GIF — never "I did not understand". A bare
+    # reaction emoji while a
     # NON-reactions draft is being built keeps the old behaviour
     # (the flow below re-asks for the missing piece), so this
     # only fires for an emoji the reactions path does not claim,
@@ -10192,21 +10191,20 @@ async def on_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------------- context-aware media ----
-# Media replies (owner, 14 Nov 2026): the bot responds like a
-# person to emoji, GIFs, stickers and photos — differently each
-# time, understanding the situation from context and memory. A
-# media reaction is a reply, not a reset: it never loses a
-# half-built order or a pending Confirm card, and it never
-# invents an order that does not exist.
-#
-# Mood comes from the emoji (a bare emoji, or a sticker's emoji);
-# a GIF carries no emoji, so its mood comes from the situation
-# instead — a GIF while an order is delayed gets the delay reply,
-# a GIF while an order is on track gets a warm reply, never an
-# apology for a delay that has not happened (owner, 14 Nov 2026).
-# The situation comes from the real order state: the most recent
-# placed order's status and average time, a pending Confirm card,
-# a half-built draft, or nothing at all.
+# Media replies — DeepSeek first (owner, 14 Nov 2026): when the
+# user sends a GIF, a sticker or a bare emoji, the AI (the normal
+# chain, DeepSeek first, same as free chat) reacts FIRST,
+# naturally, like a person reacting to that GIF/sticker/emoji —
+# in the user's language. THEN, and only then, the system's
+# memory is added: when the most recent order is actually delayed
+# (past its average time) or failed, ONE short deterministic line
+# about that real order is appended. No delay means no order
+# mention at all — not even when the user seems frustrated, not
+# even right after an order was placed. A media reaction is a
+# reply, not a reset: it never loses a half-built order or a
+# pending Confirm card, and it never invents an order that does
+# not exist. Photos are NOT routed here: they are read by Gemini
+# vision (route_photo_result).
 _MEDIA_MOODS = {
     "😤": "frustrated", "😡": "frustrated", "🤬": "frustrated",
     "😩": "frustrated", "😠": "frustrated", "😖": "frustrated",
@@ -10267,226 +10265,116 @@ def _is_bare_emoji(text: str) -> bool:
     )
 
 
-# The reply variants, per mood x situation, English + Amharic.
-# {order_id}, {service}, {status}, {total} come from the real
-# order state; {time} is \", usually about <average time>\" when
-# the average time is known, else empty — the bot never says
-# \"soon\" and never invents a time. Variants rotate per user, so
-# the same user never gets the same canned line twice in a row.
-_MEDIA_REPLIES = {
-    "frustrated_delayed": {
-        "en": [
-            "I'm really sorry it's taking so long — your order #{order_id} ({service}) is still {status}{time}.",
-            "I hear you — that wait is frustrating. Your order #{order_id} is still {status}{time}.",
-            "Sorry about the delay — your order #{order_id} ({service}) is still {status}{time}. It hasn't been forgotten.",
-        ],
-        "am": [
-            "ይቅርታ — በጣም ዘግይቷል። orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}።",
-            "ገብቶኛል — መጠበቁ አስቸጋሪ ነው። orderዎ #{order_id} አሁንም {status} ላይ ነው{time}።",
-            "ስለ መዘግየቱ ይቅርታ — orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}።",
-        ],
-    },
-    "frustrated_failed": {
-        "en": [
-            "That's not OK — your last order ({service}) didn't go through. Want me to place it again?",
-            "I'm sorry about that — your last order ({service}) failed. I can place it again for you, just say the word.",
-        ],
-        "am": [
-            "ይህ ትክክል አይደለም — የመጨረሻው orderዎ ({service}) አልተሳካም። እንደገና ልጀምር?",
-            "ይቅርታ — የመጨረሻው orderዎ ({service}) አልተሳካም። ከፈለጉ እንደገና እጀምራለሁ።",
-        ],
-    },
-    "frustrated_awaiting_confirm": {
-        "en": [
-            "I hear you — your order ({service}, {total} ETB) is ready and waiting for your Confirm. Tap Confirm and I'll place it right away.",
-            "Sorry for the wait — your order ({service}, {total} ETB) is built, it just needs your Confirm to go.",
-        ],
-        "am": [
-            "ገብቶኛል — orderዎ ({service}, {total} ETB) ዝግጁ ነው፣ Confirm ብቻ ነው የሚጠብቀው። Confirm ይጫኑና አስቀምጣለሁ።",
-            "ስለ መጠበቁ ይቅርታ — orderዎ ({service}, {total} ETB) ተዘጋጅቷል፣ Confirm ብቻ ነው የሚቀረው።",
-        ],
-    },
-    "frustrated_draft": {
-        "en": [
-            "I hear you — your order isn't finished yet. Send the link and I'll place it right away.",
-            "Sorry about that — we're still building your order. Send the link and I'll get it going.",
-        ],
-        "am": [
-            "ገብቶኛል — orderዎ ገና አልተጠናቀቀም። Link ይላኩልኝና አስቀምጣለሁ።",
-            "ይቅርታ — orderዎን ገና እየገነባን ነው። Link ይላኩልኝና እጀምራለሁ።",
-        ],
-    },
-    "frustrated_none": {
-        "en": [
-            "I hear you — that sounds frustrating. I don't see an order from you right now — tell me what happened and I'll sort it out.",
-            "Sorry you're dealing with that. I don't have an order from you at the moment — what were you trying to order?",
-        ],
-        "am": [
-            "ገብቶኛል — አስቸጋሪ ነው። አሁን ምንም order አላየሁም — ምን እንደተፈጠረ ንገሩኝ።",
-            "ይቅርታ — አሁን ምንም order አልያዝኩም — ምን ማዘዝ ይፈልጋሉ?",
-        ],
-    },
-    "happy_completed": {
-        "en": [
-            "🎉 It worked — your order #{order_id} ({service}) is done! Enjoy!",
-            "Yes! Your order #{order_id} is complete — {service} delivered. 🎉",
-            "There it is — order #{order_id} ({service}) finished! 🎉",
-        ],
-        "am": [
-            "🎉 ተሳክቷል — orderዎ #{order_id} ({service}) ተጠናቋል! ይደሰቱ!",
-            "አዎ! orderዎ #{order_id} ተጠናቋል — {service} ተደርሷል። 🎉",
-            "እነሆ — orderዎ #{order_id} ({service}) ተጠናቋል! 🎉",
-        ],
-    },
-    "happy_other": {
-        "en": [
-            "😄 Glad to hear it! What would you like to order next?",
-            "Haha, love that! Tell me what you need next.",
-        ],
-        "am": [
-            "😄 ደስ ብሎኛል! ቀጥሎ ምን ማዘዝ ይፈልጋሉ?",
-            "😄 በጣም ጥሩ ነው! ቀጥሎ ምን ይፈልጋሉ?",
-        ],
-    },
-    "thanks": {
-        "en": [
-            "You're welcome! 😊 Anything else you need?",
-            "Anytime! 😊 Just tell me what you'd like to order.",
-        ],
-        "am": [
-            "እንኳን ደህና መጡ! 😊 ሌላ ምን ይፈልጋሉ?",
-            "በደስታ! 😊 ምን ማዘዝ ይፈልጋሉ?",
-        ],
-    },
-    # A wave is a greeting, not thanks (owner, 14 Nov 2026 — a 👋
-    # sticker got "You're welcome!"): 👋, 🙋 and ✋ all greet.
-    "greeting": {
-        "en": [
-            "Hello! 👋 Great to see you — what would you like to order?",
-            "Hi there! 👋 Tell me what you need and I'll get it going.",
-        ],
-        "am": [
-            "ሰላም! 👋 ደስ ብሎኛል — ምን ማዘዝ ይፈልጋሉ?",
-            "ሰላም! 👋 ምን እንደሚፈልጉ ንገሩኝ።",
-        ],
-    },
-    # Frustrated, but the order is on track (owner, 14 Nov 2026):
-    # acknowledge the feeling and reassure with the real status —
-    # never apologise for a delay that has not happened.
-    "frustrated_on_track": {
-        "en": [
-            "I hear you — your order #{order_id} ({service}) is still {status}{time}, right on track. Hang in there.",
-            "I get it — waiting is hard. Your order #{order_id} is still {status}{time}, on track.",
-        ],
-        "am": [
-            "ገብቶኛል — orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}፣ በተገቢው መንገድ እየሄደ ነው።",
-            "ገብቶኛል — መጠበቁ አስቸጋሪ ነው። orderዎ #{order_id} አሁንም {status} ላይ ነው{time}፣ እየሄደ ነው።",
-        ],
-    },
-    "neutral_on_track": {
-        "en": [
-            "Your order #{order_id} ({service}) is still {status}{time} — right on track.",
-            "Still going — order #{order_id} is {status}{time}, on track.",
-        ],
-        "am": [
-            "orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time} — በተገቢው መንገድ እየሄደ ነው።",
-            "ገና በመሄድ ላይ ነው — orderዎ #{order_id} {status} ላይ ነው{time}።",
-        ],
-    },
-    "neutral_delayed": {
-        "en": [
-            "Your order #{order_id} ({service}) is still {status}{time}. I'll keep an eye on it.",
-            "Still going — order #{order_id} is {status}{time}.",
-        ],
-        "am": [
-            "orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}። እከታተላለሁ።",
-            "ገና በመሄድ ላይ ነው — orderዎ #{order_id} {status} ላይ ነው{time}።",
-        ],
-    },
-    "neutral_completed": {
-        "en": [
-            "🎉 Your order #{order_id} ({service}) is complete!",
-            "Good news — order #{order_id} ({service}) finished! 🎉",
-        ],
-        "am": [
-            "🎉 orderዎ #{order_id} ({service}) ተጠናቋል!",
-            "ጥሩ ዜና — orderዎ #{order_id} ({service}) ተጠናቋል! 🎉",
-        ],
-    },
-    "neutral_awaiting_confirm": {
-        "en": [
-            "Your order ({service}, {total} ETB) is still waiting for Confirm — tap it when you're ready.",
-            "Just a reminder — your order ({service}) is built and waiting for your Confirm.",
-        ],
-        "am": [
-            "orderዎ ({service}, {total} ETB) Confirm እየጠበቀ ነው — ሲዘጋጁ ይጫኑት።",
-            "ማስታወሻ — orderዎ ({service}) ተዘጋጅቶ Confirm እየጠበቀ ነው።",
-        ],
-    },
-    "neutral_none": {
-        "en": [
-            "😄 Nice one! What would you like to order?",
-            "😄 Haha, good one! What would you like to order?",
-        ],
-        "am": [
-            "😄 ጥሩ ነው! ምን ማዘዝ ይፈልጋሉ?",
-            "😄 አዝናኝ ነው! ምን ማዘዝ ይፈልጋሉ?",
-        ],
-    },
-}
-
-# (user_id, reply group) -> how many times that group was used:
-# the rotation counter, so the same user never gets the same
-# canned line twice in a row. Cleared with the per-user state in
-# tests.
-MEDIA_REPLY_COUNT = {}
-
-
-def media_reply_text(user_id: int, mood, ctx: dict, lang: str) -> str:
-    """The reply for a media reaction: mood x situation, rotating
-    the variants per user. `ctx` is media_order_context's dict."""
-    situation = ctx.get("situation") or "none"
-    if mood == "frustrated":
-        group = f"frustrated_{situation}"
-    elif mood == "happy":
-        group = (
-            "happy_completed" if situation == "completed"
-            else "happy_other"
-        )
-    elif mood == "thanks":
-        group = "thanks"
-    elif mood == "greeting":
-        group = "greeting"
-    else:
-        group = {
-            "delayed": "neutral_delayed",
-            "completed": "neutral_completed",
-            "failed": "frustrated_failed",
-            "awaiting_confirm": "neutral_awaiting_confirm",
-            "on_track": "neutral_on_track",
-        }.get(situation, "neutral_none")
-    variants = _MEDIA_REPLIES.get(group, _MEDIA_REPLIES["neutral_none"])
-    texts = variants.get(lang) or variants["en"]
-    key = (user_id, group)
-    idx = MEDIA_REPLY_COUNT.get(key, 0)
-    MEDIA_REPLY_COUNT[key] = idx + 1
-    template = texts[idx % len(texts)]
+def delay_line(ctx: dict, lang: str) -> str:
+    """One short deterministic line about a delayed or failed order,
+    or "" — the memory the bot adds after the AI's natural reply
+    (owner, 14 Nov 2026). Only delayed/failed orders get a line:
+    on-track, completed, awaiting-Confirm, draft and no-order all
+    return "", so the order is never dragged into a GIF or emoji
+    reply when there is no delay. The order id, service, status
+    and average time all come from the real order state — never
+    invented, never "soon"."""
+    situation = ctx.get("situation")
+    if situation not in ("delayed", "failed"):
+        return ""
+    order_id = ctx.get("order_id")
+    service = ctx.get("service") or "your order"
+    status = ctx.get("status") or ""
     avg = ctx.get("avg")
     if lang == "am":
-        time = (
-            f"፣ አብዛኛውን ጊዜ {avg} ያህል ይወስዳል" if avg else ""
+        ref = f"orderዎ #{order_id}" if order_id else "የመጨረሻው orderዎ"
+        time = f"፣ አብዛኛውን ጊዜ {avg} ያህል ይወስዳል" if avg else ""
+        if situation == "failed":
+            return f"በነገራችን ላይ — {ref} ({service}) አልተሳካም።"
+        return (
+            f"በነገራችን ላይ — {ref} ({service}) "
+            f"አሁንም {status} ላይ ነው{time}።"
         )
-    else:
-        time = f", usually about {avg}" if avg else ""
-    total = ctx.get("total")
-    total = format_money(total) if isinstance(total, (int, float)) else ""
-    return template.format(
-        order_id=ctx.get("order_id") or "",
-        service=ctx.get("service") or "",
-        status=ctx.get("status") or "",
-        total=total,
-        time=time,
+    ref = f"order #{order_id}" if order_id else "last order"
+    time = f", usually about {avg}" if avg else ""
+    if situation == "failed":
+        return f"By the way — your {ref} ({service}) didn't go through."
+    return (
+        f"By the way — your {ref} ({service}) is still {status}{time}."
     )
+
+
+def _media_ai_prompt(kind, emoji):
+    """What the user sent, as the AI sees it: the media kind and
+    the emoji when there is one. No order info ever reaches the AI
+    — the delay line is deterministic code, added afterwards."""
+    if kind == "gif":
+        return "The user just sent a GIF in the chat."
+    if kind == "sticker":
+        if emoji:
+            return (
+                "The user just sent a sticker in the chat. "
+                f"Its emoji is {emoji}."
+            )
+        return "The user just sent a sticker in the chat."
+    if emoji:
+        return f"The user just sent the {emoji} emoji in the chat."
+    return "The user just sent an emoji in the chat."
+
+
+async def media_ai_reply(kind, emoji, lang: str):
+    """The AI's natural reaction to one GIF, sticker or bare emoji
+    — DeepSeek first, the same chain as free chat (owner, 14 Nov
+    2026). The prompt carries only the media (kind + emoji) and
+    the language: no order info, so the AI can never drag an order
+    into the reply. Returns the reply text, or None when the AI is
+    down or answered empty — the caller then uses the deterministic
+    fallback instead of going silent."""
+    lang_name = {
+        "am": "Amharic (Ethiopic fidels mixed with English)",
+        "ti": "Tigrinya (Ge'ez script)",
+        "om": "Oromo (Afaan Oromo, Latin script)",
+    }.get(lang, "English")
+    system = (
+        "React briefly (1-2 short sentences), like a person "
+        "chatting with a friend — natural, warm, human. Reply in "
+        + lang_name + ". Do not mention any order, do not ask "
+        "about orders, do not sell anything, and do not quote a "
+        "price. Never warn the user against buying followers, "
+        "likes, views, members or reactions, and never call them "
+        "fake — Paxyo sells these services."
+    )
+    try:
+        reply = await ai_generate(
+            _media_ai_prompt(kind, emoji), system=system
+        )
+    except Exception as exc:
+        _log_ai_failure("media AI reply failed", exc)
+        return None
+    return strip_moralizing((reply or "").strip()) or None
+
+
+def _media_ai_fallback(emoji, lang: str) -> str:
+    """The one-line deterministic reply when every AI provider is
+    down: the bot never goes silent over a GIF, sticker or emoji.
+    Mood-aware (a wave greets, frustration is heard), one line per
+    language — the old rotating canned replies are gone (owner,
+    14 Nov 2026: the AI replies first). The delay line, when one
+    is owed, is appended separately by media_reply."""
+    mood = media_mood(emoji)
+    lines = {
+        "greeting": {
+            "en": "Hello! 👋 Great to see you — what would you like to order?",
+            "am": "ሰላም! 👋 ደስ ብሎኛል — ምን ማዘዝ ይፈልጋሉ?",
+        },
+        "frustrated": {
+            "en": "I hear you — tell me what happened and I'll sort it out.",
+            "am": "ገብቶኛል — ምን እንደተፈጠረ ንገሩኝ።",
+        },
+        "thanks": {
+            "en": "You're welcome! 😊 Anything else you need?",
+            "am": "እንኳን ደህና መጡ! 😊 ሌላ ምን ይፈልጋሉ?",
+        },
+    }.get(mood) or {
+        "en": "😄 Haha, love it! What would you like to order?",
+        "am": "😄 በጣም ጥሩ ነው! ምን ማዘዝ ይፈልጋሉ?",
+    }
+    return lines.get(lang) or lines["en"]
 
 
 def _parse_created_at(value):
@@ -10591,28 +10479,29 @@ async def media_order_context(user_id: int) -> dict:
     }
 
 
-async def media_reply(update, emoji, lang: str, voice: bool = False) -> str:
-    """Answer one media reaction (GIF, sticker, bare emoji) from
-    the user's situation, and return the text sent. Reads order
-    state only — it never clears a draft or a Confirm card.
-    The mood comes from the emoji when there is one; a GIF
-    carries no emoji, so the situation sets the mood — a GIF
-    while an order is delayed or failed is frustration, a GIF
-    after a completed order is celebration, and a GIF while an
-    order is on track is celebration too, never an apology for a
-    delay that has not happened (owner, 14 Nov 2026). Photos are
-    NOT routed here: they are read by Gemini vision
+async def media_reply(update, emoji, lang: str, voice: bool = False,
+                      kind: str = "emoji") -> str:
+    """Answer one media reaction (GIF, sticker, bare emoji) and
+    return the text sent. DeepSeek (the normal AI chain, same as
+    free chat) reacts FIRST, naturally, like a person — the prompt
+    carries only the media (kind + emoji) and the language, never
+    order info. THEN, and only then, the system's memory is added:
+    when the user's most recent order is actually delayed (past its
+    average time) or failed, one short deterministic line about
+    that real order is appended. No delay means no order mention
+    at all — not even when the user seems frustrated, not even
+    right after an order was placed (owner, 14 Nov 2026). Reads
+    order state only — it never clears a draft or a Confirm card.
+    Photos are NOT routed here: they are read by Gemini vision
     (route_photo_result) and keep working as before."""
     user = update.effective_user
-    mood = media_mood(emoji)
+    text = await media_ai_reply(kind, emoji, lang)
+    if not text:
+        text = _media_ai_fallback(emoji, lang)
     ctx = await media_order_context(user.id)
-    if mood is None:
-        situation = ctx.get("situation")
-        if situation in ("delayed", "failed"):
-            mood = "frustrated"
-        elif situation in ("completed", "on_track"):
-            mood = "happy"
-    text = media_reply_text(user.id, mood, ctx, lang)
+    line = delay_line(ctx, lang)
+    if line:
+        text = text + "\n" + line
     if voice:
         await reply_message(update.message, text, lang, voice=voice)
     else:
@@ -10631,10 +10520,9 @@ async def media_reply_for_text(update, emoji, lang: str, voice: bool = False) ->
 async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A GIF (owner, 13 Nov 2026): never silent, never
     'I did not understand'. A caption is the user's message and is
-    handled normally; otherwise the reply depends on the user's
-    situation (owner, 14 Nov 2026) — a delayed order gets empathy
-    and the real status, a completed order gets a celebration, no
-    order gets a varied friendly steer back to ordering."""
+    handled normally; otherwise the AI reacts first, naturally —
+    and only a genuinely delayed or failed order adds one short
+    line about that order (owner, 14 Nov 2026)."""
     if _update_seen(update):
         return
     caption = (update.message.caption or "").strip()
@@ -10643,13 +10531,13 @@ async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     lang = LAST_LANG.get(user.id) or lang_of("", user.language_code)
-    await media_reply(update, None, lang)
+    await media_reply(update, None, lang, kind="gif")
 
 
 async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A sticker (owner, 13 Nov 2026): same as a GIF — a caption is
-    the user's message; otherwise the reply depends on the
-    sticker's emoji and the user's situation, like a GIF."""
+    the user's message; otherwise the AI reacts first, naturally,
+    to the sticker (and its emoji), like a GIF."""
     if _update_seen(update):
         return
     caption = (update.message.caption or "").strip()
@@ -10660,7 +10548,7 @@ async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = LAST_LANG.get(user.id) or lang_of("", user.language_code)
     sticker = getattr(update.message, "sticker", None)
     emoji = getattr(sticker, "emoji", None) if sticker else None
-    await media_reply(update, emoji, lang)
+    await media_reply(update, emoji, lang, kind="sticker")
 
 
 # ------------------------------------------------------------ photos ------

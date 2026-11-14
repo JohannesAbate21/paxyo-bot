@@ -357,31 +357,34 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
 - Photos: read them (payment screenshot, profile screenshot, error
   screenshot) and understand what the user wants from them.
 - GIFs and stickers: always reply, never stay silent. A caption on a
-  GIF/sticker is the user's message. CONTEXT-AWARE MEDIA REPLIES
-  (owner, 14 Nov 2026): the bot responds like a person to emoji,
-  GIFs and stickers — differently each time, understanding the
-  situation from context and memory. A delayed order plus
-  a frustrated GIF/sticker/emoji (😤 😡 🤬 😩) gets empathy about
-  the delay — the frustration acknowledged, sorry it is delayed,
-  the REAL order status and average time, never "soon". DELAYED
-  means the order's elapsed time is past its average time, or it
-  failed — a merely in-progress order is ON TRACK, and a GIF then
-  gets a warm reply, never a delay apology (live bug, 14 Nov 2026:
-  a happy GIF while order #1837 was merely in progress got the
-  delay apology). An order just completed plus a happy GIF/emoji
-  (🎉 😍 ❤️) gets a short celebration. A wave (👋 🙋 ✋) gets a
-  greeting ("Hello! 👋 ..."), never "You're welcome!" — a wave is
-  not thanks (live bug, 14 Nov 2026: a 👋 sticker got "You're
-  welcome!"). 🙏 is still thanks. Replies ROTATE (2–3 variants per mood and
-  situation) so the same user never gets the same canned line
-  twice, match the user's language, and stay short and human. A
-  GIF carries no emoji, so its mood comes from the situation —
-  a GIF while an order is delayed reads as frustration, a GIF
-  after a completed order reads as celebration. A media reaction
-  is a reply, not a reset: it never loses a half-built order or a
-  pending Confirm card. And it never invents an order: with no
-  order at all, a frustrated GIF gets empathy WITHOUT claiming
-  an order exists ("I don't see an order from you right now").
+  GIF/sticker is the user's message. DEEPSEEK-FIRST MEDIA REPLIES
+  (owner, 14 Nov 2026 — the bot still failed on GIFs/emojis): when
+  the user sends a GIF, a sticker or a bare emoji, the AI (the normal
+  chain, DeepSeek first, same as free chat) reacts FIRST, naturally,
+  like a person reacting to that GIF/sticker/emoji — in the user's
+  language. THEN, and only then, the system's memory is added: when
+  the most recent order is actually DELAYED (elapsed time past its
+  average time) or FAILED, ONE short deterministic line names the
+  real order (id, service, status, usual time). No delay means NO
+  order mention at all — not even when the user seems frustrated,
+  not even right after an order was placed. The AI prompt carries
+  only the media (GIF / sticker / emoji) and the language — no
+  order info ever reaches the AI; the delay line is deterministic
+  code. Never invent an order, never say "soon". The canned
+  rotating media replies are GONE (media_reply_text, _MEDIA_REPLIES,
+  MEDIA_REPLY_COUNT deleted): the AI reply is the reply. When every
+  AI provider is down, one short deterministic fallback line answers
+  instead (mood-aware: a wave greets, frustration is heard) — never
+  silent. DELAYED still means elapsed time past the average time,
+  or failed — a merely in-progress order is ON TRACK (live bug, 14
+  Nov 2026: a happy GIF while order #1837 was merely in progress
+  got the delay apology); unknown created_at or average time still
+  counts as delayed (the safe reply when the bot cannot tell). A
+  wave (👋 🙋 ✋) gets a greeting ("Hello! 👋 ..."), never "You're
+  welcome!" — a wave is not thanks (live bug, 14 Nov 2026: a 👋
+  sticker got "You're welcome!"). 🙏 as a sticker is still thanks.
+  A media reaction is a reply, not a reset: it never loses a
+  half-built order or a pending Confirm card.
 - Video likes vs comment likes vs comments: "likes for my video" = video
   likes; "likes for my comment" = likes ON a comment (#5854); "comments
   on my video" = comments service. Never mix them up.
@@ -411,8 +414,8 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
 - NO BARE EMOJI IS EVER "NOT UNDERSTOOD" (owner, 14 Nov 2026 —
   "he also misunderstood the emoji"): any message that is only
   emoji gets an emoji-aware reply. A bare 👀, 💔, 🤗 ... (not a
-  reaction emoji, no media mood) is answered from the user's
-  situation, like a GIF. A bare reaction emoji while a Confirm
+  reaction emoji, no media mood) gets the AI's natural reaction,
+  like a GIF. A bare reaction emoji while a Confirm
   card for another service is pending is acknowledged the same
   way — the card is never touched. A bare reaction emoji while a
   non-reactions DRAFT is being built keeps the old behaviour

@@ -6527,10 +6527,16 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
     # (10) GIFs and stickers ---------------------------------------------
 
     async def test_sticker_gets_reply(self):
+        # DeepSeek-first media replies (owner, 14 Nov 2026): the AI
+        # reacts first; with the AI down the deterministic fallback
+        # still answers — never silent.
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        await bot.on_sticker(update, None)
+        with mock.patch(
+            "bot.ai_generate", new=mock.AsyncMock(return_value="")
+        ):
+            await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("What would you like to order?", msg.text_sent[0])
 
@@ -6538,7 +6544,10 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        await bot.on_animation(update, None)
+        with mock.patch(
+            "bot.ai_generate", new=mock.AsyncMock(return_value="")
+        ):
+            await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("What would you like to order?", msg.text_sent[0])
 
@@ -11427,7 +11436,7 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
             bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
             bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
             bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
-            bot.CANCELLED_DRAFT, bot.LAST_LANG, bot.MEDIA_REPLY_COUNT,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
         ):
             store.clear()
         bot.CHAT_HISTORY.clear()
@@ -11454,7 +11463,7 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
             bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
             bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
             bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
-            bot.CANCELLED_DRAFT, bot.LAST_LANG, bot.MEDIA_REPLY_COUNT,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
         ):
             store.clear()
         bot.CHAT_HISTORY.clear()
@@ -12822,6 +12831,9 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
     # the_draft).
 
     async def test_frustrated_gif_with_delayed_order_names_the_delay(self):
+        # DeepSeek-first (owner, 14 Nov 2026): the AI reacts first,
+        # naturally — then the delay line names the real delayed
+        # order. The AI text is the empathy; the line is the memory.
         recent = [dict(
             FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
             service_name="Instagram Followers | Fast", status="pending",
@@ -12829,17 +12841,25 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+        ai = mock.AsyncMock(return_value=(
+            "Oh no, I'm really sorry you're stuck waiting! 😤"
+        ))
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
+                mock.patch("bot.ai_generate", new=ai):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
+        self.assertIn("Oh no, I'm really sorry", reply)
         self.assertIn("1836", reply)
         self.assertIn("pending", reply)
         self.assertIn("12 minutes", reply)  # real time, never "soon"
         self.assertNotIn("soon", reply.lower())
-        self.assertIn("sorry", reply.lower())
 
     async def test_happy_gif_after_completed_order_celebrates(self):
+        # DeepSeek-first (owner, 14 Nov 2026): a completed order is
+        # NOT a delay, so the reply is just the AI's celebration —
+        # no order mention at all. Updated deliberately: the old
+        # test asserted the order id was named.
         recent = [dict(
             FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
             service_name="Instagram Followers | Fast", status="completed",
@@ -12847,13 +12867,19 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value=(
+                        "🎉 Yay, it worked — all done!"
+                    )),
+                ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
         self.assertIn("🎉", reply)
-        self.assertIn("1836", reply)
         self.assertIn("done", reply.lower())
+        self.assertNotIn("1836", reply)
 
     async def test_wave_emoji_gets_a_greeting_reply(self):
         # A wave is a greeting, not thanks (owner, 14 Nov 2026 —
@@ -12866,18 +12892,25 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertNotIn("welcome", msg.text_sent[0].lower())
 
     async def test_frustrated_sticker_with_no_order_invents_none(self):
-        # A 😡 sticker with no order at all: empathy, and no
-        # order is claimed.
+        # A 😡 sticker with no order at all: the AI's natural reply
+        # only — no order is claimed, no delay line is appended.
+        # Updated deliberately for DeepSeek-first (owner, 14 Nov
+        # 2026): the old reply said "don't see an order"; the new
+        # reply simply never mentions one.
         msg = FakeMessage()
         msg.caption = ""
         msg.sticker = mock.Mock(emoji="😡")
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+        ai_text = "Oh no, that sounds rough! 😡"
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value=ai_text),
+                ):
             await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
-        reply = msg.text_sent[0]
-        self.assertIn("don't see an order", reply)
-        self.assertNotIn("1836", reply)
+        self.assertEqual(msg.text_sent[0], ai_text)
+        self.assertNotIn("1836", msg.text_sent[0])
 
     async def test_media_reply_never_clears_a_pending_confirm_card(self):
         msg = await self._turns([
@@ -12893,16 +12926,12 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         pending = list(bot.PENDING.values())[0]
         self.assertEqual(pending["service"]["service"], 1723)
         self.assertEqual(pending["quantity"], 10)
-        self.assertIn("Confirm", msg.text_sent[1])
-
-    def test_media_replies_rotate_for_the_same_user(self):
-        ctx = {
-            "situation": "none", "service": None, "order_id": None,
-            "status": None, "avg": None, "total": None,
-        }
-        first = bot.media_reply_text(1, None, ctx, "en")
-        second = bot.media_reply_text(1, None, ctx, "en")
-        self.assertNotEqual(first, second)
+        # DeepSeek-first (owner, 14 Nov 2026): the media reply is
+        # the AI's natural reaction — it never drags the pending
+        # card (or any order) into the chat. Updated deliberately:
+        # the old reply named the waiting Confirm card.
+        self.assertNotIn("Confirm", msg.text_sent[1])
+        self.assertTrue(msg.text_sent[1].strip())
 
 
 class TestRetestFixRound14Nov(_LanguageRoundBase):
@@ -13118,11 +13147,21 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value=(
+                        "😄 Haha, love that GIF!"
+                    )),
+                ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("😄", reply)
+        # DeepSeek-first (owner, 14 Nov 2026): on track means NO
+        # order mention at all — the reply is just the AI's.
+        self.assertIn("😄 Haha, love that GIF!", reply)
+        self.assertNotIn("1837", reply)
+        self.assertNotIn("pending", reply.lower())
         self.assertNotIn("sorry", reply.lower())
         self.assertNotIn("frustrating", reply.lower())
         self.assertNotIn("delay", reply.lower())
@@ -13136,10 +13175,16 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value="Oh no! 😟"),
+                ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
+        self.assertIn("Oh no!", reply)
+        self.assertIn("1836", reply)
         self.assertIn("didn't go through", reply)
         self.assertNotIn("soon", reply.lower())
 
@@ -13161,11 +13206,19 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
     # (3b) a wave is a greeting, not thanks -------------------------
 
     async def test_wave_sticker_gets_a_greeting(self):
+        # DeepSeek-first (owner, 14 Nov 2026): the greeting comes
+        # from the AI now, not a canned line.
         msg = FakeMessage()
         msg.caption = ""
         msg.sticker = mock.Mock(emoji="👋")
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value=(
+                        "Hello! 👋 Great to see you!"
+                    )),
+                ):
             await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("Hello", msg.text_sent[0])
@@ -13177,7 +13230,13 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         msg.caption = ""
         msg.sticker = mock.Mock(emoji="🙋")
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value=(
+                        "Hello! 👋 Hi there!"
+                    )),
+                ):
             await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("Hello", msg.text_sent[0])
@@ -13186,12 +13245,19 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
     async def test_pray_sticker_still_gets_thanks(self):
         # 🙏 as a sticker is still thanks — only the wave emoji
         # changed. (Bare 🙏 as TEXT starts a reactions order now;
-        # a 🙏 sticker is a different signal.)
+        # a 🙏 sticker is a different signal.) The thanks comes
+        # from the AI under DeepSeek-first (owner, 14 Nov 2026).
         msg = FakeMessage()
         msg.caption = ""
         msg.sticker = mock.Mock(emoji="🙏")
         update = FakeUpdate(msg)
-        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value=(
+                        "You're welcome! 😊 Anytime!"
+                    )),
+                ):
             await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("welcome", msg.text_sent[0].lower())
@@ -13236,6 +13302,284 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         self.assertEqual(
             bot.PENDING["abc123"]["service"]["service"], 1001
         )
+
+
+class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
+    """DeepSeek-first media replies (owner, 14 Nov 2026): when the
+    user sends a GIF, a sticker or a bare emoji, the AI (the normal
+    chain, DeepSeek first, same as free chat) reacts FIRST,
+    naturally, like a person — in the user's language. THEN, and
+    only then, the system's memory is added: one short
+    deterministic line, and only when the most recent order is
+    actually delayed (past its average time) or failed. No delay
+    means no order mention at all — not even when the user seems
+    frustrated, not even right after an order was placed. This
+    replaces the canned rotating media replies: the AI reply is
+    the reply, and the delay line is deterministic code."""
+
+    async def _turns(self, turns, paxyo=None, ai_reply=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        ai = mock.AsyncMock(
+            return_value=ai_reply if ai_reply is not None else ""
+        )
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()), mock.patch(
+            "bot.speak_reply",
+        ), mock.patch("bot.ai_generate", new=ai):
+            for text, intent in turns:
+                with mock.patch(
+                    "bot.extract_intent",
+                    new=mock.AsyncMock(return_value=intent),
+                ):
+                    await bot.handle_order_text(update, None, text)
+        return msg
+
+    def _delayed_ctx(self):
+        return {
+            "situation": "delayed", "order_id": 1836,
+            "service": "Instagram Followers", "status": "pending",
+            "avg": "12 minutes", "total": 42.0,
+        }
+
+    async def _gif(self, recent, ai_reply, user=None):
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg, user=user)
+        ai = mock.AsyncMock(return_value=ai_reply)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
+                mock.patch("bot.ai_generate", new=ai):
+            await bot.on_animation(update, None)
+        return msg, ai
+
+    # The AI reply comes first; the delay line is appended --------
+
+    async def test_gif_delayed_order_ai_first_then_delay_line(self):
+        # The core of the design: the AI's natural reaction, then
+        # ONE short line naming the real delayed order.
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="pending",
+        )]
+        msg, ai = await self._gif(recent, "Haha, that GIF 😂")
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("Haha, that GIF 😂", reply)
+        self.assertIn("1836", reply)
+        self.assertIn("pending", reply)
+        self.assertIn("12 minutes", reply)  # real time, never "soon"
+        self.assertNotIn("soon", reply.lower())
+        # The AI never sees the order: its prompt names the GIF
+        # only, and the system prompt names no order either.
+        prompt = ai.call_args[0][0]
+        self.assertIn("GIF", prompt)
+        self.assertNotIn("1836", prompt)
+        self.assertNotIn("1836", ai.call_args[1]["system"])
+
+    async def test_gif_on_track_order_no_order_mention(self):
+        # No delay — even right after the order was placed — means
+        # no order mention at all, however the GIF looks.
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1837, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="in_progress",
+            created_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )]
+        msg, _ = await self._gif(recent, "😄 Haha, love that GIF!")
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("😄 Haha, love that GIF!", reply)
+        self.assertNotIn("1837", reply)
+        self.assertNotIn("pending", reply.lower())
+        self.assertNotIn("sorry", reply.lower())
+        self.assertNotIn("delay", reply.lower())
+
+    async def test_gif_no_orders_no_order_mention(self):
+        msg, _ = await self._gif([], "Haha, love that one! 😂")
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertEqual(msg.text_sent[0], "Haha, love that one! 😂")
+
+    async def test_frustrated_emoji_no_delay_no_order_mention(self):
+        # Frustrated, but nothing is delayed: the reply is just
+        # the AI's natural reaction — the order is not dragged in.
+        msg = await self._turns(
+            [("😤", intent_of("off_topic"))],
+            ai_reply="Oh no, that sounds rough! 😤",
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertEqual(
+            msg.text_sent[0], "Oh no, that sounds rough! 😤"
+        )
+
+    async def test_wave_sticker_natural_greeting_no_order_mention(self):
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.sticker = mock.Mock(emoji="👋")
+        update = FakeUpdate(msg)
+        ai_text = "Hello! 👋 Great to see you!"
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(return_value=ai_text),
+                ):
+            await bot.on_sticker(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertEqual(msg.text_sent[0], ai_text)
+
+    async def test_failed_order_gif_delay_line_present(self):
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="failed",
+        )]
+        msg, _ = await self._gif(recent, "Oh no! 😟")
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("Oh no!", reply)
+        self.assertIn("1836", reply)
+        self.assertIn("didn't go through", reply)
+        self.assertNotIn("soon", reply.lower())
+
+    async def test_amharic_gif_delayed_order_amharic_delay_line(self):
+        # Amharic in, Amharic out: the AI prompt asks for Amharic
+        # and the delay line is the Amharic template.
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="pending",
+        )]
+        msg, ai = await self._gif(
+            recent, "😂 በጣም አዝናኝ ነው!",
+            user=FakeUser(language_code="am"),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("😂 በጣም አዝናኝ ነው!", reply)
+        self.assertIn("በነገራችን ላይ", reply)
+        self.assertIn("1836", reply)
+        self.assertIn("12 minutes", reply)
+        self.assertIn("Amharic", ai.call_args[1]["system"])
+
+    # The AI down: the fallback still answers ----------------------
+
+    async def test_ai_down_fallback_replies_and_delay_line_still_added(self):
+        # Every provider down: the bot never goes silent, and the
+        # delay line is still appended — it is code, not AI text.
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="pending",
+        )]
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(
+                        side_effect=Exception("all providers down")
+                    ),
+                ):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("😄 Haha, love it!", reply)
+        self.assertIn("1836", reply)
+        self.assertIn("pending", reply)
+
+    async def test_ai_down_no_orders_fallback_only(self):
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(
+                        side_effect=Exception("all providers down")
+                    ),
+                ):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("😄 Haha, love it!", msg.text_sent[0])
+        self.assertNotIn("By the way", msg.text_sent[0])
+
+    def test_media_ai_fallback_is_mood_aware(self):
+        # The fallback is the only deterministic reply left, and it
+        # must fit the emoji: a wave greets, frustration is heard.
+        self.assertIn("Hello", bot._media_ai_fallback("👋", "en"))
+        self.assertIn("👋", bot._media_ai_fallback("👋", "en"))
+        self.assertIn(
+            "I hear you", bot._media_ai_fallback("😤", "en")
+        )
+        self.assertIn(
+            "welcome", bot._media_ai_fallback("🙏", "en").lower()
+        )
+        self.assertIn("ሰላም", bot._media_ai_fallback("👋", "am"))
+
+    # The delay line itself ----------------------------------------
+
+    def test_delay_line_delayed_english(self):
+        line = bot.delay_line(self._delayed_ctx(), "en")
+        self.assertIn("1836", line)
+        self.assertIn("Instagram Followers", line)
+        self.assertIn("pending", line)
+        self.assertIn("12 minutes", line)
+        self.assertNotIn("soon", line.lower())
+
+    def test_delay_line_delayed_amharic(self):
+        line = bot.delay_line(self._delayed_ctx(), "am")
+        self.assertIn("1836", line)
+        self.assertIn("pending", line)
+        self.assertIn("12 minutes", line)
+        self.assertIn("በነገራችን ላይ", line)
+
+    def test_delay_line_failed_english_and_amharic(self):
+        ctx = dict(self._delayed_ctx(), situation="failed")
+        self.assertIn(
+            "didn't go through", bot.delay_line(ctx, "en")
+        )
+        self.assertIn("1836", bot.delay_line(ctx, "en"))
+        self.assertIn("አልተሳካም", bot.delay_line(ctx, "am"))
+
+    def test_delay_line_empty_when_no_delay(self):
+        # On-track, completed, awaiting-Confirm, draft and no-order
+        # all get NO line — the order is never dragged in.
+        for situation in (
+            "on_track", "completed", "awaiting_confirm", "draft",
+            "none",
+        ):
+            ctx = dict(self._delayed_ctx(), situation=situation)
+            self.assertEqual(bot.delay_line(ctx, "en"), "", situation)
+            self.assertEqual(bot.delay_line(ctx, "am"), "", situation)
+
+    def test_media_ai_prompt_describes_media_not_orders(self):
+        self.assertIn("GIF", bot._media_ai_prompt("gif", None))
+        self.assertIn("sticker", bot._media_ai_prompt("sticker", "👋"))
+        self.assertIn("👋", bot._media_ai_prompt("sticker", "👋"))
+        self.assertIn("😤", bot._media_ai_prompt("emoji", "😤"))
+
+    # The card and the draft are never touched ---------------------
+
+    async def test_gif_with_pending_card_never_clears_it(self):
+        bot.PENDING["abc123"] = make_pending()
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot.ai_generate",
+                    new=mock.AsyncMock(
+                        return_value="Haha, nice one! 😂"
+                    ),
+                ):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertEqual(
+            bot.PENDING["abc123"]["service"]["service"], 1001
+        )
+        self.assertEqual(msg.text_sent[0], "Haha, nice one! 😂")
+        self.assertNotIn("Confirm", msg.text_sent[0])
 
 
 if __name__ == "__main__":
