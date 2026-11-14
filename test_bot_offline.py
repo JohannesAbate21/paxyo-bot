@@ -8833,5 +8833,433 @@ class TestRoundEightOneFixes(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Auto", reply)
 
 
+class TelegramViewsPaxyo(FakePaxyo):
+    """FakePaxyo plus a Telegram views service, for the never-drop
+    partial-order tests."""
+
+    VIEWS_SERVICE = {
+        "service": 3001, "name": "Telegram Post Views",
+        "category": "Telegram Post Views", "type": "Default",
+        "rate_etb_per_1000": 0.42, "min": 10, "max": 100000,
+        "average_time": "1 minute", "active": True,
+        "provider_service_id": 3001,
+    }
+
+    async def services(self):
+        return SAMPLE_SERVICES + [self.VIEWS_SERVICE]
+
+
+class FacebookReactionsPaxyo(FakePaxyo):
+    """FakePaxyo plus a Facebook reactions service."""
+
+    REACTIONS_SERVICE = {
+        "service": 3002, "name": "Facebook Reactions 👍 | Fast",
+        "category": "Facebook Reactions", "type": "Default",
+        "rate_etb_per_1000": 5.0, "min": 10, "max": 10000,
+        "average_time": "5 minutes", "active": True,
+        "provider_service_id": 3002,
+    }
+
+    async def services(self):
+        return SAMPLE_SERVICES + [self.REACTIONS_SERVICE]
+
+
+class TestNextBatchContactResellerNeverDrop(unittest.IsolatedAsyncioTestCase):
+    """The next batch (owner, 14 Nov 2026): reseller/contact answers
+    point at William (t.me/paxyo), and Telegram reactions, Telegram
+    views and Facebook reactions never drop — only those three, only
+    when the user asks about drops."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _send(self, text, intent, paxyo=None, ai_reply=_UNSET):
+        from contextlib import ExitStack
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        patches = [
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ),
+            mock.patch("bot.paxyo", paxyo or FakePaxyo()),
+            mock.patch("bot.speak_reply"),
+        ]
+        if ai_reply is not _UNSET:
+            patches.append(mock.patch(
+                "bot.ai_generate",
+                new=mock.AsyncMock(return_value=ai_reply),
+            ))
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _send_local(self, text, paxyo=None):
+        # intent=None: the local guard must answer without Gemini —
+        # extract_intent raises if it is ever called.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("extract_intent must not be called")
+            ),
+        ), mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    # (1) reseller ---------------------------------------------------
+
+    def test_prompt_has_reseller_and_contact_intents(self):
+        self.assertIn('"reseller"', bot.SYSTEM_PROMPT)
+        self.assertIn('"contact"', bot.SYSTEM_PROMPT)
+        # Asking whether PAXYO is a reseller stays source_question.
+        self.assertIn('"are you a reseller?"', bot.SYSTEM_PROMPT)
+
+    async def test_reseller_want_to_resell_local(self):
+        msg = await self._send_local("I want to resell")
+        self.assertEqual(msg.text_sent, [bot.t("reseller_contact", "en")])
+        self.assertIn("t.me/paxyo", msg.text_sent[0])
+        # The reply itself never uses the secrecy-guard word.
+        self.assertNotIn("resell", msg.text_sent[0].lower())
+
+    async def test_reseller_become_a_reseller_local(self):
+        msg = await self._send_local("how do I become a reseller")
+        self.assertEqual(msg.text_sent, [bot.t("reseller_contact", "en")])
+
+    async def test_reseller_can_i_sell_your_services_local(self):
+        msg = await self._send_local("can I sell your services")
+        self.assertEqual(msg.text_sent, [bot.t("reseller_contact", "en")])
+
+    async def test_reseller_want_to_sell_followers_local(self):
+        msg = await self._send_local("I want to sell followers")
+        self.assertEqual(msg.text_sent, [bot.t("reseller_contact", "en")])
+
+    async def test_reseller_intent_routed(self):
+        msg = await self._send(
+            "I want to resell", intent_of("reseller")
+        )
+        self.assertEqual(msg.text_sent, [bot.t("reseller_contact", "en")])
+
+    async def test_are_you_a_reseller_still_deflects(self):
+        msg = await self._send_local("are you a reseller?")
+        self.assertEqual(msg.text_sent, [bot.t("source_question", "en")])
+
+    async def test_does_paxyo_resell_still_deflects(self):
+        msg = await self._send_local("does Paxyo resell?")
+        self.assertEqual(msg.text_sent, [bot.t("source_question", "en")])
+
+    def test_is_reseller_request_negatives(self):
+        for text in (
+            "I want 1k TikTok views",
+            "do you sell followers?",
+            "are you a reseller?",
+            "how much are instagram followers",
+        ):
+            self.assertFalse(bot.is_reseller_request(text), text)
+
+    def test_local_intent_routes_reseller_not_order(self):
+        self.assertEqual(
+            bot.local_intent("I want to sell followers")["intent"],
+            "reseller",
+        )
+        self.assertEqual(
+            bot.local_intent("I want 1k TikTok views")["intent"], "order"
+        )
+
+    # (2) contact / support -------------------------------------------
+
+    async def test_contact_need_support_local(self):
+        msg = await self._send_local("I need support")
+        self.assertEqual(msg.text_sent, [bot.t("contact_owner", "en")])
+        self.assertIn("t.me/paxyo", msg.text_sent[0])
+
+    async def test_contact_talk_to_human_local(self):
+        msg = await self._send_local("let me talk to a human")
+        self.assertEqual(msg.text_sent, [bot.t("contact_owner", "en")])
+
+    async def test_contact_how_do_i_contact_you_local(self):
+        msg = await self._send_local("how do I contact you")
+        self.assertEqual(msg.text_sent, [bot.t("contact_owner", "en")])
+
+    async def test_contact_who_is_the_owner_local(self):
+        msg = await self._send_local("who is the owner")
+        self.assertEqual(msg.text_sent, [bot.t("contact_owner", "en")])
+        # The owner question still gets its answer: the name.
+        self.assertIn("Yohannes Abate", msg.text_sent[0])
+
+    async def test_contact_intent_routed(self):
+        msg = await self._send("I need support", intent_of("contact"))
+        self.assertEqual(msg.text_sent, [bot.t("contact_owner", "en")])
+
+    async def test_contact_repeated_is_the_same_short_line(self):
+        first = await self._send("I need support", intent_of("contact"))
+        second = await self._send(
+            "how do I contact you", intent_of("contact")
+        )
+        self.assertEqual(first.text_sent, [bot.t("contact_owner", "en")])
+        self.assertEqual(second.text_sent, [bot.t("contact_owner", "en")])
+
+    async def test_support_issue_still_redirects_not_contact(self):
+        # A reported problem is not a contact request: the website
+        # redirect stands, and it does not hand out t.me/paxyo.
+        msg = await self._send(
+            "My payment failed on the website, fix my account.",
+            intent_of("support_issue"),
+        )
+        self.assertIn("can't fix the website account", msg.text_sent[0])
+        self.assertNotIn("t.me/paxyo", msg.text_sent[0])
+
+    def test_is_contact_request_negatives(self):
+        for text in (
+            "I want 1k TikTok views",
+            "My payment failed on the website, fix my account.",
+            "what is paxyo?",
+        ):
+            self.assertFalse(bot.is_contact_request(text), text)
+
+    def test_local_intent_routes_contact(self):
+        self.assertEqual(
+            bot.local_intent("I need support")["intent"], "contact"
+        )
+        self.assertEqual(
+            bot.local_intent("let me talk to a human")["intent"], "contact"
+        )
+
+    # (3) never-drop — unit level --------------------------------------
+
+    def test_never_drop_kind_covered(self):
+        self.assertEqual(
+            bot.never_drop_kind("do telegram views drop?"),
+            "Telegram views",
+        )
+        self.assertEqual(
+            bot.never_drop_kind("will my telegram reactions disappear?"),
+            "Telegram reactions",
+        )
+        self.assertEqual(
+            bot.never_drop_kind("do facebook reactions fade?"),
+            "Facebook reactions",
+        )
+        self.assertEqual(
+            bot.never_drop_kind(
+                "will they drop?", platform="facebook",
+                service_hint="reactions",
+            ),
+            "Facebook reactions",
+        )
+
+    def test_never_drop_kind_not_covered(self):
+        for text in (
+            "do tiktok followers drop?",
+            "do instagram likes drop?",
+            "do telegram followers drop?",
+            "do youtube views drop?",
+            "do reactions drop?",
+            "will they go away?",
+            "if the followers drop tomorrow, do I get my money back?",
+            "do telegram views cost less now?",
+        ):
+            self.assertIsNone(bot.never_drop_kind(text), text)
+
+    def test_service_never_drop_kind(self):
+        self.assertEqual(
+            bot._service_never_drop_kind({
+                "name": "Telegram Post Views",
+                "category": "Telegram Post Views",
+            }),
+            "Telegram views",
+        )
+        self.assertEqual(
+            bot._service_never_drop_kind({
+                "name": "Telegram Reactions 👍 | Fast",
+                "category": "Telegram Reactions",
+            }),
+            "Telegram reactions",
+        )
+        self.assertEqual(
+            bot._service_never_drop_kind({
+                "name": "Facebook Reactions 👍 | Fast",
+                "category": "Facebook Reactions",
+            }),
+            "Facebook reactions",
+        )
+        for service in (
+            {"name": "TikTok Video Views | Fast",
+             "category": "TikTok Video Views"},
+            {"name": "Telegram Bot Start [ Max 50K ]",
+             "category": "Telegram Bot Start"},
+            {"name": "Instagram Followers | Fast",
+             "category": "Instagram Followers"},
+            {"name": "Telegram Members | Fast",
+             "category": "Telegram Members"},
+            None,
+        ):
+            self.assertIsNone(bot._service_never_drop_kind(service), service)
+
+    # (4) never-drop — full flow ---------------------------------------
+
+    async def test_never_drop_telegram_views_direct(self):
+        msg = await self._send(
+            "do telegram views drop?", intent_of("refund_policy")
+        )
+        self.assertIn("Telegram views never drop", msg.text_sent[0])
+
+    async def test_never_drop_facebook_reactions_fade(self):
+        msg = await self._send(
+            "do facebook reactions fade?", intent_of("refund_policy")
+        )
+        self.assertIn("Facebook reactions never drop", msg.text_sent[0])
+
+    async def test_never_drop_telegram_reactions_disappear(self):
+        msg = await self._send(
+            "will my telegram reactions disappear?",
+            intent_of("paxyo_info"),
+        )
+        self.assertIn("Telegram reactions never drop", msg.text_sent[0])
+
+    async def test_never_drop_not_for_tiktok_followers(self):
+        msg = await self._send(
+            "do tiktok followers drop?", intent_of("refund_policy")
+        )
+        self.assertNotIn("never drop", msg.text_sent[0].lower())
+        self.assertIn("contact support", msg.text_sent[0])
+
+    async def test_never_drop_not_for_instagram_likes(self):
+        msg = await self._send(
+            "will my instagram likes disappear?",
+            intent_of("refund_policy"),
+        )
+        self.assertNotIn("never drop", msg.text_sent[0].lower())
+
+    async def test_never_drop_not_for_telegram_followers(self):
+        msg = await self._send(
+            "do telegram followers drop?", intent_of("refund_policy")
+        )
+        self.assertNotIn("never drop", msg.text_sent[0].lower())
+
+    async def test_never_drop_not_volunteered_on_order(self):
+        msg = await self._send(
+            "I want telegram views",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram views"),
+            paxyo=TelegramViewsPaxyo(),
+        )
+        self.assertNotIn("never drop", msg.text_sent[0].lower())
+
+    async def test_never_drop_not_volunteered_on_price(self):
+        msg = await self._send(
+            "how much are telegram views for 1000",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram views", quantity=1000),
+            paxyo=TelegramViewsPaxyo(),
+        )
+        self.assertNotIn("never drop", msg.text_sent[0].lower())
+
+    async def _seed_reactions_pending(self):
+        await self._send(
+            "I want 👍 reactions for https://t.me/paxyo251/180 1000",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions",
+                      link="https://t.me/paxyo251/180", quantity=1000),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_never_drop_pending_telegram_reactions(self):
+        await self._seed_reactions_pending()
+        msg = await self._send(
+            "will they drop?", intent_of("unclear"),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertIn("Telegram reactions never drop", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)  # card untouched
+
+    async def test_never_drop_pending_fade_word(self):
+        await self._seed_reactions_pending()
+        msg = await self._send(
+            "will they fade?", intent_of("unclear"),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertIn("Telegram reactions never drop", msg.text_sent[0])
+
+    async def test_never_drop_pending_tiktok_views_keeps_refill_line(self):
+        await self._send(
+            "I want 1000 tiktok views for https://vt.tiktok.com/ZSpQWTSmH/",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      link="https://vt.tiktok.com/ZSpQWTSmH/",
+                      quantity=1000),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        msg = await self._send(
+            "will they drop?", intent_of("unclear"), paxyo=TikTokPaxyo()
+        )
+        self.assertNotIn("never drop", msg.text_sent[0].lower())
+        self.assertIn("refill", msg.text_sent[0].lower())
+
+    async def test_never_drop_partial_telegram_views(self):
+        bot.PARTIAL[1] = {
+            "platform": "telegram", "service_hint": "telegram views",
+        }
+        msg = await self._send(
+            "wouldn't it drop?", intent_of("unclear"),
+            paxyo=TelegramViewsPaxyo(),
+        )
+        self.assertIn("Telegram views never drop", msg.text_sent[0])
+
+    async def test_never_drop_partial_tiktok_views_keeps_refill_line(self):
+        bot.PARTIAL[1] = {
+            "platform": "tiktok", "service_hint": "tiktok views",
+        }
+        msg = await self._send(
+            "wouldn't it drop?", intent_of("unclear"),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertNotIn("never drop", msg.text_sent[0].lower())
+        self.assertIn("refill", msg.text_sent[0].lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

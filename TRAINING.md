@@ -4,7 +4,7 @@ This file is the bot's memory of everything its owner taught it. If the bot
 ever has to be rebuilt from scratch, read this file first: it holds every
 rule, fact and behaviour the owner set, so the rebuild learns fast.
 Source of truth for behaviour is `bot.py`; this file is the human-readable
-record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 7).
+record of *why* it behaves that way. Last updated: 14 Nov 2026 (next batch: reseller/contact + never-drop).
 
 ## Who Paxyo is
 - Paxyo is an Ethiopian service for ordering followers, likes, views,
@@ -68,8 +68,22 @@ record of *why* it behaves that way. Last updated: 13 Nov 2026 (round 7).
 - WEBSITE: when asked about the website, always mention paxyo.et.
 - BANNED / SHADOWBANNED: answer NO — anybody can buy followers for you,
   so your account can't be banned or shadowbanned for it without your permission.
-- CONTACT: when a customer asks for Paxyo's contact, give the owner's
-  Telegram username. (TODO: owner has not supplied the username yet.)
+- CONTACT: when a customer asks for support, to talk to a human, or
+  to contact the owner/admin, answer: contact William at t.me/paxyo.
+  Same one line if they ask again. (Owner, 14 Nov 2026 — this
+  answers the open contact-username question.)
+- RESELLER: when a customer wants to sell Paxyo's services
+  themselves / become a reseller, answer: contact William at
+  t.me/paxyo — he will set it up. Asking whether PAXYO is a
+  reseller ("are you a reseller?") is still the source-question
+  deflection, never the contact line.
+- NEVER DROP — ONLY Telegram reactions, Telegram views and Facebook
+  reactions: when the user ASKS whether those drop / fade /
+  disappear, say they never drop. NEVER claim never-drop for any
+  other service (TikTok/Instagram/YouTube followers, likes, views,
+  Telegram followers/members...) — for those the terms stand
+  (results not guaranteed permanent, drops may occur; refunds to
+  Paxyo balance only). Never volunteer the claim unprompted.
 - TERMS: answer from `paxyo-terms.md` (the real Paxyo Terms &
   Conditions). If the terms don't cover a question, say so and offer
   support. Full terms live on paxyo.et.

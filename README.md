@@ -830,3 +830,46 @@ Live retest of round 8 (09:29–09:37 EAT) found four gaps:
   reaction is being bought.
 
 511 tests: 498 existing + 13 new, all passing.
+
+## Next batch (14 Nov 2026 — reseller/contact answers + never-drop claim)
+
+Owner instructions, built after round 8.1 settled:
+
+- **Reseller questions go to William.** A user who wants to sell
+  Paxyo's services themselves ("I want to resell", "how do I
+  become a reseller", "can I sell your services", "I want to sell
+  followers") gets one short line: contact William at t.me/paxyo.
+  New `reseller` intent in the classifier prompt, `is_reseller_request`
+  local guard (runs before the source-question guard — "resell" is a
+  source-question word, but "I want to resell" is the user asking to
+  sell), and a `local_intent` branch before the order fallback (so
+  "I want to sell followers" is not misread as an order). Asking
+  whether PAXYO is a reseller ("are you a reseller?") still deflects
+  as a source question. The reply never uses the word "resell"
+  itself, so the secrecy guard stays clean.
+- **Contact / support questions go to William.** "I need support",
+  "let me talk to a human", "how do I contact you", "who is the
+  owner" → "You can reach William (Yohannes Abate) at t.me/paxyo —
+  he will help you." New `contact` intent + `is_contact_request`
+  guard + `local_intent` branch. Asking again just repeats the same
+  one line. A reported problem ("my payment failed on the website,
+  fix my account") is NOT a contact request — it keeps the existing
+  `support_issue` redirect.
+- **Telegram reactions, Telegram views and Facebook reactions never
+  drop — only those three.** When the user asks about drops / fading
+  / disappearing for one of them, the bot says so
+  (`never_drop_kind` from the message + intent platform/metric, and
+  `_service_never_drop_kind` from a pending or draft service's
+  category/name). The claim fires in three places: the direct-answer
+  check (before the terms answer, so a covered question never gets
+  the generic "drops may occur" line), the Confirm-card drop answer
+  (`pending_confirm_answer`), and the draft drop answer. For every
+  other service — TikTok followers/likes/views, Instagram, YouTube,
+  Telegram followers/members — the existing terms/refund answer
+  stands, and the claim is never volunteered unprompted (an order
+  or a price question never mentions it). Drop words recognised:
+  drop, disappear, fade, fall off, go away, vanish, decrease,
+  go down (the pending-order phrases gained fade / go away /
+  vanish too).
+
+546 tests: 511 existing + 35 new, all passing.

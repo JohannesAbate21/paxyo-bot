@@ -291,6 +291,15 @@ Rules:
     "where do you get the followers?", "are you a reseller?",
     "how much do you buy followers for?", "is this an SMM panel?",
     "who supplies your services?", "አቅራቢ ማን ነው?").
+  - "reseller": the user wants to sell Paxyo's services themselves,
+    or become a reseller ("I want to resell", "how do I become a
+    reseller", "can I sell your services", "I want to sell
+    followers"). Asking whether PAXYO is a reseller ("are you a
+    reseller?", "does Paxyo resell?") is still "source_question".
+  - "contact": the user asks to talk to a human, reach support, or
+    contact the owner or admin, or asks who runs Paxyo ("I need
+    support", "let me talk to a human", "how do I contact you",
+    "who is the owner", "who runs Paxyo").
   - "usual": the user wants their usual order again ("give me the
     usual", "the usual please", "same as usual", "same thing as
     yesterday"). Fill quantity_multiplier when they want it scaled
@@ -825,6 +834,41 @@ TEXT = {
             "Paxyo delivers your order directly — the price you see is "
             "the price you pay. Is there a service I can help you order?"
         ),
+    },
+    # The user wants to sell Paxyo's services themselves (next batch,
+    # 14 Nov 2026): send them to William. One short line, no
+    # "reseller" word in the reply itself — the secrecy guard
+    # treats "resell" as a supply-chain word.
+    "reseller_contact": {
+        "am": (
+            "Paxyo services መሸጥ ከፈልጉ Williamን በ t.me/paxyo "
+            "ያነጋግሩ — እርሱ ያዘጋጅልዎታል።"
+        ),
+        "en": (
+            "If you want to sell Paxyo's services, contact William "
+            "at t.me/paxyo — he will set it up with you."
+        ),
+    },
+    # The user wants a human — support, the owner, the admin
+    # (next batch, 14 Nov 2026). Same one line every time, so
+    # asking again just repeats it briefly, never a long exchange.
+    "contact_owner": {
+        "am": (
+            "William (Yohannes Abate)ን በ t.me/paxyo ማግኘት "
+            "ይችላሉ — እርሱ ይረዳዎታል።"
+        ),
+        "en": (
+            "You can reach William (Yohannes Abate) at t.me/paxyo "
+            "— he will help you."
+        ),
+    },
+    # Telegram reactions, Telegram views and Facebook reactions
+    # never drop (owner, 14 Nov 2026). ONLY those three — the
+    # {service} label is always one of them; every other service
+    # keeps the terms answer (drops may occur).
+    "never_drop": {
+        "am": "{service} በጭራሽ አይቀነሱም — ከደረሱ በኋላ ይቆያሉ።",
+        "en": "{service} never drop — once they are delivered, they stay.",
     },
     # Messy real-world inputs (owner edge-case spec, 13 Nov 2026):
     # short answers for goal/budget/trust/adversarial questions, and
@@ -3139,6 +3183,13 @@ def local_intent(text: str) -> dict:
         # 20 br get me" has the currency word and the how-much
         # phrasing, so it is a budget even without "for".
         intent["intent"] = "budget"
+    elif is_reseller_request(text):
+        # Next batch, 14 Nov 2026: before the order fallback —
+        # "I want to sell followers" names the followers metric,
+        # so without this it would be misread as an order.
+        intent["intent"] = "reseller"
+    elif is_contact_request(text):
+        intent["intent"] = "contact"
     elif (
         links
         or intent["quantity"] is not None
@@ -3170,9 +3221,9 @@ async def extract_intent(text: str, user_id: int = None) -> dict:
     "split": ...}. intent is one of order, recurring, schedules,
     stop_schedule, balance, orders, deposit, deposit_status, help,
     how_to_order, miniapp, social, greeting, paxyo_info,
-    source_question, usual, goal, budget, batch, change_order,
-    refill, split_payment, max_for_balance, discount, safety,
-    refund_policy, geo_target, free_sample, price_pushback,
+    source_question, reseller, contact, usual, goal, budget, batch,
+    change_order, refill, split_payment, max_for_balance, discount,
+    safety, refund_policy, geo_target, free_sample, price_pushback,
     content_help, support_issue, cancel, off_topic, unclear — or
     None when the model output had no usable JSON.
     """
@@ -4576,6 +4627,9 @@ _PENDING_SPEED_PHRASES = (
 )
 _PENDING_DROP_PHRASES = (
     "drop", "disappear", "refill", "fall off", "decrease", "go down",
+    # Next batch (14 Nov 2026): the owner asks about drops as
+    # "fade" / "go away" / "vanish" too — same question.
+    "fade", "go away", "vanish",
 )
 
 
@@ -4749,6 +4803,14 @@ def pending_confirm_answer(service, question: str, lang: str):
         if parse_average_time(avg) is not None:
             return t("confirm_speed", lang, service=name, avg=avg)
         return t("confirm_speed_unknown", lang, service=name)
+    if question == "drop":
+        # Owner, 14 Nov 2026: Telegram reactions, Telegram views
+        # and Facebook reactions never drop — say so instead of
+        # the refill line. Any other service keeps the refill
+        # answer below.
+        kind = _service_never_drop_kind(service)
+        if kind is not None:
+            return t("never_drop", lang, service=kind)
     low = str(service.get("name") or "").lower()
     if "no refill" in low:
         refill = t("pending_no_refill", lang)
@@ -5603,6 +5665,137 @@ def is_source_question(text: str) -> bool:
     who supplies them, or what Paxyo pays for them."""
     s = normalize_text(text or "")
     return any(p in s for p in SOURCE_QUESTION_PATTERNS)
+
+
+# The user wants to sell Paxyo's services themselves (next batch,
+# 14 Nov 2026). This is NOT the source question: "are you a
+# reseller?" asks about Paxyo and still deflects. The difference
+# is the user wanting to sell — first-person want / can-I /
+# become / how-do-I. A plain "do you sell followers?" (asking
+# whether Paxyo sells) matches none of these.
+_RESELLER_REQUEST_PATTERNS = (
+    "want to resell", "wanna resell", "can i resell",
+    "could i resell", "how do i resell", "how can i resell",
+    "how to resell", "become a reseller", "be a reseller",
+    "become reseller", "interested in reselling",
+    "start reselling", "resell your", "resell paxyo",
+    "want to sell", "wanna sell", "can i sell", "could i sell",
+    "how do i sell your", "how can i sell your",
+    "how to sell your", "sell your services", "sell paxyo",
+)
+
+
+def is_reseller_request(text: str) -> bool:
+    """True when the user wants to sell Paxyo's services
+    themselves — not when they ask whether Paxyo resells."""
+    s = " ".join((normalize_text(text or "")).strip().lower().split())
+    return any(p in s for p in _RESELLER_REQUEST_PATTERNS)
+
+
+# The user wants a human — support, the owner, the admin (next
+# batch, 14 Nov 2026). "Who owns / who is the owner" is in here
+# too: the contact reply names William, so the owner question
+# still gets its answer, plus how to reach him. A reported
+# problem ("my payment failed, fix my account") matches none of
+# these — that stays the support_issue redirect.
+_CONTACT_REQUEST_PATTERNS = (
+    "talk to a human", "talk to someone", "talk with a human",
+    "speak to a human", "speak with a human", "speak to someone",
+    "talk to a real person", "speak to a real person",
+    "i need support", "need support", "i want support",
+    "need help from support", "contact you", "contact william",
+    "contact the owner", "contact admin", "contact support",
+    "how do i contact", "how can i contact", "how to contact",
+    "talk to william", "speak to william", "talk to the owner",
+    "speak to the owner", "get in touch", "customer support",
+    "who is the owner", "who owns paxyo", "who runs paxyo",
+    "who is william", "who is yohannes", "who is the boss",
+)
+
+
+def is_contact_request(text: str) -> bool:
+    """True when the user asks to reach a human — support, the
+    owner or the admin — rather than reporting a problem."""
+    s = " ".join((normalize_text(text or "")).strip().lower().split())
+    return any(p in s for p in _CONTACT_REQUEST_PATTERNS)
+
+
+# Which services never drop (owner, 14 Nov 2026): ONLY Telegram
+# reactions, Telegram views and Facebook reactions. Every other
+# service keeps the terms language — results not guaranteed
+# permanent, drops may occur — and the bot must never claim
+# never-drop for those. The claim is only ever given when the
+# user ASKS about drops for one of the three; it is never
+# volunteered unprompted.
+_NEVER_DROP_KINDS = (
+    ("telegram", "reactions", "Telegram reactions"),
+    ("telegram", "views", "Telegram views"),
+    ("facebook", "reactions", "Facebook reactions"),
+)
+_DROP_WORDS = (
+    "drop", "disappear", "fade", "fall off", "go away", "vanish",
+    "decrease", "go down",
+)
+
+
+def never_drop_kind(text: str, platform=None, service_hint=None):
+    """The never-drop service kind the message asks about, or None.
+
+    The message must ask about drops AND pin the service to one of
+    the three covered kinds (platform + metric). A drop question
+    about anything else — TikTok followers, Instagram likes,
+    Telegram followers, a bare "do they drop?" with no platform —
+    returns None, so the terms/refund answer stands.
+    """
+    s = " ".join((normalize_text(text or "")).strip().lower().split())
+    if not any(p in s for p in _DROP_WORDS):
+        return None
+    plat = (platform or "").strip().lower() or None
+    if plat is None:
+        for p in _PLATFORMS:
+            if re.search(rf"\b{re.escape(p)}\b", s):
+                plat = p
+                break
+    hint = (service_hint or "").strip().lower()
+    metric = kind_from_text(hint) if hint else None
+    if metric is None:
+        metric = kind_from_text(s)
+    if metric is None or plat is None:
+        return None
+    for p, m, label in _NEVER_DROP_KINDS:
+        if p == plat and m == metric:
+            return label
+    return None
+
+
+def _service_never_drop_kind(service):
+    """The never-drop kind of a service dict, or None.
+
+    Same three kinds as never_drop_kind, read from the service's
+    own category/name: "Telegram Reactions", "Telegram Post Views",
+    "Facebook Reactions". A Bot Start service has no
+    reactions/views metric in its name, so it never matches.
+    """
+    if not service:
+        return None
+    text = (
+        str(service.get("category") or "")
+        + " " + str(service.get("name") or "")
+    ).lower()
+    plat = None
+    for p in ("telegram", "facebook"):
+        if re.search(rf"\b{re.escape(p)}\b", text):
+            plat = p
+            break
+    if plat is None:
+        return None
+    metric = kind_from_text(text)
+    if metric is None:
+        return None
+    for p, m, label in _NEVER_DROP_KINDS:
+        if p == plat and m == metric:
+            return label
+    return None
 
 
 def is_paid_phrase(text: str) -> bool:
@@ -6981,10 +7174,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     - Gemini first classifies the message (order, recurring, schedules,
       stop_schedule, balance, orders, deposit, deposit_status,
       how_to_order, miniapp, social, help, greeting,
-      paxyo_info, source_question, usual, goal, budget, batch,
-      change_order, refill, split_payment, max_for_balance, discount,
-      safety, refund_policy, geo_target, free_sample, price_pushback,
-      content_help, support_issue, cancel, off_topic, unclear).
+      paxyo_info, source_question, reseller, contact, usual, goal,
+      budget, batch, change_order, refill, split_payment,
+      max_for_balance, discount, safety, refund_policy, geo_target,
+      free_sample, price_pushback, content_help, support_issue,
+      cancel, off_topic, unclear).
       Conversational intents are answered before the order flow, so the bot talks like
       customer support instead of only understanding orders;
       off-topic talk is steered back to ordering in one line.
@@ -7069,6 +7263,26 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             PENDING.pop(_cid, None)
             await send_order_result(update.message, lang, _pending, user.id)
             return
+
+    # The user wants to sell Paxyo's services themselves, or to
+    # reach William (next batch, 14 Nov 2026): answer at once,
+    # without calling Gemini, and before free-chat handling — a
+    # short "I need support" must not become a generic chat reply.
+    # The reseller check runs before the source-question guard
+    # below: "resell" is a source-question word, but "I want to
+    # resell" is the user asking to sell, not asking about Paxyo's
+    # supplier. Both answers are one short line with the contact,
+    # so asking again just repeats it.
+    if intent is None and is_reseller_request(text):
+        await reply_message(
+            update.message, t("reseller_contact", lang), lang, voice=voice
+        )
+        return
+    if intent is None and is_contact_request(text):
+        await reply_message(
+            update.message, t("contact_owner", lang), lang, voice=voice
+        )
+        return
 
     # A conversational message mid-order (round 8, 14 Nov 2026):
     # "do you understand", "what do you mean", free chat — answer
@@ -7329,6 +7543,24 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if is_ban_question(text):
         await reply_message(update.message, with_pending_note(user.id, lang, t("ban_no", lang)), lang, voice=voice)
         return
+    _never_drop = never_drop_kind(
+        text, intent.get("platform"), intent.get("service_hint")
+    )
+    if _never_drop is not None:
+        # Owner, 14 Nov 2026: Telegram reactions, Telegram views
+        # and Facebook reactions never drop. Only when the user
+        # asks about drops for one of those three — every other
+        # drop question falls through to the terms/refund answer.
+        # Runs before terms_answer, so a covered question never
+        # gets the generic "drops may occur" line.
+        await reply_message(
+            update.message,
+            with_pending_note(
+                user.id, lang, t("never_drop", lang, service=_never_drop)
+            ),
+            lang, voice=voice,
+        )
+        return
     if is_pay_methods_question(text):
         # "How can I pay?" (round 6, 13 Nov 2026): list the methods
         # FIRST — the deposit flow jumps straight to "How much do you
@@ -7586,6 +7818,24 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reply_message(
             update.message,
             with_pending_note(user.id, lang, t("content_help", lang)),
+            lang, voice=voice,
+        )
+        return
+    if intent_type == "reseller":
+        # The user wants to sell Paxyo's services themselves:
+        # send them to William. One short line, repeated as-is
+        # if they ask again.
+        await reply_message(
+            update.message,
+            with_pending_note(user.id, lang, t("reseller_contact", lang)),
+            lang, voice=voice,
+        )
+        return
+    if intent_type == "contact":
+        # The user wants a human: William at t.me/paxyo.
+        await reply_message(
+            update.message,
+            with_pending_note(user.id, lang, t("contact_owner", lang)),
             lang, voice=voice,
         )
         return
@@ -8070,14 +8320,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     else:
                         answer = t("pending_speed_unknown", lang, service=name)
                 else:
-                    low = str(service.get("name") or "").lower()
-                    if "no refill" in low:
-                        refill = t("pending_no_refill", lang)
-                    elif "refill" in low:
-                        refill = t("pending_has_refill", lang)
+                    # Owner, 14 Nov 2026: Telegram reactions,
+                    # Telegram views and Facebook reactions never
+                    # drop — say so instead of the refill line.
+                    kind = _service_never_drop_kind(service)
+                    if kind is not None:
+                        answer = t("never_drop", lang, service=kind)
                     else:
-                        refill = t("pending_refill_unknown", lang)
-                    answer = t("pending_drop", lang, service=name, refill=refill)
+                        low = str(service.get("name") or "").lower()
+                        if "no refill" in low:
+                            refill = t("pending_no_refill", lang)
+                        elif "refill" in low:
+                            refill = t("pending_has_refill", lang)
+                        else:
+                            refill = t("pending_refill_unknown", lang)
+                        answer = t(
+                            "pending_drop", lang, service=name, refill=refill
+                        )
                 await reply_message(update.message, answer, lang, voice=voice)
                 return
     if not merged.get("link"):
