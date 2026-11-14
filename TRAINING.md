@@ -39,7 +39,29 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   🙏-only (Pray) service, never to the Positive mix; 👍 only to
   thumbs-up/like, ❤️ only to heart, 🔥 only to fire, and so on
   (👎 thumbs down, 😡 angry face, 😎 cool, 🤔 thinking, 🎉
-  celebration, 😍 heart eyes, 😆 the 😆 reaction). THE EMOJI IN
+  celebration, 😍 heart eyes, 😆 the 😆 reaction). MANY-EMOJI
+  EXPANSION (owner, 14 Nov 2026 — "not only 🙏"): the same rule
+  covers EVERY emoji with a dedicated single-emoji reactions
+  service in the catalogue. Telegram 5.46 ETB/1000: 👎 #6542,
+  💩 #6543, ⚡️ #6544, ☃️ #6545, ✍️ #6546, 🙊 #6547, 💊 #6548,
+  😎 #6549, 😘 #6550, 🦄 #6551, 🙉 #6552, 🆒 #6553, 👾 #6554,
+  🗿 #6555, 🤪 #6556, 💅 #6557, 🎄 #6558, 🎅 #6559, 🤗 #6560,
+  🤝 #6561, 😨 #6562, 🤷 #6563, 😇 #6564, 🫡 #6565, 🙈 #6566,
+  🎃 #6567, 👻 #6569, 🤓 #6570, 😭 #6571, 😴 #6572, 😡 #6573,
+  😈 #6574, 🖕 #6575, 💋 #6576, 🍾 #6577, 🍓 #6578, 😂 #6579,
+  😐 #6580, 🤨 #6581, 🏆 #6582, 🍌 #6583, 🥱 #6584, 🤣 #6585,
+  💘 #6538, ❤️‍🔥 #6536, 💔 #6539. Telegram 12.60: 👌 #1724,
+  🤩 #1720, 🎉 #1721, 😁 #1722, 😱 #1728, 😢 #1729, 🤮 #1731,
+  🤬 #1732, 🤔 #1733. Telegram 42.00: 💯 #1753, 🐳 #1751,
+  🕊 #1755, 🤭 #1756, 🤡 #1757. Facebook: 🥰 #4410, 😮 #4412,
+  🤗 #5106, 😲 #5107, 😥 #5109, 😭 #4574, 🤬 #7264, 😯 #4421,
+  😀 #3701. Emojis with NO exact service anywhere (😄 🥳 🤯 🥺
+  🙌 👏 😊) get the honest no-service answer and the Positive
+  mix offer, never a silent mix sale. 👀 stays the "looking"
+  media emoji (Eyes #6568 exists but 👀 is not a reaction) and
+  😤 stays frustrated media. A bare ❤ (no VS16) is the same
+  heart as ❤️, a bare ⚡ the same lightning as ⚡️; ❤️‍🔥 is
+  ONE emoji (heart-on-fire), never ❤️ plus 🔥. THE EMOJI IN
   THE SERVICE NAME DECIDES, not the word: "heart" as a substring
   also sits inside lookalikes — "Heart Eyes 😍", "Heart on fire
   ❤️‍🔥", "Broken heart 💔" — and the old word match sold Heart
@@ -404,7 +426,11 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   "I want 👍 this reaction" orders the 👍 Telegram reaction service;
   a bare "👍" in an order context means the same reaction. 🙏 is
   thanks in words ("thank you 🙏"), but a bare 🙏 — alone, or with
-  only a quantity ("10 🙏") — is the Pray reaction order.
+  only a quantity ("10 🙏") — is the Pray reaction order. Every
+  emoji with a dedicated reactions service works the same way
+  (full map under REACTIONS ARE EXACT above); 😄 🥳 🤯 🥺 🙌 👏 😊
+  have no exact service and get the honest answer; 👀 is looking
+  and 😤 is frustration, not reactions.
 - A bare emoji is ACKNOWLEDGED as the reaction choice first ("Got
   it — 👍 reactions..."), then the link is asked for — never the
   stock link request on its own. With no order context it still
@@ -413,8 +439,10 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   never changes that order.
 - BARE QUANTITY + EMOJI STARTS AN ORDER (owner, 14 Nov 2026 —
   live retest: "10 🙏" got "I did not understand"): a message
-  that is only a quantity and a reaction emoji ("10 🙏", "🙏 10")
-  or a bare 🙏 starts a Telegram reactions order — the draft
+  that is only a quantity and a reaction emoji ("10 🙏", "🙏 10",
+  "10 😭", "😂 10" — ANY reaction emoji, not just 🙏, since the
+  many-emoji expansion) or a bare 🙏 starts a Telegram reactions
+  order — the draft
   carries platform Telegram, the reactions hint and the emoji,
   and the bot asks "Please send the link of the Telegram post."
   The bare link sent next completes the draft (platform, kind
@@ -435,8 +463,8 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   bare link for a different platform still starts a fresh order.
 - NO BARE EMOJI IS EVER "NOT UNDERSTOOD" (owner, 14 Nov 2026 —
   "he also misunderstood the emoji"): any message that is only
-  emoji gets an emoji-aware reply. A bare 👀, 💔, 🤗 ... (not a
-  reaction emoji, no media mood) gets the AI's natural reaction,
+  emoji gets an emoji-aware reply. A bare 👀 or 😤 (not a
+  reaction emoji) gets the AI's natural reaction,
   like a GIF. A bare reaction emoji while a Confirm
   card for another service is pending is acknowledged the same
   way — the card is never touched. A bare reaction emoji while a

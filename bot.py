@@ -2105,17 +2105,19 @@ def _kinds_compatible(name_kinds, hint_kinds):
 
 # Reaction-type words in a service name, per emoji (round 8.1,
 # 14 Nov 2026; extended 14 Nov 2026 — the owner ordered 🙏 and got
-# the Positive mix, because 🙏 had no family at all). The emoji
+# the Positive mix, because 🙏 had no family at all; extended
+# again 14 Nov 2026 — the many-emoji expansion). The emoji
 # character itself is never a family word: a "Positive" mix also
 # carries 👍 in its name, so matching on the emoji alone would
-# pick the mix for a thumbs-up order. Families exist only for
-# emoji with a dedicated single-emoji service in the catalogue:
-# 🙏 -> Pray #1723 (12.60 ETB/1000), 👎 -> Thumbs down / DisLike,
-# 😡 -> Angry Face, 😎 -> Cool, 🤔 -> Thinking, 🎉 -> Celebration,
-# 😍 -> Heart Eyes, 😆 -> the 😆 reaction. An emoji with no
-# dedicated service (😮 wow) has a family word that matches
-# nothing, so the pool falls through to the honest "no exact
-# service" answer instead of silently selling the mix.
+# pick the mix for a thumbs-up order. EVERY emoji in
+# REACTION_EMOJI must have an entry here: when a user orders an
+# emoji with no entry the pool falls back to EVERY reactions
+# service, which would silently sell a mix (owner rule, 14 Nov
+# 2026: never sell a different emoji). That includes emojis with
+# NO dedicated service anywhere (😄 🥳 🤯 🥺 🙌 👏 😊) — their
+# words match nothing in the catalogue, so the pool comes back
+# empty and the caller says honestly that there is no {emoji}-only
+# service and offers the closest mix.
 # The words are only a FALLBACK (see _service_in_reaction_family):
 # the emoji in the service name decides first, because the word
 # "heart" also sits inside lookalikes — "Heart Eyes 😍", "Heart
@@ -2138,6 +2140,80 @@ REACTION_FAMILY_WORDS = {
     "🤔": ("thinking",),
     "🎉": ("celebration",),
     "😍": ("heart eyes",),
+    # Many-emoji expansion (14 Nov 2026) — one entry per new
+    # emoji, VS twins sharing a family so the cross-family guard
+    # never blocks a twin (see _service_in_reaction_family).
+    "❤️‍🔥": ("heart on fire",),
+    "❤‍🔥": ("heart on fire",),
+    "⚡️": ("lightning",),
+    "⚡": ("lightning",),
+    "☃️": ("snowman",),
+    "☃": ("snowman",),
+    "✍️": ("writing hand",),
+    "✍": ("writing hand",),
+    "🕊️": ("dove",),
+    "🕊": ("dove",),
+    "🆒": ("cool",),
+    "🍌": ("banana",),
+    "🍓": ("strawberry",),
+    "🍾": ("champagne",),
+    "🎃": ("pumpkin",),
+    "🎄": ("christmas tree",),
+    "🎅": ("santa",),
+    "🏆": ("trophy",),
+    "🐳": ("whale",),
+    "👌": ("ok hand",),
+    "👻": ("ghost",),
+    "👾": ("alien",),
+    "💅": ("nail polish",),
+    "💊": ("pill",),
+    "💋": ("kiss mark",),
+    "💔": ("broken heart",),
+    "💘": ("love struck",),
+    "💩": ("poop",),
+    "💯": ("hundred",),
+    "🖕": ("middle finger",),
+    "🗿": ("moai",),
+    "😁": ("beaming",),
+    "😇": ("halo",),
+    "😈": ("horns",),
+    "😐": ("neutral",),
+    "😘": ("kiss",),
+    "😨": ("fearful",),
+    "😭": ("loudly crying",),
+    "😱": ("screaming",),
+    "😴": ("sleeping",),
+    "🙈": ("see no evil",),
+    "🙉": ("hear no evil",),
+    "🙊": ("speak no evil",),
+    "🤓": ("nerd",),
+    "🤗": ("hugging",),
+    "🤝": ("handshake",),
+    "🤡": ("clown",),
+    "🤨": ("raised eyebrow",),
+    "🤩": ("star struck",),
+    "🤪": ("zany",),
+    "🤬": ("cursing",),
+    "🤭": ("snicker",),
+    "🤮": ("vomiting",),
+    "🤷": ("shrugging",),
+    "🥱": ("yawning",),
+    "🦄": ("unicorn",),
+    "🫡": ("saluting",),
+    "😀": ("grinning",),
+    "😥": ("sad",),
+    "😲": ("astonished",),
+    "😯": ("hushed",),
+    "🥰": ("love",),
+    # No exact service anywhere — words match nothing, so the
+    # pool is empty and the honest no-service answer is used.
+    "😄": ("grin",),
+    "🥳": ("partying",),
+    "🤯": ("mind blown",),
+    "🥺": ("pleading",),
+    "🙌": ("raising hands",),
+    "👏": ("clapping",),
+    "😊": ("smile",),
 }
 
 
@@ -2150,13 +2226,20 @@ def _service_in_reaction_family(service, emoji, family):
     decides. A service matches only when the known emoji in its
     name are exactly one and it is the requested emoji — so
     "Heart ❤️" matches ❤️, "Heart Eyes 😍" does not, "Heart on
-    fire ❤️‍🔥" does not (two emoji), and a multi-emoji mix
-    never does. The same rule covers Facebook ("Facebook Post
-    Reactions [ ❤️ ]" matches ❤️; "[ 👍 ❤️ 😂 ]" does not).
+    fire ❤️‍🔥" does not (one emoji, but a different one), and
+    a multi-emoji mix never does. The same rule covers Facebook
+    ("Facebook Post Reactions [ ❤️ ]" matches ❤️; "[ 👍 ❤️ 😂 ]"
+    does not). The comparison ignores the U+FE0F variation
+    selector, so a bare ⚡ matches the ⚡️ service and a bare ❤
+    matches ❤️ (many-emoji expansion, 14 Nov 2026) — no two
+    different emoji share a form once the selector is stripped.
     Only when the name carries NO known emoji at all does the
     family word decide — as a whole word, and only if no other
-    family's word is in the name. A generic request (emoji None)
-    keeps the old word match: the Positive mix.
+    family's word is in the name. The cross-family guard skips
+    variation-selector twins of the requested emoji, so a
+    "Lightning" name is not blocked by its own twin's word. A
+    generic request (emoji None) keeps the old word match: the
+    Positive mix.
     """
     name = str(service.get("name") or "")
     lname = name.lower()
@@ -2164,7 +2247,9 @@ def _service_in_reaction_family(service, emoji, family):
         return any(w in lname for w in family)
     found = emoji_meanings(name)
     if len(found) == 1:
-        return found[0][0] == emoji
+        return found[0][0].replace("\ufe0f", "") == emoji.replace(
+            "\ufe0f", ""
+        )
     if found:
         # A different (or several) reaction emoji in the name: a
         # lookalike, never this emoji's service.
@@ -2174,7 +2259,9 @@ def _service_in_reaction_family(service, emoji, family):
     ):
         return False
     for other_emoji, other_family in REACTION_FAMILY_WORDS.items():
-        if other_emoji == emoji:
+        if other_emoji.replace("\ufe0f", "") == emoji.replace(
+            "\ufe0f", ""
+        ):
             continue
         if any(
             re.search(r"\b" + re.escape(w) + r"\b", lname)
@@ -3673,6 +3760,77 @@ EMOJI_MEANINGS = {
     "🤔": "thinking",
     "😡": "angry",
     "👎": "thumbs-down",
+    # Many-emoji expansion (owner, 14 Nov 2026 — "not only 🙏"):
+    # every emoji with a dedicated single-emoji reactions service
+    # in the catalogue, plus the ones with no exact service (they
+    # get the honest no-service answer instead of silence).
+    # Variation-selector twins share a meaning (⚡️/⚡); the
+    # heart-on-fire key is the whole ZWJ sequence (see
+    # emoji_meanings), with its no-VS twin beside it.
+    "❤️‍🔥": "heart-on-fire",
+    "❤‍🔥": "heart-on-fire",
+    "☃️": "snowman",
+    "☃": "snowman",
+    "⚡️": "lightning",
+    "⚡": "lightning",
+    "✍️": "writing-hand",
+    "✍": "writing-hand",
+    "🆒": "cool",
+    "🍌": "banana",
+    "🍓": "strawberry",
+    "🍾": "champagne",
+    "🎃": "pumpkin",
+    "🎄": "christmas-tree",
+    "🎅": "santa",
+    "🏆": "trophy",
+    "🐳": "whale",
+    "👌": "ok-hand",
+    "👻": "ghost",
+    "👾": "alien",
+    "💅": "nail-polish",
+    "💊": "pill",
+    "💋": "kiss-mark",
+    "💘": "love-struck",
+    "💩": "poop",
+    "🕊️": "dove",
+    "🕊": "dove",
+    "🖕": "middle-finger",
+    "🗿": "moai",
+    "😁": "beaming",
+    "😇": "halo",
+    "😈": "horns",
+    "😐": "neutral",
+    "😘": "kiss",
+    "😨": "fearful",
+    "😭": "loudly-crying",
+    "😱": "screaming",
+    "😴": "sleeping",
+    "🙈": "see-no-evil",
+    "🙉": "hear-no-evil",
+    "🙊": "speak-no-evil",
+    "🤓": "nerd",
+    "🤗": "hugging",
+    "🤝": "handshake",
+    "🤡": "clown",
+    "🤨": "raised-eyebrow",
+    "🤩": "star-struck",
+    "🤪": "zany",
+    "🤬": "cursing",
+    "🤭": "snicker",
+    "🤮": "vomiting",
+    "🤷": "shrugging",
+    "🥱": "yawning",
+    "🦄": "unicorn",
+    "🫡": "saluting",
+    "😀": "grinning",
+    "😥": "sad",
+    "😲": "astonished",
+    "😯": "hushed",
+    "😄": "grin",
+    "🥳": "partying",
+    "🤯": "mind-blown",
+    "🥺": "pleading",
+    "🙌": "raising-hands",
 }
 # Emoji that pick a Telegram reaction type when the user orders one
 # (round 8.1, 14 Nov 2026; extended 14 Nov 2026 — 👎 😡 😎 🤔 🎉 😍
@@ -3684,9 +3842,32 @@ EMOJI_MEANINGS = {
 # The tuple is platform-general: the same emoji pick a Facebook
 # reaction service when the order is for Facebook (owner,
 # 14 Nov 2026 — the exact-emoji rule covers Facebook too).
+# Many-emoji expansion (owner, 14 Nov 2026 — "not only 🙏"):
+# every emoji with a dedicated single-emoji reactions service in
+# the catalogue (Telegram 65xx/17xx/20xx series, Facebook
+# generics), plus the ones with NO exact service anywhere (😄 🥳
+# 🤯 🥺 🙌 👏 😊) — those reach the honest no-service answer
+# instead of silence. NOT here on purpose: 👀 (Eyes #6568 exists,
+# but 👀 stays the "looking" media emoji), 😤 (frustrated media),
+# 👋 (greeting). ORDER MATTERS for _reaction_emoji_in_hint, which
+# takes the first substring match: the ZWJ heart-on-fire comes
+# before ❤️ and 🔥, and every variation-selector form comes
+# before its bare form — otherwise "❤️‍🔥" would read as ❤️.
 REACTION_EMOJI = (
-    "👍", "❤️", "❤", "🔥", "😂", "🤣", "😆", "😮", "😢",
-    "👎", "😡", "😎", "🤔", "🎉", "😍",
+    "❤️‍🔥", "❤‍🔥",
+    "👍", "❤️", "❤", "🔥",
+    "⚡️", "⚡", "☃️", "☃", "✍️", "✍", "🕊️", "🕊",
+    "🆒", "🍌", "🍓", "🍾", "🎃", "🎄", "🎅", "🎉", "🏆", "🐳",
+    "👌", "👻", "👾", "💅", "💊", "💋", "💔", "💘", "💩", "💯",
+    "🖕", "🗿",
+    "😁", "😂", "😇", "😈", "😍", "😎", "😐", "😘", "😡", "😢",
+    "😨", "😭", "😱", "😴",
+    "🙈", "🙉", "🙊",
+    "🤓", "🤔", "🤗", "🤝", "🤡", "🤣", "🤨", "🤩", "🤪", "🤬",
+    "🤭", "🤮", "🤷", "🥱", "🦄", "🫡",
+    "😆", "😮", "😀", "😥", "😲", "😯", "🥰",
+    "😄", "🥳", "🤯", "🥺", "🙌", "👏", "😊",
+    "👎",
 )
 # Emoji that are just chat (a laugh, a smile) — never an order.
 _CHAT_EMOJI = ("😂", "🤣", "😄", "😊")
@@ -3696,7 +3877,14 @@ def emoji_meanings(text: str):
     """[(emoji, meaning)] for every known emoji in the text, in
     order. A variation selector is kept with its emoji (❤️ stays
     ❤️) and a skin tone is dropped (👍🏻 reads as 👍), so the
-    returned emoji is the one the user sent."""
+    returned emoji is the one the user sent. A zero-width joiner
+    glues the next known emoji onto this one, so "❤️‍🔥" is ONE
+    emoji (heart-on-fire, its own service #6536), not ❤️ plus 🔥
+    (many-emoji expansion, 14 Nov 2026). The meaning comes from
+    the longest known form first ("❤️‍🔥" before "❤"), so a joined
+    emoji reads as itself, not as its first character; a joined
+    sequence with no meaning of its own contributes nothing —
+    its parts are never read as separate emoji."""
     s = text or ""
     out = []
     i = 0
@@ -3709,7 +3897,24 @@ def emoji_meanings(text: str):
             j += 1
         while j < len(s) and "\U0001f3fb" <= s[j] <= "\U0001f3ff":
             j += 1
-        meaning = EMOJI_MEANINGS.get(ch)
+        joined = False
+        while (
+            j < len(s)
+            and s[j] == "\u200d"
+            and j + 1 < len(s)
+            and s[j + 1] in EMOJI_MEANINGS
+        ):
+            joined = True
+            emoji += "\u200d" + s[j + 1]
+            j += 2
+            if j < len(s) and s[j] == "\ufe0f":
+                emoji += "\ufe0f"
+                j += 1
+            while j < len(s) and "\U0001f3fb" <= s[j] <= "\U0001f3ff":
+                j += 1
+        meaning = EMOJI_MEANINGS.get(emoji)
+        if meaning is None and not joined:
+            meaning = EMOJI_MEANINGS.get(ch)
         if meaning is not None and (not out or out[-1][0] != emoji):
             out.append((emoji, meaning))
         i = j
@@ -6725,12 +6930,29 @@ async def conversation_reply(update, text: str, lang: str, voice: bool = False) 
     natural AI answer plus a soft steer back. Real questions and
     order details are never swallowed: ban, price, source, payment,
     usual, order-now, links, quantities, service IDs and deposit
-    fields all fall through to their own handlers. The draft and
-    any Confirm card stay untouched."""
+    fields all fall through to their own handlers. A bare reaction
+    emoji is never swallowed either: it is an order start, not
+    small talk. The draft and any Confirm card stay untouched."""
     user = update.effective_user
     user_id = user.id
     s = " ".join((text or "").strip().lower().split())
     if not s:
+        return False
+    # A bare reaction emoji is an order start, not small talk: it
+    # must reach the bare-emoji branch below, which stores a
+    # reactions draft and asks for the post link. Without this,
+    # 😂/🤣/😄/😊 are swallowed here as free chat (they are also
+    # in _CHAT_EMOJI) and never start a reactions order
+    # (many-emoji expansion, 14 Nov 2026). Only a message that
+    # is exactly one reaction emoji is skipped — "haha 😂" is
+    # still free chat, and 🙏 on its own is still thanks.
+    _only = (text or "").strip().replace("\ufe0f", "")
+    _emoji = reaction_emoji(text)
+    if (
+        _emoji is not None
+        and _emoji != "🙏"
+        and _only == _emoji.replace("\ufe0f", "")
+    ):
         return False
     if (is_ban_question(text) or is_price_question(text)
             or is_source_question(text) or is_paid_phrase(text)
@@ -9148,7 +9370,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Catch-all for a bare emoji the reactions path did not claim
     # (owner, 14 Nov 2026 — "he also misunderstood the emoji"): a
-    # bare 👀, 💔, 🤗 ... is a reaction, not a failed order, and a
+    # bare 👀, 😤 ... is a reaction, not a failed order, and a
     # bare reaction emoji while a Confirm card is pending is an
     # acknowledgement, not a new order. Both get the AI's natural
     # reaction, like a GIF — never "I did not understand". A bare
@@ -10562,8 +10784,8 @@ def media_mood(emoji):
 
 def _bare_non_reaction_emoji(text):
     """The emoji when the message IS just one non-reaction emoji
-    (\"😤\", \"🎉\", \"👋\"), else None. Reaction emoji (👍 ❤️ 🔥
-    🙏 😍 ...) take the reactions path instead, so they never
+    (\"😤\", \"👀\", \"👋\"), else None. Reaction emoji (👍 ❤️ 🔥
+    🙏 😍 🎉 ...) take the reactions path instead, so they never
     reach this branch."""
     s = (text or "").strip()
     if not s or reaction_emoji(s) is not None:
@@ -10580,7 +10802,7 @@ def _is_bare_emoji(text: str) -> bool:
     joiners and keycap marks are stripped first; letters, digits
     and punctuation all fail, so a word or a link never counts.
     Used by the catch-all in handle_order_text: a bare emoji the
-    reactions path does not claim (👀, 💔, 🤗, ...) must never
+    reactions path does not claim (👀, 😤, ...) must never
     fall through to \"I did not understand\" (owner, 14 Nov 2026
     — \"he also misunderstood the emoji\")."""
     s = (text or "").strip()

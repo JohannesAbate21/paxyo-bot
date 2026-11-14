@@ -9703,7 +9703,11 @@ class RealReactionsPaxyo(FakePaxyo):
     #1723 Pray 12.60 — and the two services that must NEVER be
     picked for a reactions order: #216 Bot Start 81.90 (fastest
     of all, 1 minute) and #1758 Auto 10 Future Posts 336.00
-    (also 1 minute)."""
+    (also 1 minute). Many-emoji expansion, 14 Nov 2026: one
+    service per newly-mapped emoji (65xx series 5.46, 17xx/20xx
+    12.60/16.38/42.00, Facebook generics), modelled on the real
+    catalogue rows — #6568 Eyes is deliberately NOT here: 👀
+    stays the "looking" media emoji, not a reaction."""
 
     REACTIONS_SERVICES = [
         {
@@ -9893,6 +9897,581 @@ class RealReactionsPaxyo(FakePaxyo):
             "type": "Default", "rate_etb_per_1000": 336.00,
             "min": 20, "max": 2000000, "average_time": "1 minute",
             "active": True, "provider_service_id": 1758,
+        },
+        # Many-emoji expansion, 14 Nov 2026: one service per
+        # newly-mapped emoji, modelled on the real catalogue rows
+        # (provider rate x420 ETB). 65xx series at 5.46, 17xx/20xx
+        # at 12.60/16.38/42.00. 💩 and 🤣 have several services,
+        # so the pick among them is exercised too.
+        {
+            "service": 6542,
+            "name": "Telegram Reactions + Free Views | Thumbs down 👎 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6542,
+        },
+        {
+            "service": 1727,
+            "name": "Telegram Reactions + Free Views | Dislike 👎 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 1727,
+        },
+        {
+            "service": 6543,
+            "name": "Telegram Reactions + Free Views | Poop 💩 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "5 minutes",
+            "active": True, "provider_service_id": 6543,
+        },
+        {
+            "service": 1730,
+            "name": "Telegram Reactions + Free Views | Pile of Poo 💩 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 1000000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 1730,
+        },
+        {
+            "service": 2030,
+            "name": "Telegram Reactions + Free Views | Pile of Poo 💩 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 16.38,
+            "min": 10, "max": 100000, "average_time": "20 minutes",
+            "active": True, "provider_service_id": 2030,
+        },
+        {
+            "service": 6544,
+            "name": "Telegram Reactions + Free Views | Lightning ⚡️ | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6544,
+        },
+        {
+            "service": 6545,
+            "name": "Telegram Reactions + Free Views | Snowman ☃️ | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6545,
+        },
+        {
+            "service": 6546,
+            "name": "Telegram Reactions + Free Views | Writing hand ✍️ | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6546,
+        },
+        {
+            "service": 6547,
+            "name": "Telegram Reactions + Free Views | Speak no evil 🙊 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6547,
+        },
+        {
+            "service": 6548,
+            "name": "Telegram Reactions + Free Views | Pill 💊 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6548,
+        },
+        {
+            "service": 6549,
+            "name": "Telegram Reactions + Free Views | Cool 😎 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6549,
+        },
+        {
+            "service": 6550,
+            "name": "Telegram Reactions + Free Views | Kiss 😘 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6550,
+        },
+        {
+            "service": 6551,
+            "name": "Telegram Reactions + Free Views | Unicorn 🦄 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6551,
+        },
+        {
+            "service": 6552,
+            "name": "Telegram Reactions + Free Views | Hear no evil 🙉 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6552,
+        },
+        {
+            "service": 6553,
+            "name": "Telegram Reactions + Free Views | Cool 🆒 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6553,
+        },
+        {
+            "service": 6554,
+            "name": "Telegram Reactions + Free Views | Alien 👾 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6554,
+        },
+        {
+            "service": 6555,
+            "name": "Telegram Reactions + Free Views | Moai 🗿 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6555,
+        },
+        {
+            "service": 6556,
+            "name": "Telegram Reactions + Free Views | Zany 🤪 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6556,
+        },
+        {
+            "service": 6557,
+            "name": "Telegram Reactions + Free Views | Nail Polish 💅 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6557,
+        },
+        {
+            "service": 6558,
+            "name": "Telegram Reactions + Free Views | Christmas Tree 🎄 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6558,
+        },
+        {
+            "service": 6559,
+            "name": "Telegram Reactions + Free Views | Santa 🎅 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6559,
+        },
+        {
+            "service": 6560,
+            "name": "Telegram Reactions + Free Views | Hugging 🤗 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6560,
+        },
+        {
+            "service": 6561,
+            "name": "Telegram Reactions + Free Views | Handshake 🤝 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6561,
+        },
+        {
+            "service": 6562,
+            "name": "Telegram Reactions + Free Views | Fearful 😨 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6562,
+        },
+        {
+            "service": 6563,
+            "name": "Telegram Reactions + Free Views | Shrugging 🤷 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6563,
+        },
+        {
+            "service": 6564,
+            "name": "Telegram Reactions + Free Views | Halo 😇 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6564,
+        },
+        {
+            "service": 6565,
+            "name": "Telegram Reactions + Free Views | Saluting 🫡 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6565,
+        },
+        {
+            "service": 6566,
+            "name": "Telegram Reactions + Free Views | See-No-Evil 🙈 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6566,
+        },
+        {
+            "service": 6567,
+            "name": "Telegram Reactions + Free Views | Jack-O'-Lantern 🎃 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6567,
+        },
+        {
+            "service": 6569,
+            "name": "Telegram Reactions + Free Views | Ghost 👻 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6569,
+        },
+        {
+            "service": 6570,
+            "name": "Telegram Reactions + Free Views | Nerd 🤓 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6570,
+        },
+        {
+            "service": 6571,
+            "name": "Telegram Reactions + Free Views | Loudly Crying 😭 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6571,
+        },
+        {
+            "service": 6572,
+            "name": "Telegram Reactions + Free Views | Sleeping 😴 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6572,
+        },
+        {
+            "service": 6573,
+            "name": "Telegram Reactions + Free Views | Angry 😡 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6573,
+        },
+        {
+            "service": 6574,
+            "name": "Telegram Reactions + Free Views | Horns 😈 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6574,
+        },
+        {
+            "service": 6575,
+            "name": "Telegram Reactions + Free Views | Middle Finger 🖕 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6575,
+        },
+        {
+            "service": 6576,
+            "name": "Telegram Reactions + Free Views | Kiss Mark 💋 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6576,
+        },
+        {
+            "service": 6577,
+            "name": "Telegram Reactions + Free Views | Bottle 🍾 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6577,
+        },
+        {
+            "service": 6578,
+            "name": "Telegram Reactions + Free Views | Strawberry 🍓 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6578,
+        },
+        {
+            "service": 6579,
+            "name": "Telegram Reactions + Free Views | Tears of Joy 😂 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6579,
+        },
+        {
+            "service": 6580,
+            "name": "Telegram Reactions + Free Views | Neutral 😐 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6580,
+        },
+        {
+            "service": 6581,
+            "name": "Telegram Reactions + Free Views | Raised Eyebrow 🤨 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6581,
+        },
+        {
+            "service": 6582,
+            "name": "Telegram Reactions + Free Views | Trophy 🏆 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6582,
+        },
+        {
+            "service": 6583,
+            "name": "Telegram Reactions + Free Views | Banana 🍌 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6583,
+        },
+        {
+            "service": 6584,
+            "name": "Telegram Reactions + Free Views | Yawning 🥱 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6584,
+        },
+        {
+            "service": 6585,
+            "name": "Telegram Reactions + Free Views | Rolling Laughing 🤣 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "5 minutes",
+            "active": True, "provider_service_id": 6585,
+        },
+        {
+            "service": 6538,
+            "name": "Telegram Reactions + Free Views | Love struck 💘 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6538,
+        },
+        {
+            "service": 1753,
+            "name": "Telegram Reactions + Free Views | One Hundred 💯 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 42.00,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1753,
+        },
+        {
+            "service": 1751,
+            "name": "Telegram Reactions + Free Views | Whale 🐳 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 42.00,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1751,
+        },
+        {
+            "service": 1755,
+            "name": "Telegram Reactions + Free Views | Bird 🕊 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 42.00,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1755,
+        },
+        {
+            "service": 1756,
+            "name": "Telegram Reactions + Free Views | Snicker 🤭 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 42.00,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1756,
+        },
+        {
+            "service": 1757,
+            "name": "Telegram Reactions + Free Views | Clown 🤡 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 42.00,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1757,
+        },
+        {
+            "service": 1724,
+            "name": "Telegram Reactions + Free Views | Ok Hand 👌 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1724,
+        },
+        {
+            "service": 1720,
+            "name": "Telegram Reactions + Free Views | Star Struck 🤩 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1720,
+        },
+        {
+            "service": 1721,
+            "name": "Telegram Reactions + Free Views | Celebration 🎉 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1721,
+        },
+        {
+            "service": 1722,
+            "name": "Telegram Reactions + Free Views | Beaming 😁 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1722,
+        },
+        {
+            "service": 1728,
+            "name": "Telegram Reactions + Free Views | Screaming 😱 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1728,
+        },
+        {
+            "service": 1729,
+            "name": "Telegram Reactions + Free Views | Crying 😢 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1729,
+        },
+        {
+            "service": 1731,
+            "name": "Telegram Reactions + Free Views | Vomiting 🤮 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1731,
+        },
+        {
+            "service": 1732,
+            "name": "Telegram Reactions + Free Views | Angry 🤬 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1732,
+        },
+        {
+            "service": 1733,
+            "name": "Telegram Reactions + Free Views | Thinking 🤔 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 1733,
+        },
+        {
+            "service": 1726,
+            "name": "Telegram Reactions + Free Views | Laugh 🤣 | [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 1726,
+        },
+        # Facebook generics (many-emoji expansion, 14 Nov 2026),
+        # modelled on the real catalogue rows.
+        {
+            "service": 4410,
+            "name": "Facebook Post Reactions [ 🥰 ] [ Max 10K ] | Hidden Accounts | Non Drop | 30 Days | Instant Start | Day 10K",
+            "category": "Facebook Post Reaction [ Hidden Accounts ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 116.34,
+            "min": 50, "max": 10000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 4410,
+        },
+        {
+            "service": 4412,
+            "name": "Facebook Post Reactions [ 😮 ] [ Max 10K ] | Hidden Accounts | Non Drop | 30 Days | Instant Start | Day 10K",
+            "category": "Facebook Post Reaction [ Hidden Accounts ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 116.34,
+            "min": 50, "max": 10000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 4412,
+        },
+        {
+            "service": 5106,
+            "name": "Facebook Post Reactions [ 🤗 ] [ Max 100K ] | HQ Accounts | No Refill | Instant Start | Day 50K",
+            "category": "Facebook Post Reactions [ Best Prices ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 29.40,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 5106,
+        },
+        {
+            "service": 5107,
+            "name": "Facebook Post Reactions [ 😲 ] [ Max 100K ] | HQ Accounts | No Refill | Instant Start | Day 50K",
+            "category": "Facebook Post Reactions [ Best Prices ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 29.40,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 5107,
+        },
+        {
+            "service": 5109,
+            "name": "Facebook Post Reactions [ 😥 ] [ Max 100K ] | HQ Accounts | No Refill | Instant Start | Day 50K",
+            "category": "Facebook Post Reactions [ Best Prices ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 29.40,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 5109,
+        },
+        {
+            "service": 4574,
+            "name": "Facebook Post Reaction [ 😭 ] [ Max 1M ] | HQ Accounts | Cancel Enable | No Refill | Instant Start | Day 50K",
+            "category": "Facebook Post Reaction [ HQ Accounts ]",
+            "type": "Default", "rate_etb_per_1000": 38.64,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 4574,
+        },
+        {
+            "service": 7264,
+            "name": "Facebook Post Reaction [ 🤬 ] [ Max 500K ] | LQ Accounts | No Refill | Start: 0-1 Hour | Day 50K",
+            "category": "Facebook Post Reaction [ LQ Accounts ]",
+            "type": "Default", "rate_etb_per_1000": 51.07,
+            "min": 10, "max": 500000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 7264,
+        },
+        {
+            "service": 4421,
+            "name": "Facebook Post Reactions [ 😯 ] [ Max 300K ] | HQ Accounts | No Refill | Instant Start | Day 50K",
+            "category": "Facebook Post Reaction [ HQ Accounts ]",
+            "type": "Default", "rate_etb_per_1000": 32.34,
+            "min": 10, "max": 300000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 4421,
+        },
+        {
+            "service": 3701,
+            "name": "Facebook Post Reaction [Haha 😀] [Taiwan] [Max 350] [Real] [Non Drop] [Start: 0-1 Hour]",
+            "category": "Facebook Post Reaction [ Taiwan ]",
+            "type": "Default", "rate_etb_per_1000": 4158.00,
+            "min": 10, "max": 350, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 3701,
         },
     ]
 
@@ -13287,9 +13866,13 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
             self.assertFalse(bot._is_bare_emoji(text), text)
 
     async def test_bare_unknown_emoji_gets_a_reply_not_not_understood(self):
-        # 👀, 💔 and 🤗 are not reaction emoji and carry no media
-        # mood — before this round they fell through to "I did not
-        # understand". Now they get a sensible emoji-aware reply.
+        # 👀 is not a reaction emoji and carries no media mood —
+        # before this round it fell through to "I did not
+        # understand". 💔 and 🤗 became reaction emoji in the
+        # many-emoji expansion (14 Nov 2026), so they now get the
+        # reactions acknowledgement and draft instead — either
+        # way, all three get a sensible emoji-aware reply, never
+        # "I did not understand".
         for emoji in ("👀", "💔", "🤗"):
             with self.subTest(emoji=emoji):
                 msg = await self._turns([(emoji, intent_of("unclear"))])
@@ -14394,6 +14977,373 @@ class TestBareLinkReactionAndCancelFix(_LanguageRoundBase):
              intent_of("cancel")),
         ])
         self.assertIn("can't be canceled", msg.text_sent[0])
+
+
+class TestManyEmojiReactions(_LanguageRoundBase):
+    """Many-emoji expansion (owner, 14 Nov 2026 — "not only 🙏"):
+    the bare-reaction order flow recognises every emoji with a
+    dedicated single-emoji reactions service in the catalogue
+    (Telegram 65xx/17xx/20xx series, Facebook generics), plus the
+    emojis with no exact service anywhere, which get the honest
+    no-service answer and the mix offer instead of silence. 👀
+    stays the "looking" media emoji and 😤 stays frustrated
+    media — neither starts a reactions order. The pick itself is
+    unchanged (cheapest-first within one exact emoji, the owner
+    decision of 14 Nov 2026 — in this fixture cheapest is also
+    fastest, so these tests cannot tell them apart)."""
+
+    # (emoji, service) for every newly-mapped Telegram emoji: the
+    # service a bare "10 <emoji>" + link must build. 🕊 is written
+    # with its VS16 (🕊️) — that is the form bare_reaction_order
+    # returns for a bare 🕊 too.
+    TG_EMOJI_SERVICES = [
+        ("👎", 6542), ("💩", 6543), ("⚡️", 6544), ("☃️", 6545),
+        ("✍️", 6546), ("🙊", 6547), ("💊", 6548), ("😎", 6549),
+        ("😘", 6550), ("🦄", 6551), ("🙉", 6552), ("🆒", 6553),
+        ("👾", 6554), ("🗿", 6555), ("🤪", 6556), ("💅", 6557),
+        ("🎄", 6558), ("🎅", 6559), ("🤗", 6560), ("🤝", 6561),
+        ("😨", 6562), ("🤷", 6563), ("😇", 6564), ("🫡", 6565),
+        ("🙈", 6566), ("🎃", 6567), ("👻", 6569), ("🤓", 6570),
+        ("😭", 6571), ("😴", 6572), ("😡", 6573), ("😈", 6574),
+        ("🖕", 6575), ("💋", 6576), ("🍾", 6577), ("🍓", 6578),
+        ("😂", 6579), ("😐", 6580), ("🤨", 6581), ("🏆", 6582),
+        ("🍌", 6583), ("🥱", 6584), ("🤣", 6585), ("💘", 6538),
+        ("💯", 1753), ("🐳", 1751), ("🕊️", 1755), ("🤭", 1756),
+        ("🤡", 1757), ("👌", 1724), ("🤩", 1720), ("🎉", 1721),
+        ("😁", 1722), ("😱", 1728), ("😢", 1729), ("🤮", 1731),
+        ("🤬", 1732), ("🤔", 1733), ("❤️‍🔥", 6536),
+    ]
+
+    # (emoji, service) for the Facebook picks per emoji.
+    FB_EMOJI_SERVICES = [
+        ("🥰", 4410), ("😮", 4412), ("🤗", 5106), ("😲", 5107),
+        ("😥", 5109), ("😭", 4574), ("🤬", 7264), ("😯", 4421),
+        ("😀", 3701),
+    ]
+
+    # Emojis with no exact service anywhere (Telegram or
+    # Facebook): the honest answer, never a silent mix sale.
+    NO_SERVICE_EMOJIS = ("😄", "🥳", "🤯", "🥺", "🙌", "👏", "😊")
+
+    async def _turns(self, turns, paxyo=None, ai_reply=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        ai = mock.AsyncMock(
+            return_value=ai_reply if ai_reply is not None else ""
+        )
+        with mock.patch("bot.paxyo", paxyo or RealReactionsPaxyo()), \
+                mock.patch("bot.speak_reply"), \
+                mock.patch("bot.ai_generate", new=ai):
+            for text, intent in turns:
+                with mock.patch(
+                    "bot.extract_intent",
+                    new=mock.AsyncMock(return_value=intent),
+                ):
+                    await bot.handle_order_text(update, None, text)
+        return msg
+
+    def _reset_state(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+
+    def _assert_card(self, msg, service_id, quantity, link=None):
+        self.assertIn("Please confirm:", msg.text_sent[-1])
+        self.assertIn(f"(#{service_id})", msg.text_sent[-1])
+        self.assertIn(f"🔢 {quantity}", msg.text_sent[-1])
+        if link is not None:
+            self.assertIn(link, msg.text_sent[-1])
+
+    # (1) parsing ----------------------------------------------------
+
+    def test_bare_reaction_order_parses_new_emojis(self):
+        for emoji, _service_id in self.TG_EMOJI_SERVICES:
+            with self.subTest(emoji=emoji):
+                self.assertEqual(
+                    bot.bare_reaction_order(f"10 {emoji}"),
+                    (emoji, 10),
+                )
+                self.assertEqual(
+                    bot.bare_reaction_order(f"{emoji} 10"),
+                    (emoji, 10),
+                )
+                # A bare emoji alone is NOT an order start — it
+                # takes the bare-emoji branch (acknowledgement +
+                # draft), like 👍/❤️ before it.
+                self.assertIsNone(bot.bare_reaction_order(emoji))
+        # Non-reaction emoji never parse as an order start.
+        self.assertIsNone(bot.bare_reaction_order("👀"))
+        self.assertIsNone(bot.bare_reaction_order("😤"))
+        self.assertIsNone(bot.bare_reaction_order("10 👀"))
+        self.assertIsNone(bot.bare_reaction_order("10 😤"))
+
+    def test_variation_selector_forms_match(self):
+        # A bare ❤ (no VS16) is the same heart as ❤️, a bare ⚡
+        # the same lightning as ⚡️, a bare 🕊 the same dove as 🕊️
+        # — the catalogue names carry the VS form, the user may
+        # send either, and the pick is the same service.
+        self.assertEqual(bot.bare_reaction_order("10 ❤"), ("❤️", 10))
+        self.assertEqual(bot.bare_reaction_order("10 ⚡"), ("⚡️", 10))
+        self.assertEqual(bot.bare_reaction_order("10 🕊"), ("🕊️", 10))
+        self.assertIsNone(bot.bare_reaction_order("❤"))
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="❤",
+        )
+        self.assertEqual(picks[0]["service"], 6537)
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="⚡",
+        )
+        self.assertEqual(picks[0]["service"], 6544)
+
+    def test_heart_on_fire_zwj_is_one_emoji(self):
+        # "❤️‍🔥" is ONE emoji (heart-on-fire, its own service
+        # #6536), not ❤️ plus 🔥 — emoji_meanings joins the ZWJ
+        # sequence, so it can be ordered and is never picked for
+        # a ❤️ or 🔥 order.
+        self.assertEqual(
+            bot.emoji_meanings("❤️‍🔥"),
+            [("❤️‍🔥", "heart-on-fire")],
+        )
+        self.assertEqual(
+            bot.emoji_meanings("❤️"), [("❤️", "heart")]
+        )
+        self.assertEqual(bot.reaction_emoji("10 ❤️‍🔥"), "❤️‍🔥")
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="❤️‍🔥",
+        )
+        self.assertEqual(picks[0]["service"], 6536)
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="❤️",
+        )
+        self.assertNotIn(6536, {s["service"] for s in picks})
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="🔥",
+        )
+        self.assertNotIn(6536, {s["service"] for s in picks})
+
+    def test_multi_service_emoji_picks_deterministically(self):
+        # 💩, 🤣 and 👎 each have several exact services; the pick
+        # among them is the cheapest (owner decision, 14 Nov
+        # 2026) — and the other exact services stay in the pool.
+        for emoji, first, others in (
+            ("💩", 6543, (1730, 2030)),
+            ("🤣", 6585, (1726,)),
+            ("👎", 6542, (1727,)),
+        ):
+            with self.subTest(emoji=emoji):
+                picks = bot.pick_services(
+                    RealReactionsPaxyo.REACTIONS_SERVICES,
+                    platform="telegram",
+                    service_hint="telegram reactions",
+                    reaction_emoji=emoji,
+                )
+                self.assertEqual(picks[0]["service"], first)
+                picked_ids = {s["service"] for s in picks}
+                for other in others:
+                    self.assertIn(other, picked_ids)
+
+    def test_facebook_picks_for_new_emojis(self):
+        for emoji, service_id in self.FB_EMOJI_SERVICES:
+            with self.subTest(emoji=emoji):
+                picks = bot.pick_services(
+                    RealReactionsPaxyo.REACTIONS_SERVICES,
+                    platform="facebook",
+                    service_hint="facebook reactions",
+                    reaction_emoji=emoji,
+                )
+                self.assertEqual(picks[0]["service"], service_id)
+                for pick in picks:
+                    self.assertIn("facebook", pick["name"].lower())
+
+    # (2) end to end: bare "10 <emoji>" + link -> exact card ------
+
+    async def test_bare_quantity_emoji_then_link_builds_exact_card(self):
+        link = "https://t.me/godofpanelcom/768"
+        for emoji, service_id in self.TG_EMOJI_SERVICES:
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([
+                    (f"10 {emoji}", intent_of("unclear")),
+                    (link, intent_of(
+                        "order", platform="telegram",
+                        service_hint="telegram views", link=link,
+                    )),
+                ])
+                self.assertEqual(len(msg.text_sent), 2)
+                self.assertNotIn("How many?", msg.text_sent[1])
+                self._assert_card(msg, service_id, 10, link)
+                pending = list(bot.PENDING.values())[0]
+                self.assertEqual(
+                    pending["service"]["service"], service_id
+                )
+
+    async def test_bare_link_guard_holds_for_new_emojis(self):
+        # The fix round's bare-link guard (the AI's guessed
+        # "views" hint must never override the stored reactions
+        # draft) holds for the new emojis too, not just 🙏/❤️/🔥/👍.
+        link = "https://t.me/godofpanelcom/768"
+        for emoji, service_id in (
+            ("💔", 6539), ("🤗", 6560), ("😭", 6571),
+            ("🎉", 1721), ("😘", 6550), ("❤️‍🔥", 6536),
+        ):
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([
+                    (f"10 {emoji}", intent_of("unclear")),
+                    (link, intent_of(
+                        "order", platform="telegram",
+                        service_hint="telegram views", link=link,
+                    )),
+                ])
+                self.assertEqual(len(msg.text_sent), 2)
+                self.assertNotIn("How many?", msg.text_sent[1])
+                self._assert_card(msg, service_id, 10, link)
+
+    async def test_no_exact_service_gets_honest_answer_and_mix_offer(self):
+        link = "https://t.me/godofpanelcom/768"
+        for emoji in self.NO_SERVICE_EMOJIS:
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([
+                    (f"10 {emoji}", intent_of("unclear")),
+                    (link, intent_of(
+                        "order", platform="telegram",
+                        service_hint="telegram views", link=link,
+                    )),
+                ])
+                self.assertEqual(len(msg.text_sent), 2)
+                self.assertIn(
+                    f"don't have a {emoji}-only service",
+                    msg.text_sent[1],
+                )
+                self.assertIn("Positive mix", msg.text_sent[1])
+                self.assertEqual(bot.PENDING, {})
+
+    async def test_telegram_honest_answer_for_facebook_only_emoji(self):
+        # 🥰 has a Facebook service (#4410) but no Telegram one:
+        # a Telegram order still gets the honest answer, never a
+        # Facebook service and never a silent mix.
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 🥰", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("don't have a 🥰-only service", msg.text_sent[1])
+        self.assertEqual(bot.PENDING, {})
+
+    # (3) bare emoji alone ------------------------------------------
+
+    async def test_bare_new_emoji_alone_gets_ack_and_draft(self):
+        for emoji, meaning in (
+            ("😭", "loudly-crying"),
+            ("❤️‍🔥", "heart-on-fire"),
+            ("⚡️", "lightning"),
+            ("🤗", "hugging"),
+        ):
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([(emoji, intent_of("unclear"))])
+                self.assertEqual(len(msg.text_sent), 1)
+                self.assertIn(
+                    f"Got it — {emoji} {meaning} reactions!",
+                    msg.text_sent[0],
+                )
+                self.assertEqual(
+                    bot.PARTIAL[1].get("service_hint"), "reactions"
+                )
+                self.assertEqual(
+                    bot.PARTIAL[1].get("reaction_emoji"), emoji
+                )
+
+    async def test_bare_chatty_emoji_reaches_reactions_branch(self):
+        # 😂/🤣/😄/😊 are also in _CHAT_EMOJI, so conversation_reply
+        # used to swallow a bare one as free chat and it never
+        # started a reactions order. A bare one now reaches the
+        # reactions branch instead — "haha 😂" is still free chat.
+        for emoji, meaning in (("😂", "laugh"), ("😄", "grin")):
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([(emoji, intent_of("unclear"))])
+                self.assertEqual(len(msg.text_sent), 1)
+                self.assertIn(
+                    f"Got it — {emoji} {meaning} reactions!",
+                    msg.text_sent[0],
+                )
+                self.assertEqual(
+                    bot.PARTIAL[1].get("reaction_emoji"), emoji
+                )
+
+    async def test_bare_non_reaction_emoji_still_gets_media_reply(self):
+        # 👀 ("looking") and 😤 (frustrated) are NOT reaction
+        # emoji: a bare one still gets the situation-aware media
+        # reply — never "I did not understand", never a draft,
+        # never a card.
+        for emoji in ("👀", "😤"):
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([(emoji, intent_of("unclear"))])
+                self.assertEqual(len(msg.text_sent), 1)
+                self.assertNotIn(
+                    "did not understand", msg.text_sent[0]
+                )
+                self.assertNotIn("reactions!", msg.text_sent[0])
+                self.assertEqual(bot.PARTIAL, {})
+                self.assertEqual(bot.PENDING, {})
+
+    async def test_bare_new_emoji_with_pending_card_does_not_touch_it(self):
+        # A bare 😭 while a Confirm card for another service is
+        # pending is an acknowledgement, not a new order — the
+        # card is never touched.
+        bot.PENDING["abc123"] = make_pending()
+        msg = await self._turns([("😭", intent_of("unclear"))])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertNotIn("did not understand", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertEqual(
+            bot.PENDING["abc123"]["service"]["service"], 1001
+        )
+
+    # (4) correction -------------------------------------------------
+
+    async def test_correction_to_new_emoji_re_picks_new_card(self):
+        # ❤️ -> 😭: the correction re-picks the new emoji's exact
+        # service, the old card is deleted, one card only.
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 ❤️", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+            ("I want only 😭 reaction",
+             intent_of("change_order", quantity=10)),
+        ])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 6571)
+        self.assertIn("Crying", msg.text_sent[2])
+        self.assertNotIn("Heart", msg.text_sent[2])
+        # The link ask is message 1, the ❤️ card message 2, so
+        # the deleted card is (1, 2) and the new card is 3.
+        self.assertEqual(msg.get_bot().deleted, [(1, 2)])
+        self.assertEqual(pending.get("message_id"), 3)
 
 
 if __name__ == "__main__":
