@@ -7668,6 +7668,243 @@ class TestGlmProvider(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("key=", joined)
 
 
+class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
+    """OpenRouter is the second-to-last fallback (owner, 14 Nov
+    2026): it routes to a currently-free model (default model
+    "openrouter/free") via an OpenAI-compatible API. Free :free
+    models cost $0/token: 50 requests/day with no credits bought,
+    1,000/day after a one-time $10 credit purchase. It only runs
+    after Gemini failed — never on healthy days — and GLM stays
+    the last resort. The provider mirrors GLM exactly."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://openrouter.ai/api/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_openrouter_default_model_is_openrouter_free(self):
+        self.assertEqual(bot.OPENROUTER_MODEL, "openrouter/free")
+
+    async def test_openrouter_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"):
+            self.assertEqual(await bot.openrouter_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith("https://openrouter.ai/api/v1")
+        )
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer sk-or-test"
+        )
+        self.assertEqual(post["json"]["model"], "openrouter/free")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_openrouter_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"):
+            await bot.openrouter_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_openrouter_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.openrouter_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_openrouter_generate_model_env_honoured(self):
+        # A pinned model (OPENROUTER_MODEL) replaces the router
+        # default "openrouter/free" in the posted request.
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(
+                 bot, "OPENROUTER_MODEL",
+                 "nvidia/nemotron-3-super-120b-a12b:free",
+             ):
+            await bot.openrouter_generate("hi")
+        self.assertEqual(
+            client.posts[0]["json"]["model"],
+            "nvidia/nemotron-3-super-120b-a12b:free",
+        )
+
+    async def test_ai_generate_calls_openrouter_when_gemini_fails(self):
+        # Every provider before OpenRouter fails: OpenRouter
+        # answers, GLM is never reached, each provider tried once.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ) as qwen, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("o")),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ) as gem, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "or")
+        for fn in (deepseek, qwen, groq, gen, gem, router):
+            fn.assert_awaited_once()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_skips_openrouter_without_key(self):
+        # No OPENROUTER_API_KEY: the chain jumps straight from
+        # Gemini to GLM, and openrouter_generate is never called.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", ""), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
+             ), \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("o")),
+             ), \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("or")),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "glm")
+        router.assert_not_awaited()
+        glm.assert_awaited_once()
+
+    async def test_ai_generate_falls_back_to_glm_when_openrouter_raises(self):
+        # OpenRouter fails after Gemini: GLM answers as last resort.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
+             ), \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("o")),
+             ), \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("or")),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "glm")
+        router.assert_awaited_once()
+        glm.assert_awaited_once()
+
+    async def test_ai_generate_openrouter_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", ""), \
+             mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            self.assertEqual(await bot.ai_generate("hi"), "glm")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "OpenRouter generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("sk-or-test", joined)
+        self.assertNotIn("key=", joined)
+
+
 class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
     """The Amharic translate-bridge (owner, 13 Nov 2026): a message
     in Ethiopic fidels is translated to English by Gemini first, the

@@ -218,7 +218,12 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (paused services:
 - DeepSeek is the primary AI (model deepseek-chat, V4.1 Flash) since
   the evening of 13 Nov 2026, Qwen-Turbo second (model qwen-turbo,
   $0.05/$0.20 per 1M tokens, ~3x cheaper than DeepSeek), Groq third,
-  OpenAI fourth, Gemini fifth, GLM last resort (model glm-4.7-flash,
+  OpenAI fourth, Gemini fifth, OpenRouter sixth (model
+  openrouter/free — the router picks a currently-free model
+  automatically; free :free models cost $0/token, 50 requests/day,
+  1,000/day after a one-time $10 credit purchase, owner's choice
+  14 Nov 2026 — it only runs after Gemini failed, so it never burns
+  its daily cap), GLM last resort (model glm-4.7-flash,
   FREE but rate-limited ~1 request/second and slow — only when every
   other provider failed). Switching providers loses no data: all bot
   data lives in Paxyo's database and this repo, not in the AI
@@ -241,7 +246,7 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (paused services:
   1M tokens, no monthly fee, first bill at $1 usage. (Note: on 13 Nov
   2026 Groq had temporarily disabled Developer upgrades — retry later.)
 - If DeepSeek fails, the bot falls back to Qwen, then Groq, then
-  OpenAI, then Gemini, then GLM, then to local rules. It gets less
+  OpenAI, then Gemini, then OpenRouter, then GLM, then to local rules. It gets less
   clever at understanding messy language, but it does NOT lose any
   lesson.
 
