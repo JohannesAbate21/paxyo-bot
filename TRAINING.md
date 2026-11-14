@@ -201,7 +201,15 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   "TikTok doesn't use fake followers, likes or views to ban or
   strike an account"; 17:07 he widened it to all platforms. The
   17:00-17:02 live retest's ban PASS was for the YES wording
-  and is outdated.)
+  and is outdated.) The detector reads the question in the user's
+  own language too — Ge'ez ban words (ታገድ/ታገደ/ታገዳ/ታግዷ/ታግደ/
+  እገዳ, and ባን as a whole word) and Oromo (cufamuu, dhoowwaa) —
+  because the translate bridge can be down (Gemini's free tier
+  is 20/day) and the raw Amharic question then reaches the
+  detector unchanged (live bug, 14 Nov 2026: it got a free AI
+  answer saying "no one can guarantee zero risk" instead of the
+  NO). The stems are matched exactly — "ታገ" alone would also
+  catch ታገሠ (patience).
 - CONTACT: when a customer asks for support, to talk to a human, or
   to contact the owner/admin, answer: contact William at t.me/paxyo.
   Same one line if they ask again. (Owner, 14 Nov 2026 — this
@@ -352,13 +360,19 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   GIF/sticker is the user's message. CONTEXT-AWARE MEDIA REPLIES
   (owner, 14 Nov 2026): the bot responds like a person to emoji,
   GIFs and stickers — differently each time, understanding the
-  situation from context and memory. A delayed/pending order plus
+  situation from context and memory. A delayed order plus
   a frustrated GIF/sticker/emoji (😤 😡 🤬 😩) gets empathy about
   the delay — the frustration acknowledged, sorry it is delayed,
-  the REAL order status and average time, never "soon". An order
-  just completed plus a happy GIF/emoji (🎉 😍 ❤️) gets a short
-  celebration. A greeting/thanks emoji (👋 🙏) gets a warm, short,
-  natural reply. Replies ROTATE (2–3 variants per mood and
+  the REAL order status and average time, never "soon". DELAYED
+  means the order's elapsed time is past its average time, or it
+  failed — a merely in-progress order is ON TRACK, and a GIF then
+  gets a warm reply, never a delay apology (live bug, 14 Nov 2026:
+  a happy GIF while order #1837 was merely in progress got the
+  delay apology). An order just completed plus a happy GIF/emoji
+  (🎉 😍 ❤️) gets a short celebration. A wave (👋 🙋 ✋) gets a
+  greeting ("Hello! 👋 ..."), never "You're welcome!" — a wave is
+  not thanks (live bug, 14 Nov 2026: a 👋 sticker got "You're
+  welcome!"). 🙏 is still thanks. Replies ROTATE (2–3 variants per mood and
   situation) so the same user never gets the same canned line
   twice, match the user's language, and stay short and human. A
   GIF carries no emoji, so its mood comes from the situation —
@@ -375,13 +389,34 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   🔥 = fire reaction, 😂 = laugh, 😮 = wow, 😢 = sad, 👀 = views.
   "I want 👍 this reaction" orders the 👍 Telegram reaction service;
   a bare "👍" in an order context means the same reaction. 🙏 is
-  thanks, never a reaction type.
+  thanks in words ("thank you 🙏"), but a bare 🙏 — alone, or with
+  only a quantity ("10 🙏") — is the Pray reaction order.
 - A bare emoji is ACKNOWLEDGED as the reaction choice first ("Got
   it — 👍 reactions..."), then the link is asked for — never the
   stock link request on its own. With no order context it still
   gets a natural reply naming the reaction. A bare emoji while
   another order is being built is just an acknowledgement — it
   never changes that order.
+- BARE QUANTITY + EMOJI STARTS AN ORDER (owner, 14 Nov 2026 —
+  live retest: "10 🙏" got "I did not understand"): a message
+  that is only a quantity and a reaction emoji ("10 🙏", "🙏 10")
+  or a bare 🙏 starts a Telegram reactions order — the draft
+  carries platform Telegram, the reactions hint and the emoji,
+  and the bot asks "Please send the link of the Telegram post."
+  The bare link sent next completes the draft (platform, kind
+  and emoji already known) and shows the Confirm card — never
+  "Which platform?" when the draft already says Telegram
+  reactions. While a Confirm card is pending, the same message is
+  left to the normal flow (emoji correction / quantity change).
+- NO BARE EMOJI IS EVER "NOT UNDERSTOOD" (owner, 14 Nov 2026 —
+  "he also misunderstood the emoji"): any message that is only
+  emoji gets an emoji-aware reply. A bare 👀, 💔, 🤗 ... (not a
+  reaction emoji, no media mood) is answered from the user's
+  situation, like a GIF. A bare reaction emoji while a Confirm
+  card for another service is pending is acknowledged the same
+  way — the card is never touched. A bare reaction emoji while a
+  non-reactions DRAFT is being built keeps the old behaviour
+  (the flow re-asks for the missing piece).
 - TELEGRAM REACTIONS ARE MATCHED BY EMOJI, not guessed: 👍 buys a
   Thumbs up / Like service, ❤️ a Heart service, 🔥 a Fire service,
   no specific emoji buys the Positive mix — fastest first. Never

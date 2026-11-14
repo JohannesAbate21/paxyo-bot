@@ -46,6 +46,7 @@ sleep after ~15 minutes idle and wake in ~30-50s on the first message.
 import asyncio
 import base64
 import contextvars
+from datetime import datetime, timezone
 import io
 import json
 import logging
@@ -3723,6 +3724,65 @@ def reaction_emoji(text: str):
     return None
 
 
+# Reaction emoji that may start a bare order ("10 🙏", "🙏 10",
+# "10 👍"): REACTION_EMOJI plus 🙏, which is a reaction choice
+# only in a reactions context — and a bare "10 🙏" IS that
+# context (owner, 14 Nov 2026 — live retest: it got "I did not
+# understand", and the bare link after it asked "Which
+# platform?").
+_BARE_REACTION_ORDER_EMOJI = REACTION_EMOJI + ("🙏",)
+
+
+def bare_reaction_order(text: str):
+    """(emoji, quantity) when the message is ONLY a reaction emoji
+    with an optional quantity — "10 🙏", "🙏 10", "10 👍" — or a
+    bare 🙏 on its own, or None. A bare emoji that is already in
+    REACTION_EMOJI keeps the existing bare-emoji branch (a natural
+    acknowledgement), so only 🙏 matches on its own here. The
+    quantity is any whole number 1..1,000,000; the order flow's
+    validate_quantity still rejects one outside the service's own
+    min/max when the card is built. Skin tones are dropped, as in
+    emoji_meanings."""
+    s = " ".join((text or "").strip().split())
+    if not s:
+        return None
+    s = re.sub(r"[\U0001f3fb-\U0001f3ff]", "", s)
+    s = s.replace("\ufe0f", "")
+    pattern = "|".join(
+        re.escape(e.replace("\ufe0f", ""))
+        for e in sorted(
+            _BARE_REACTION_ORDER_EMOJI, key=len, reverse=True
+        )
+    )
+    match = re.fullmatch(
+        r"(?:(\d[\d,]*)\s*)?(" + pattern + r")(?:\s*(\d[\d,]*))?", s
+    )
+    if match is None:
+        return None
+    if match.group(1) is not None and match.group(3) is not None:
+        return None  # a number on both sides is not a clean start
+    stripped = match.group(2)
+    emoji = next(
+        (
+            e for e in _BARE_REACTION_ORDER_EMOJI
+            if e.replace("\ufe0f", "") == stripped
+        ),
+        stripped,
+    )
+    qty_text = match.group(1) or match.group(3)
+    if qty_text is None:
+        if emoji in REACTION_EMOJI:
+            return None
+        return (emoji, None)
+    try:
+        qty = int(qty_text.replace(",", ""))
+    except ValueError:
+        return None
+    if not 1 <= qty <= 1000000:
+        return None
+    return (emoji, qty)
+
+
 def local_intent(text: str) -> dict:
     """Best-effort intent without Gemini — the silence fallback.
 
@@ -5103,12 +5163,49 @@ def _remember_price_question(user_id: int, platform, hint, qty, text):
 
 
 def is_ban_question(text: str) -> bool:
-    """True when the user asks about bans / shadowbans."""
+    """True when the user asks about bans / shadowbans.
+
+    English is matched on Latin words — but the detector also
+    runs on the RAW text when the translate bridge is down
+    (Gemini's free tier is 20/day, so an Amharic question often
+    reaches this check untranslated), so Ge'ez and Oromo ban
+    words are matched too. Live bug, 14 Nov 2026: the Amharic
+    question "ተከታዮችን በመግዛት አካውንቴ ሊታገድ ይችላል?" got a
+    free AI answer saying "no one can guarantee zero risk"
+    instead of the deterministic NO — the detector saw no Latin
+    ban word. The Ge'ez ban verb is ታገደ: "ሊታገድ" (may be
+    banned), "ታገደ" (was banned), "ይታገዳል" (is being banned),
+    "ታግዷል" (has been banned), "ታግደዋል" (have been banned),
+    "እገዳ" (a ban) — the same root in Tigrinya. The stems are
+    matched exactly ("ታገ" alone would also catch ታገሠ,
+    patience), so every real inflection is listed. Oromo:
+    "cufamuu" (to be closed/shut), "dhoowwaa" (prohibition)."""
     words = set(re.findall(r"[a-z]+", (text or "").lower()))
-    return bool(
+    if (
         words & {"ban", "banned", "banning", "shadowban", "shadowbanned"}
         or ("shadow" in words and "ban" in words)
-    )
+    ):
+        return True
+    geez = re.findall(r"[\u1200-\u137c]+", text or "")
+    if any(
+        part in word
+        for word in geez
+        for part in (
+            "ታገድ", "ታገደ", "ታገዳ", "ታግዷ", "ታግደ", "እገዳ",
+        )
+    ):
+        return True
+    if any(
+        word == "ባን" for word in geez
+    ):
+        return True
+    if any(
+        word.startswith(prefix)
+        for word in words
+        for prefix in ("cufam", "dhooww")
+    ):
+        return True
+    return False
 
 
 def is_public_question(text: str) -> bool:
@@ -8710,6 +8807,35 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
+    # A bare quantity + reaction emoji ("10 🙏", "🙏 10") or a bare
+    # 🙏 starts a Telegram reactions order (owner, 14 Nov 2026 —
+    # live retest: "10 🙏" alone got "I did not understand", and
+    # the bare link after it asked "Which platform?"). The draft
+    # carries platform Telegram + the emoji, so the link the user
+    # sends next completes the order instead of asking for the
+    # platform. Skipped while a Confirm card is pending: there the
+    # normal flow handles the emoji as a correction and the number
+    # as a quantity change.
+    _reaction_start = bare_reaction_order(text)
+    if _reaction_start is not None:
+        _cid, _pending = pending_for_user(user.id)
+        if _pending is None:
+            _emoji, _qty = _reaction_start
+            _draft = {
+                "platform": "telegram",
+                "service_hint": "telegram reactions",
+                "reaction_emoji": _emoji,
+            }
+            if _qty is not None:
+                _draft["quantity"] = _qty
+            PARTIAL[user.id] = _draft
+            await reply_message(
+                update.message,
+                ask_link_text("telegram", "telegram reactions", lang),
+                lang, voice=voice,
+            )
+            return
+
     # A bare non-reaction emoji is a media reaction (owner, 14
     # Nov 2026): it is answered from the user's situation — a
     # delayed order, a completed order, a pending Confirm card,
@@ -8787,6 +8913,28 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     meaning=EMOJI_MEANINGS.get(emoji, ""),
                 ),
                 lang, voice=voice,
+            )
+            return
+
+    # Catch-all for a bare emoji the reactions path did not claim
+    # (owner, 14 Nov 2026 — "he also misunderstood the emoji"): a
+    # bare 👀, 💔, 🤗 ... is a reaction, not a failed order, and a
+    # bare reaction emoji while a Confirm card is pending is an
+    # acknowledgement, not a new order. Both get a sensible
+    # emoji-aware reply from the user's situation, like a GIF —
+    # never "I did not understand". A bare reaction emoji while a
+    # NON-reactions draft is being built keeps the old behaviour
+    # (the flow below re-asks for the missing piece), so this
+    # only fires for an emoji the reactions path does not claim,
+    # or while a card is pending. The draft and the card are never
+    # touched.
+    if _is_bare_emoji(text):
+        _cid, _pending = pending_for_user(user.id)
+        if emoji is None or _pending is not None:
+            _first = emoji_meanings(text)
+            await media_reply_for_text(
+                update, _first[0][0] if _first else None, lang,
+                voice=voice,
             )
             return
 
@@ -10053,7 +10201,9 @@ async def on_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #
 # Mood comes from the emoji (a bare emoji, or a sticker's emoji);
 # a GIF carries no emoji, so its mood comes from the situation
-# instead — a GIF while an order is delayed gets the delay reply.
+# instead — a GIF while an order is delayed gets the delay reply,
+# a GIF while an order is on track gets a warm reply, never an
+# apology for a delay that has not happened (owner, 14 Nov 2026).
 # The situation comes from the real order state: the most recent
 # placed order's status and average time, a pending Confirm card,
 # a half-built draft, or nothing at all.
@@ -10065,13 +10215,16 @@ _MEDIA_MOODS = {
     "😄": "happy", "😁": "happy", "😀": "happy", "😃": "happy",
     "🙂": "happy", "😊": "happy", "👍": "happy", "👏": "happy",
     "😂": "happy", "🤣": "happy",
-    "🙏": "thanks", "👋": "thanks",
+    "🙏": "thanks",
+    # A wave is a greeting, not thanks (owner, 14 Nov 2026 — a 👋
+    # sticker got "You're welcome!"): 👋, 🙋 and ✋ all greet.
+    "👋": "greeting", "🙋": "greeting", "✋": "greeting",
 }
 
 
 def media_mood(emoji):
     """The mood of one emoji (\"frustrated\" / \"happy\" /
-    \"thanks\"), or None when it carries no mood."""
+    \"thanks\" / \"greeting\"), or None when it carries no mood."""
     return _MEDIA_MOODS.get(emoji)
 
 
@@ -10087,6 +10240,31 @@ def _bare_non_reaction_emoji(text):
         if s.replace("\ufe0f", "") == emoji.replace("\ufe0f", ""):
             return emoji
     return None
+
+
+def _is_bare_emoji(text: str) -> bool:
+    """True when the message is only emoji — one emoji, or a short
+    run of them (\"😂😂\"). Variation selectors, skin tones,
+    joiners and keycap marks are stripped first; letters, digits
+    and punctuation all fail, so a word or a link never counts.
+    Used by the catch-all in handle_order_text: a bare emoji the
+    reactions path does not claim (👀, 💔, 🤗, ...) must never
+    fall through to \"I did not understand\" (owner, 14 Nov 2026
+    — \"he also misunderstood the emoji\")."""
+    s = (text or "").strip()
+    if not s:
+        return False
+    s = re.sub(r"[\ufe0f\u200d\U0001f3fb-\U0001f3ff\u20e3]", "", s)
+    if not s:
+        return False
+    return all(
+        "\U0001f000" <= ch <= "\U0001faff"
+        or "\u2600" <= ch <= "\u27bf"
+        or "\u2190" <= ch <= "\u21ff"
+        or "\u2300" <= ch <= "\u23ff"
+        or "\u2b00" <= ch <= "\u2bff"
+        for ch in s
+    )
 
 
 # The reply variants, per mood x situation, English + Amharic.
@@ -10180,6 +10358,41 @@ _MEDIA_REPLIES = {
             "በደስታ! 😊 ምን ማዘዝ ይፈልጋሉ?",
         ],
     },
+    # A wave is a greeting, not thanks (owner, 14 Nov 2026 — a 👋
+    # sticker got "You're welcome!"): 👋, 🙋 and ✋ all greet.
+    "greeting": {
+        "en": [
+            "Hello! 👋 Great to see you — what would you like to order?",
+            "Hi there! 👋 Tell me what you need and I'll get it going.",
+        ],
+        "am": [
+            "ሰላም! 👋 ደስ ብሎኛል — ምን ማዘዝ ይፈልጋሉ?",
+            "ሰላም! 👋 ምን እንደሚፈልጉ ንገሩኝ።",
+        ],
+    },
+    # Frustrated, but the order is on track (owner, 14 Nov 2026):
+    # acknowledge the feeling and reassure with the real status —
+    # never apologise for a delay that has not happened.
+    "frustrated_on_track": {
+        "en": [
+            "I hear you — your order #{order_id} ({service}) is still {status}{time}, right on track. Hang in there.",
+            "I get it — waiting is hard. Your order #{order_id} is still {status}{time}, on track.",
+        ],
+        "am": [
+            "ገብቶኛል — orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}፣ በተገቢው መንገድ እየሄደ ነው።",
+            "ገብቶኛል — መጠበቁ አስቸጋሪ ነው። orderዎ #{order_id} አሁንም {status} ላይ ነው{time}፣ እየሄደ ነው።",
+        ],
+    },
+    "neutral_on_track": {
+        "en": [
+            "Your order #{order_id} ({service}) is still {status}{time} — right on track.",
+            "Still going — order #{order_id} is {status}{time}, on track.",
+        ],
+        "am": [
+            "orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time} — በተገቢው መንገድ እየሄደ ነው።",
+            "ገና በመሄድ ላይ ነው — orderዎ #{order_id} {status} ላይ ነው{time}።",
+        ],
+    },
     "neutral_delayed": {
         "en": [
             "Your order #{order_id} ({service}) is still {status}{time}. I'll keep an eye on it.",
@@ -10242,12 +10455,15 @@ def media_reply_text(user_id: int, mood, ctx: dict, lang: str) -> str:
         )
     elif mood == "thanks":
         group = "thanks"
+    elif mood == "greeting":
+        group = "greeting"
     else:
         group = {
             "delayed": "neutral_delayed",
             "completed": "neutral_completed",
             "failed": "frustrated_failed",
             "awaiting_confirm": "neutral_awaiting_confirm",
+            "on_track": "neutral_on_track",
         }.get(situation, "neutral_none")
     variants = _MEDIA_REPLIES.get(group, _MEDIA_REPLIES["neutral_none"])
     texts = variants.get(lang) or variants["en"]
@@ -10273,12 +10489,44 @@ def media_reply_text(user_id: int, mood, ctx: dict, lang: str) -> str:
     )
 
 
+def _parse_created_at(value):
+    """An ISO-8601 created_at string -> aware datetime, or None
+    when the value is missing or unparseable."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _order_is_delayed(order, avg_minutes):
+    """True when an in-progress order is past its average time.
+    Unknown created_at or unknown average time -> True: the old
+    behaviour assumed the user was waiting, and a delay apology
+    is the safe reply when the bot genuinely cannot tell."""
+    if avg_minutes is None:
+        return True
+    created = _parse_created_at(order.get("created_at"))
+    if created is None:
+        return True
+    elapsed = (datetime.now(timezone.utc) - created).total_seconds() / 60
+    return elapsed > avg_minutes
+
+
 async def media_order_context(user_id: int) -> dict:
     """The order situation a media reply is grounded in: the most
     recent placed order's real status and average time (same data
     as the \"why hasn't it started\" answer), a pending Confirm
     card, a half-built draft, or nothing at all. Never invents an
-    order — \"none\" means no order is claimed."""
+    order — \"none\" means no order is claimed. An in-progress
+    order is \"delayed\" only when its elapsed time is past its
+    average time (owner, 14 Nov 2026 — a GIF while order #1837
+    was merely in progress got a delay apology); otherwise it is
+    \"on_track\"."""
     try:
         last = await resolve_last_order(user_id)
     except Exception as exc:
@@ -10304,7 +10552,11 @@ async def media_order_context(user_id: int) -> dict:
             "pending", "in_progress", "in progress",
             "processing", "partial",
         ):
-            situation = "delayed"
+            situation = (
+                "delayed"
+                if _order_is_delayed(last, parse_average_time(avg))
+                else "on_track"
+            )
         elif status in ("failed", "cancelled", "canceled", "refunded"):
             situation = "failed"
         else:
@@ -10346,8 +10598,10 @@ async def media_reply(update, emoji, lang: str, voice: bool = False) -> str:
     The mood comes from the emoji when there is one; a GIF
     carries no emoji, so the situation sets the mood — a GIF
     while an order is delayed or failed is frustration, a GIF
-    after a completed order is celebration. Photos are NOT
-    routed here: they are read by Gemini vision
+    after a completed order is celebration, and a GIF while an
+    order is on track is celebration too, never an apology for a
+    delay that has not happened (owner, 14 Nov 2026). Photos are
+    NOT routed here: they are read by Gemini vision
     (route_photo_result) and keep working as before."""
     user = update.effective_user
     mood = media_mood(emoji)
@@ -10356,7 +10610,7 @@ async def media_reply(update, emoji, lang: str, voice: bool = False) -> str:
         situation = ctx.get("situation")
         if situation in ("delayed", "failed"):
             mood = "frustrated"
-        elif situation == "completed":
+        elif situation in ("completed", "on_track"):
             mood = "happy"
     text = media_reply_text(user.id, mood, ctx, lang)
     if voice:

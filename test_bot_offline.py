@@ -17,6 +17,7 @@ tolerance) is covered the same way, as is checking a deposit
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
@@ -12854,10 +12855,15 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertIn("1836", reply)
         self.assertIn("done", reply.lower())
 
-    async def test_thanks_emoji_gets_a_warm_short_reply(self):
+    async def test_wave_emoji_gets_a_greeting_reply(self):
+        # A wave is a greeting, not thanks (owner, 14 Nov 2026 —
+        # a 👋 sticker got "You're welcome!"). Updated deliberately
+        # in the retest fix round: 👋 now greets.
         msg = await self._turns([("👋", intent_of("off_topic"))])
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("welcome", msg.text_sent[0].lower())
+        self.assertIn("Hello", msg.text_sent[0])
+        self.assertIn("👋", msg.text_sent[0])
+        self.assertNotIn("welcome", msg.text_sent[0].lower())
 
     async def test_frustrated_sticker_with_no_order_invents_none(self):
         # A 😡 sticker with no order at all: empathy, and no
@@ -12897,6 +12903,339 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         first = bot.media_reply_text(1, None, ctx, "en")
         second = bot.media_reply_text(1, None, ctx, "en")
         self.assertNotEqual(first, second)
+
+
+class TestRetestFixRound14Nov(_LanguageRoundBase):
+    """The 14 Nov 2026 live retest of the big round (17:38–17:56
+    EAT): three faults, one fix round. (1) A bare quantity + emoji
+    ("10 🙏") was not understood, and the bare link after it asked
+    "Which platform?". (2) The Amharic ban question got a free AI
+    answer ("no one can guarantee zero risk") instead of the
+    deterministic NO — the detector only knew Latin ban words and
+    the bridge was down. (3) A happy GIF while an order was merely
+    in progress got a delay apology, and a 👋 sticker got
+    "You're welcome!". Plus the broadened emoji audit (owner:
+    "he also misunderstood the emoji"): any bare emoji must never
+    fall through to "I did not understand"."""
+
+    async def _turns(self, turns, paxyo=None, ai_reply=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        ai = mock.AsyncMock(
+            return_value=ai_reply if ai_reply is not None else ""
+        )
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()), mock.patch(
+            "bot.speak_reply",
+        ), mock.patch("bot.ai_generate", new=ai):
+            for text, intent in turns:
+                with mock.patch(
+                    "bot.extract_intent",
+                    new=mock.AsyncMock(return_value=intent),
+                ):
+                    await bot.handle_order_text(update, None, text)
+        return msg
+
+    # (1) bare quantity + emoji starts a Telegram reactions order -
+
+    def test_bare_reaction_order_parses(self):
+        self.assertEqual(bot.bare_reaction_order("10 🙏"), ("🙏", 10))
+        self.assertEqual(bot.bare_reaction_order("🙏 10"), ("🙏", 10))
+        self.assertEqual(bot.bare_reaction_order("🙏"), ("🙏", None))
+        self.assertEqual(bot.bare_reaction_order("10 👍"), ("👍", 10))
+        self.assertEqual(
+            bot.bare_reaction_order("1000 ❤️"), ("❤️", 1000)
+        )
+        self.assertEqual(bot.bare_reaction_order("10🙏"), ("🙏", 10))
+        # A bare emoji already in REACTION_EMOJI keeps the existing
+        # bare-emoji branch on its own — only 🙏 matches alone here.
+        self.assertIsNone(bot.bare_reaction_order("👍"))
+        self.assertIsNone(bot.bare_reaction_order("❤️"))
+        self.assertIsNone(bot.bare_reaction_order("10 🙏 20"))
+        self.assertIsNone(
+            bot.bare_reaction_order("I want 10 🙏 reactions")
+        )
+        self.assertIsNone(bot.bare_reaction_order("thank you 🙏"))
+        self.assertIsNone(bot.bare_reaction_order(""))
+        self.assertIsNone(bot.bare_reaction_order("10"))
+
+    async def test_bare_quantity_emoji_starts_telegram_reactions(self):
+        # Live failure, 14 Nov 2026: "10 🙏" got "I did not
+        # understand". Now it starts a Telegram reactions order
+        # and asks for the Telegram post link.
+        msg = await self._turns([("10 🙏", intent_of("unclear"))])
+        self.assertEqual(
+            msg.text_sent,
+            ["Please send the link of the Telegram post."],
+        )
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "telegram")
+        self.assertEqual(
+            bot.PARTIAL[1].get("service_hint"), "telegram reactions"
+        )
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "🙏")
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 10)
+
+    async def test_bare_link_after_reaction_draft_shows_pray_card(self):
+        # The second half of the live failure: the bare link after
+        # "10 🙏" asked "Which platform?". With the draft open it
+        # completes the order — Pray #1723, qty 10, no platform
+        # question.
+        msg = await self._turns([
+            ("10 🙏", intent_of("unclear")),
+            ("https://t.me/godofpanelcom/768", intent_of("unclear")),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link of the Telegram post."
+        )
+        self.assertIn("#1723", msg.text_sent[1])
+        self.assertIn("Pray", msg.text_sent[1])
+        self.assertNotIn("Which platform?", msg.text_sent[1])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 1723)
+        self.assertEqual(pending["quantity"], 10)
+        self.assertEqual(
+            pending["link"], "https://t.me/godofpanelcom/768"
+        )
+        self.assertEqual(bot.PARTIAL, {})
+
+    async def test_bare_pray_emoji_starts_reactions_order(self):
+        msg = await self._turns([("🙏", intent_of("unclear"))])
+        self.assertEqual(
+            msg.text_sent,
+            ["Please send the link of the Telegram post."],
+        )
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "telegram")
+        self.assertEqual(
+            bot.PARTIAL[1].get("service_hint"), "telegram reactions"
+        )
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "🙏")
+        self.assertNotIn("quantity", bot.PARTIAL[1])
+
+    async def test_emoji_then_quantity_same(self):
+        msg = await self._turns([("🙏 10", intent_of("unclear"))])
+        self.assertEqual(
+            msg.text_sent,
+            ["Please send the link of the Telegram post."],
+        )
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "🙏")
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 10)
+
+    async def test_bare_quantity_thumbs_up_starts_reactions_order(self):
+        msg = await self._turns([("10 👍", intent_of("unclear"))])
+        self.assertEqual(
+            msg.text_sent,
+            ["Please send the link of the Telegram post."],
+        )
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "👍")
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 10)
+
+    # (2) the ban detector reads Ge'ez (and Oromo) ------------------
+
+    def test_is_ban_question_reads_geez_and_oromo(self):
+        self.assertTrue(bot.is_ban_question(
+            "ተከታዮችን በመግዛት አካውንቴ ሊታገድ ይችላል?"
+        ))
+        self.assertTrue(bot.is_ban_question("አካውንቴ ታግዷል?"))
+        self.assertTrue(bot.is_ban_question("አካውንቴ ታገደ?"))
+        self.assertTrue(bot.is_ban_question("አካውንቴ ይታገዳል?"))
+        self.assertTrue(bot.is_ban_question(
+            "akkaawuntii koo cufameeraa?"
+        ))
+        self.assertTrue(bot.is_ban_question("can I get banned?"))
+        self.assertFalse(bot.is_ban_question(
+            "አካውንቴን እንዴት ማረጋገጥ እችላለሁ?"
+        ))
+        self.assertFalse(bot.is_ban_question("ተከታዮች ስንት ናቸው?"))
+        self.assertFalse(bot.is_ban_question("thank you 🙏"))
+
+    async def test_ban_question_amharic_bridge_down_gets_no_answer(self):
+        # Live bug, 14 Nov 2026: the exact Amharic question below
+        # got a free AI answer ("no one can guarantee zero risk")
+        # because the translate bridge was down (Gemini out of its
+        # 20/day) and the detector only knew Latin ban words. The
+        # detector now reads Ge'ez, so the deterministic NO fires
+        # on the raw text — same wording as the English answer,
+        # in Amharic.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=""),
+        ):
+            msg = await self._turns([
+                ("ተከታዮችን በመግዛት አካውንቴ ሊታገድ ይችላል?",
+                 intent_of("safety")),
+            ])
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("አይ", reply)
+        self.assertIn("shadow ban", reply)
+        self.assertNotIn("zero risk", reply)
+        self.assertNotIn("risk", reply.lower())
+        self.assertNotIn("ሊከሰት ይችላል", reply)
+
+    async def test_ban_question_amharic_perfect_form(self):
+        # "ታግዷል" (is banned) is the perfect form of the same
+        # verb as "ሊታገድ" (may be banned) — both must fire.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=""),
+        ):
+            msg = await self._turns([
+                ("አካውንቴ ታግዷል?", intent_of("safety")),
+            ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("አይ", msg.text_sent[0])
+        self.assertIn("shadow ban", msg.text_sent[0])
+
+    async def test_non_ban_amharic_question_is_not_ban(self):
+        # "account" alone is not a ban question: the detector must
+        # not fire on አካውንቴ without the ban verb.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=""),
+        ):
+            msg = await self._turns([
+                ("አካውንቴን እንዴት ማረጋገጥ እችላለሁ?",
+                 intent_of("paxyo_info")),
+            ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertNotIn("አያግድም", msg.text_sent[0])
+        self.assertNotIn("shadow ban", msg.text_sent[0])
+
+    # (3a) delayed vs on-track --------------------------------------
+
+    async def test_gif_with_on_track_order_is_warm_not_an_apology(self):
+        # Live bug, 14 Nov 2026: a happy GIF while order #1837 was
+        # merely in progress got the delay apology. In progress
+        # and inside its average time is on track, not delayed.
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1837, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="in_progress",
+            created_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )]
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("😄", reply)
+        self.assertNotIn("sorry", reply.lower())
+        self.assertNotIn("frustrating", reply.lower())
+        self.assertNotIn("delay", reply.lower())
+
+    async def test_gif_with_failed_order_apologizes(self):
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="failed",
+        )]
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("didn't go through", reply)
+        self.assertNotIn("soon", reply.lower())
+
+    def test_order_is_delayed_only_past_average_time(self):
+        old = {
+            "created_at": "2026-11-13T10:00:00Z",
+        }
+        self.assertTrue(bot._order_is_delayed(old, 12))
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        fresh = {
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        self.assertFalse(bot._order_is_delayed(fresh, 12))
+        # Unknown average time or created_at: assume waiting (the
+        # old behaviour) rather than claiming on track.
+        self.assertTrue(bot._order_is_delayed(fresh, None))
+        self.assertTrue(bot._order_is_delayed({}, 12))
+
+    # (3b) a wave is a greeting, not thanks -------------------------
+
+    async def test_wave_sticker_gets_a_greeting(self):
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.sticker = mock.Mock(emoji="👋")
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+            await bot.on_sticker(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Hello", msg.text_sent[0])
+        self.assertIn("👋", msg.text_sent[0])
+        self.assertNotIn("welcome", msg.text_sent[0].lower())
+
+    async def test_raised_hand_sticker_gets_a_greeting(self):
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.sticker = mock.Mock(emoji="🙋")
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+            await bot.on_sticker(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Hello", msg.text_sent[0])
+        self.assertNotIn("welcome", msg.text_sent[0].lower())
+
+    async def test_pray_sticker_still_gets_thanks(self):
+        # 🙏 as a sticker is still thanks — only the wave emoji
+        # changed. (Bare 🙏 as TEXT starts a reactions order now;
+        # a 🙏 sticker is a different signal.)
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.sticker = mock.Mock(emoji="🙏")
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+            await bot.on_sticker(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("welcome", msg.text_sent[0].lower())
+
+    # Broadened emoji audit: no bare emoji falls through -----------
+
+    def test_is_bare_emoji(self):
+        for text in (
+            "👍", "👀", "💔", "🤗", "😂😂", "❤️", "👍🏻", "🫶",
+            "👍❤️🔥🎉",
+        ):
+            self.assertTrue(bot._is_bare_emoji(text), text)
+        for text in (
+            "", "hello", "10 🙏", "👍 please", "https://t.me/x",
+            "1000", "1️⃣", "a👍",
+        ):
+            self.assertFalse(bot._is_bare_emoji(text), text)
+
+    async def test_bare_unknown_emoji_gets_a_reply_not_not_understood(self):
+        # 👀, 💔 and 🤗 are not reaction emoji and carry no media
+        # mood — before this round they fell through to "I did not
+        # understand". Now they get a sensible emoji-aware reply.
+        for emoji in ("👀", "💔", "🤗"):
+            with self.subTest(emoji=emoji):
+                msg = await self._turns([(emoji, intent_of("unclear"))])
+                self.assertEqual(len(msg.text_sent), 1)
+                self.assertNotIn(
+                    "did not understand", msg.text_sent[0]
+                )
+                self.assertTrue(msg.text_sent[0].strip())
+
+    async def test_bare_reaction_emoji_with_pending_card_is_acknowledged(self):
+        # A bare 👍 while a Confirm card for another service is
+        # pending used to get "I did not understand". Now it is
+        # acknowledged from the situation — and the card is never
+        # touched.
+        bot.PENDING["abc123"] = make_pending()
+        msg = await self._turns([("👍", intent_of("unclear"))])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertNotIn("did not understand", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertEqual(
+            bot.PENDING["abc123"]["service"]["service"], 1001
+        )
 
 
 if __name__ == "__main__":
