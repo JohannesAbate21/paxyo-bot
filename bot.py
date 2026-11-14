@@ -46,7 +46,7 @@ sleep after ~15 minutes idle and wake in ~30-50s on the first message.
 import asyncio
 import base64
 import contextvars
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import logging
@@ -272,12 +272,15 @@ SYSTEM_PROMPT = """You are the Paxyo order assistant on Telegram. The user write
 Rules:
 - Reply with JSON only, no extra text, no markdown fences.
 - Emoji carry meaning, read them as words: 👍 thumbs-up reaction, ❤️ heart reaction, 🔥 fire reaction, 😂 laughing, 👀 views. A message that is only an emoji still means that thing.
-- JSON shape: {"intent": "...", "platform": "...", "service_hint": "...", "service_id": 123, "link": "...", "quantity": 123, "interval_minutes": 180, "amount": 10, "method": "telebirr", "phone": "099387383", "quantity_multiplier": 2, "orders": [{"platform": "...", "service_hint": "...", "link": "...", "quantity": 123}], "split": {"quantity": 5000, "count": 5, "platform": "...", "service_hint": "..."}}
+- JSON shape: {"intent": "...", "platform": "...", "service_hint": "...", "service_id": 123, "link": "...", "quantity": 123, "interval_minutes": 180, "delay_minutes": 180, "amount": 10, "method": "telebirr", "phone": "099387383", "quantity_multiplier": 2, "orders": [{"platform": "...", "service_hint": "...", "link": "...", "quantity": 123}], "split": {"quantity": 5000, "count": 5, "platform": "...", "service_hint": "..."}}
 - intent, one of:
   - "order": wants to order a service (followers, likes, views, members...). Fill platform / service_hint / link / quantity when given; null otherwise.
   - "recurring": the same order repeated on a schedule ("1k views every 3 hours"). Fill platform / service_hint / link / quantity / interval_minutes (3 hours = 180, 1 day = 1440). A drip-feed ("100 views every 30 minutes") is also "recurring": quantity is the amount per drop, interval_minutes the gap.
+  - "delayed_order": a one-time order placed later ("order 10k views after 3 hrs"). Fill platform / service_hint / link / quantity / delay_minutes (3 hours = 180). Places once, not repeatedly.
   - "schedules": asks what is repeating.
   - "stop_schedule": wants to stop or cancel a repeating order.
+  - "delayed_orders": asks about their scheduled orders.
+  - "cancel_delayed": cancels a scheduled order.
   - "balance": asks for their balance.
   - "orders": asks about their orders, history or status; impatience about a placed order ("why hasn't it started yet") is also "orders".
   - "deposit": wants to deposit / add money. Fill "amount" (ETB number), "method" ("telebirr" or "cbe"), "phone" when given; null otherwise. "br", "birr", "ብር", "ETB" mean ETB. "teleirr", "telebir", "teleberr", "telbirr" are misspellings of Telebirr. E.g. "deposit 10 br by telebirr, phone 099387383" -> amount 10, method telebirr, phone 099387383. A bare "how do I add money" is "deposit" with everything null.
@@ -316,7 +319,7 @@ Rules:
 - service_hint: short phrase for the service ("followers", "likes", "views", "members"); null when unclear. "cheapest instagram followers" goes here too (the bot picks the cheapest match for "cheapest"). "likes" is likes on a video; "comment likes" is likes on a comment; "comments" is comments on a video — three different services, never mix them up.
 - service_id: the ID of the service asked for, or null. "use service 6139" -> 6139; "service #5535" -> 5535; "use that service again" -> null (resolved from the last order); "the cheapest Instagram followers" -> null (a description, not an ID).
 - link: the full link the order is for; null when not given. "that link", "the same link", "that one" -> put "that" in link (resolved from the last order).
-- quantity: whole number, or null. interval_minutes: whole minutes, or null (recurring only). amount: ETB number, or null (deposit only). method: "telebirr" or "cbe", or null. phone: payment phone number as written, or null.
+- quantity: whole number, or null. interval_minutes: whole minutes, or null (recurring only). delay_minutes: whole minutes from now, or null (delayed_order only). amount: ETB number, or null (deposit only). method: "telebirr" or "cbe", or null. phone: payment phone number as written, or null.
 - quantity_multiplier: how many times the usual order ("double it" -> 2, "triple it" -> 3). Null otherwise.
 - orders: list of {"platform", "service_hint", "link", "quantity"} — one per order; a bare @handle goes in "link". Null otherwise.
 - split: {"quantity": 5000, "count": 5, "platform": "instagram", "service_hint": "likes"} for splitting one quantity across posts. Null otherwise.
@@ -324,7 +327,7 @@ Rules:
 - Never warn the user against buying followers, likes, views, members or reactions, and never call them "fake" — Paxyo sells these services. If the user asks whether they are real, say they come from Paxyo's network.
 - Never say where Paxyo's services come from, and never talk about what Paxyo pays for them. Only quote Paxyo's own ETB prices. If the user asks about that, use the "source_question" intent.
 - For a message that is not an order, still classify the intent; do not return "order" with empty fields.
-- Return only the JSON object above: intent one of the listed intents; platform one of instagram, tiktok, telegram, youtube, facebook, x, or null; quantity, interval_minutes, amount numbers or null. Never invent a value."""
+- Return only the JSON object above: intent one of the listed intents; platform one of instagram, tiktok, telegram, youtube, facebook, x, or null; quantity, interval_minutes, delay_minutes, amount numbers or null. Never invent a value."""
 
 # Few-shot examples (smart-loop round 2, 14 Nov 2026): the classifier
 # learns these input -> intent pairs from the 1,005-item golden
@@ -359,6 +362,7 @@ FEW_SHOT_EXAMPLES = """Examples — message -> intent, then only the fields that
 - "no, i meant ❤️ not 🙏" -> change_order, hint=reactions
 - "give me discount please" -> discount
 - "can i get capcut pro" -> paused_services
+- "10k tiktok views after 3 hrs" -> delayed_order, platform=tiktok, hint=views, delay_minutes=180
 - "ተከታዮች እፈልጋለሁ" -> order, hint=followers
 - "cancel" -> cancel"""
 
@@ -492,6 +496,7 @@ TEXT = {
             "3. Confirm ካደረጉ በኋላ order ይፈጸማል።\n\n"
             "/balance — balance ማየት\n"
             "/orders — የመጨረሻ order status ማየት\n"
+            "/delayed — የተዘጋጁ orderዎችዎን ማየት\n"
             "/help — እርዳታ\n\n"
             "“እንዴት እዘዝ እችላለሁ?” ብለው step-by-step መመሪያ ይጠይቁ።\n"
             "“ሚኒ አፕ” ብለው app link ያግኙ።\n"
@@ -504,6 +509,7 @@ TEXT = {
             "3. After you tap Confirm, the order is placed.\n\n"
             "/balance — check your balance\n"
             "/orders — status of your last order\n"
+            "/delayed — your scheduled orders\n"
             "/help — help\n\n"
             "Ask “how do I order?” for a step-by-step guide.\n"
             "Ask “mini app” for the app link.\n"
@@ -1299,6 +1305,70 @@ TEXT = {
         "am": "የትኛውን repeating order ማቆም ይፈልጋሉ?",
         "en": "Which repeating order do you want to stop?",
     },
+    # One-time delayed orders (owner, 14 Nov 2026): "order 10k views
+    # to this link after 3 hrs" — placed ONCE at the set time, even
+    # if the user is asleep. Short, readable, never a wall of text.
+    # First-pass Amharic wording — unreviewed by a native speaker.
+    "ask_delay": {
+        "am": "በስንት ጊዜ ውስጥ ነው? (ለምሳሌ: ከ 3 ሰዓት በኋላ)",
+        "en": "In how long? (for example: after 3 hours)",
+    },
+    "delayed_confirm_note": {
+        "am": "⏰ በግምት {time} ላይ ይላካል።",
+        "en": "⏰ Will be placed at about {time}.",
+    },
+    "delayed_started": {
+        "am": (
+            "ተዘግቧል! {quantity} {service} በግምት {time} እዘዝልዎታለሁ። "
+            "ሲላክ መልዕክት እልክልዎታለሁ።"
+        ),
+        "en": (
+            "Scheduled! I'll place {quantity} {service} at about {time}. "
+            "I'll message you when it's placed."
+        ),
+    },
+    "delayed_save_failed": {
+        "am": "Orderን ማዘዝ አልቻልኩም። እባክዎ እንደገና ይሞክሩ።",
+        "en": "I couldn't schedule that order. Please try again.",
+    },
+    "delayed_placed": {
+        "am": "የተዘጋጀ order ተፈጽሟል! {quantity} {service}\nOrder ID: {order_id}\nStatus: {status}",
+        "en": "Your scheduled order is placed! {quantity} {service}\nOrder ID: {order_id}\nStatus: {status}",
+    },
+    "delayed_failed": {
+        "am": "የተዘጋጀ order ({service}) ማዘዝ አልቻልኩም — {reason}።",
+        "en": "I couldn't place your scheduled order ({service}) — {reason}.",
+    },
+    "delayed_insufficient": {
+        "am": (
+            "የተዘጋጀ orderዎን ማዘዝ አልቻልኩም — balanceዎ {balance} ETB ነው፣ "
+            "{total} ETB ያስፈልጋል። deposit ካደረጉ በኋላ ማዘዝ እችላለሁ።"
+        ),
+        "en": (
+            "I couldn't place your scheduled order — your balance is "
+            "{balance} ETB, it needs {total} ETB. Top up and I can place it."
+        ),
+    },
+    "no_delayed_orders": {
+        "am": "የተዘጋጀ order የለዎትም።",
+        "en": "You have no scheduled orders.",
+    },
+    "delayed_list_title": {
+        "am": "የተዘጋጁ orderዎችዎ:",
+        "en": "Your scheduled orders:",
+    },
+    "delayed_cancelled": {
+        "am": "የተዘጋጀ order ({service}) ተሰርዟል።",
+        "en": "Cancelled the scheduled order for {service}.",
+    },
+    "ask_which_delayed": {
+        "am": "የትኛውን የተዘጋጀ order መሰረዝ ይፈልጋሉ?",
+        "en": "Which scheduled order do you want to cancel?",
+    },
+    "delayed_pending_reminder": {
+        "am": "የተዘጋጀ order አለዎት — {service} x{quantity}, በግምት {time} ይላካል።",
+        "en": "You have a scheduled order waiting — {service} x{quantity}, to be placed at about {time}.",
+    },
     # --- round 5 (13 Nov 2026) ---
     # Voice messages: the transcription is shown to the user, so a
     # wrong transcript is visible instead of looking like silence.
@@ -1759,6 +1829,54 @@ def parse_interval_minutes(text):
     return int(match.group(1)) * units[match.group(2)]
 
 
+def parse_delay_minutes(text):
+    """Minutes until a one-time delayed order, or None.
+
+    "order 10k views to this link after 3 hrs" -> 180,
+    "in 2 hours" -> 120, "after 30 minutes" -> 30,
+    "in 45 mins" -> 45, "after 1 hour 30 minutes" -> 90,
+    "after three hours" -> 180. Only a delay phrase counts — the
+    number+unit must follow "after" or "in", so "every 3 hours"
+    (recurring) and "in the morning" (no time) are NOT delays.
+    Returns None when there is no delay, or the delay is zero.
+    """
+    if not text:
+        return None
+    s = " ".join(str(text).strip().lower().split())
+    match = re.search(r"\b(?:after|in)\b", s)
+    if not match:
+        return None
+    tail = s[match.end():]
+    units = {
+        "day": 1440, "days": 1440,
+        "hour": 60, "hours": 60, "hr": 60, "hrs": 60,
+        "minute": 1, "minutes": 1, "min": 1, "mins": 1,
+    }
+    total = 0
+    found = False
+    for num, unit in re.findall(r"(\d+)\s*(days?|hours?|hrs?|minutes?|mins?)", tail):
+        total += int(num) * units[unit]
+        found = True
+    if not found:
+        # Word numbers: "after three hours", "in forty five minutes".
+        words = re.findall(r"[a-z]+", tail)
+        run = []
+        for word in words:
+            if word in _NUMBER_WORDS or word in ("a", "an"):
+                run.append(word)
+            elif word in units and run:
+                value = _number_phrase_value(run)
+                if value is not None:
+                    total += value * units[word]
+                    found = True
+                run = []
+            elif word == "and" and run:
+                run.append(word)
+            else:
+                run = []
+    return total if found and total > 0 else None
+
+
 def format_interval(minutes):
     """Short human form of a repeat gap: 30 -> "30 minutes",
     180 -> "3 hours", 2880 -> "2 days"."""
@@ -1775,6 +1893,38 @@ def format_interval(minutes):
         n = minutes // 60
         return f"{n} hour" if n == 1 else f"{n} hours"
     return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+
+
+EAT_TZ = timezone(timedelta(hours=3))  # Ethiopia time, UTC+3.
+
+
+def delayed_run_at_iso(delay_minutes: int, now=None):
+    """UTC "YYYY-MM-DD %H:%M:%S" when a delayed order runs, delay
+    minutes from `now` (default: now). Stored in UTC; shown in EAT."""
+    start = now or datetime.now(timezone.utc)
+    return (start + timedelta(minutes=int(delay_minutes))).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def format_eat_run_at(run_at):
+    """A stored UTC run_at -> "02:30 EAT", "02:30 EAT tomorrow",
+    or "02:30 EAT, 16 Nov" when it is further away. Unparseable
+    input comes back unchanged, never crashes the caller."""
+    try:
+        run = datetime.strptime(
+            str(run_at), "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return str(run_at)
+    eat = run.astimezone(EAT_TZ)
+    now_eat = datetime.now(timezone.utc).astimezone(EAT_TZ)
+    when = eat.strftime("%H:%M") + " EAT"
+    if eat.date() == now_eat.date():
+        return when
+    if eat.date() == (now_eat + timedelta(days=1)).date():
+        return when + " tomorrow"
+    return when + ", " + eat.strftime("%d %b")
 
 
 def mentions_same_service(text):
@@ -2852,6 +3002,127 @@ class PaxyoClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 log.warning("POST /confusions returned 404 (endpoint not live yet)")
+                return None
+            raise
+
+    # --- one-time delayed orders (owner, 14 Nov 2026) ---
+    # Same shape as the session/confusion calls above: 404 means the
+    # endpoint is not live yet, and the caller falls back to the
+    # in-memory store. Only HTTP 500 and connection errors raise.
+    async def create_delayed_order(self, telegram_id: int, service_id: int,
+                                   link: str, quantity: int, total: float,
+                                   run_at: str, idempotency_key: str):
+        """POST /delayed-orders {telegram_id, service_id, link,
+        quantity, total, run_at, idempotency_key} -> {"ok": true,
+        "id": N, "delayed_order": {...}}. Returns None on 404."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST", "/delayed-orders",
+                    {
+                        "telegram_id": telegram_id,
+                        "service_id": service_id,
+                        "link": link,
+                        "quantity": quantity,
+                        "total": total,
+                        "run_at": run_at,
+                        "idempotency_key": idempotency_key,
+                    },
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /delayed-orders returned 404 (endpoint not live yet)")
+                return None
+            raise
+
+    async def list_delayed_orders(self, telegram_id: int,
+                                  status: str = "scheduled"):
+        """GET /delayed-orders?telegram_id=N&status=scheduled ->
+        {"ok": true, "delayed_orders": [...]}. Returns [] on 404."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "GET", "/delayed-orders",
+                    {"telegram_id": telegram_id, "status": status},
+                )
+            )
+            return data.get("delayed_orders", []) if isinstance(data, dict) else []
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /delayed-orders returned 404 (endpoint not live yet)")
+                return []
+            raise
+
+    async def cancel_delayed_order(self, delayed_id, telegram_id: int):
+        """POST /delayed-orders/{id}/cancel {telegram_id} ->
+        {"ok": true}. Returns None on 404."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST", f"/delayed-orders/{delayed_id}/cancel",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /delayed-orders cancel returned 404 (endpoint not live yet)")
+                return None
+            raise
+
+    async def due_delayed_orders(self):
+        """GET /delayed-orders/due (secret-only) -> {"ok": true,
+        "delayed_orders": [...]} — scheduled rows whose run_at is
+        now or past. Returns [] on 404."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/delayed-orders/due", {})
+            )
+            return data.get("delayed_orders", []) if isinstance(data, dict) else []
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /delayed-orders/due returned 404 (endpoint not live yet)")
+                return []
+            raise
+
+    async def claim_delayed_order(self, delayed_id, telegram_id: int):
+        """POST /delayed-orders/{id}/claim {telegram_id} ->
+        {"ok": true} only when the row was still scheduled (the
+        atomic claim that makes placement exactly-once). Returns
+        False on 404 or when the row was already claimed."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "POST", f"/delayed-orders/{delayed_id}/claim",
+                    {"telegram_id": telegram_id},
+                )
+            )
+            return bool(data.get("ok")) if isinstance(data, dict) else False
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /delayed-orders claim returned 404 (endpoint not live yet)")
+                return False
+            raise
+
+    async def finish_delayed_order(self, delayed_id, telegram_id: int,
+                                   status: str, order_id=None, reason=None):
+        """POST /delayed-orders/{id}/finish {telegram_id, status,
+        order_id?, reason?} — status "placed" or "failed". Returns
+        None on 404."""
+        try:
+            payload = {"telegram_id": telegram_id, "status": status}
+            if order_id is not None:
+                payload["order_id"] = order_id
+            if reason is not None:
+                payload["reason"] = reason
+            return await self._send(
+                build_api_request(
+                    "POST", f"/delayed-orders/{delayed_id}/finish", payload,
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /delayed-orders finish returned 404 (endpoint not live yet)")
                 return None
             raise
 
@@ -4250,6 +4521,32 @@ def local_intent(text: str) -> dict:
         # link, how to make an account public, how to find a
         # username. Answered freely by the AI — never deflected.
         intent["intent"] = "how_to"
+    elif any(
+        p in s for p in (
+            "scheduled order", "scheduled orders", "delayed order",
+            "delayed orders",
+        )
+    ) and any(w in words for w in ("cancel", "stop", "delete", "remove")):
+        # "cancel my scheduled order" — a scheduled order, not the
+        # draft being built. Before the plain "cancel" branch below,
+        # which would eat it, and before "schedules" ("my scheduled
+        # orders" contains "my schedule").
+        intent["intent"] = "cancel_delayed"
+    elif any(
+        p in s for p in (
+            "my scheduled orders", "scheduled orders",
+            "my delayed orders", "delayed orders",
+        )
+    ):
+        intent["intent"] = "delayed_orders"
+    elif parse_delay_minutes(text) is not None and (
+        "order" in words or metric or links or intent["quantity"] is not None
+    ):
+        # "order 10k views to this link after 3 hrs" — a one-time
+        # order with a delay, not a repeat: "every 3 hours" has no
+        # after/in, so parse_delay_minutes returns None for it.
+        intent["intent"] = "delayed_order"
+        intent["delay_minutes"] = parse_delay_minutes(text)
     elif "stop" in words and (
         "repeat" in words or "recurr" in s or "every" in words
     ):
@@ -4327,6 +4624,7 @@ def local_intent(text: str) -> dict:
 # only hardens what the AI hands over.
 VALID_INTENTS = frozenset((
     "order", "recurring", "schedules", "stop_schedule", "balance",
+    "delayed_order", "delayed_orders", "cancel_delayed",
     "orders", "deposit", "deposit_status", "help", "how_to_order",
     "how_to", "miniapp", "social", "greeting", "paxyo_info",
     "source_question", "reseller", "contact", "paused_services",
@@ -4388,13 +4686,15 @@ async def extract_intent(text: str, user_id: int = None,
     as a deposit. The JSON is validated (strict mode, round 2):
     an unknown intent makes the whole reply unusable (None, as if
     there were no JSON); an unknown platform becomes None; a word,
-    fractional, zero or negative quantity / interval / amount
-    becomes None. Returns {"intent": ..., "platform": ...,
+    fractional, zero or negative quantity / interval / delay /
+    amount becomes None. Returns {"intent": ..., "platform": ...,
     "service_hint": ..., "service_id": ..., "link": ..., "quantity": ...,
-    "interval_minutes": ..., "amount": ..., "method": ...,
+    "interval_minutes": ..., "delay_minutes": ..., "amount": ...,
+    "method": ...,
     "phone": ..., "quantity_multiplier": ..., "orders": ...,
     "split": ...}. intent is one of order, recurring, schedules,
-    stop_schedule, balance, orders, deposit, deposit_status, help,
+    stop_schedule, delayed_order, delayed_orders, cancel_delayed,
+    balance, orders, deposit, deposit_status, help,
     how_to_order, how_to, miniapp, social, greeting, paxyo_info,
     source_question, reseller, contact, paused_services, usual, goal, budget, batch,
     change_order, refill, split_payment, max_for_balance, discount,
@@ -4474,6 +4774,7 @@ async def extract_intent(text: str, user_id: int = None,
     platform = _clean_platform(intent.get("platform"))
     quantity = _coerce_positive_int(intent.get("quantity"))
     interval_minutes = _coerce_positive_int(intent.get("interval_minutes"))
+    delay_minutes = _coerce_positive_int(intent.get("delay_minutes"))
     # "Double it" on the usual order: how many times the last order.
     multiplier = intent.get("quantity_multiplier")
     try:
@@ -4522,6 +4823,7 @@ async def extract_intent(text: str, user_id: int = None,
         "link": link,
         "quantity": quantity,
         "interval_minutes": interval_minutes,
+        "delay_minutes": delay_minutes,
         "amount": amount,
         "method": method,
         "phone": phone,
@@ -4791,6 +5093,23 @@ RECURRING_DRAFT = {}  # telegram_id -> {"platform", "service_hint", "link", "qua
 # "quantity", "interval_minutes", "total"}. No recurring plan is
 # created on the server until the user taps Confirm (or says yes).
 PENDING_RECURRING = {}
+# One-time delayed order being built, same shape plus
+# "delay_minutes". Cleared when the Confirm card is created (the
+# order then lives in PENDING_DELAYED), when the user cancels, or
+# when a different platform starts a new delayed order.
+DELAYED_DRAFT = {}  # telegram_id -> {"platform", "service_hint", "link", "quantity", "delay_minutes"}
+# Awaiting Confirm: confirm_id -> {"user_id", "service", "link",
+# "quantity", "total", "run_at", "idempotency_key"}. Nothing is
+# scheduled on the server until the user taps Confirm (or says yes).
+PENDING_DELAYED = {}
+# Scheduled delayed orders kept in memory when the Bot API is down
+# or the /delayed-orders endpoints are not live yet: id ->
+# {"id", "telegram_id", "service_id", "link", "quantity", "total",
+# "run_at", "status", "idempotency_key", "created_at"}. The scheduler
+# picks these up too, so a saved order is never lost — but memory
+# does not survive a restart, so the server is the durable home
+# (see delayed_store_* below).
+DELAYED_MEMORY = {}
 # Deposit being built, same pattern as PARTIAL: telegram_id ->
 # {"amount", "method", "phone"}. Cleared when the Confirm card is
 # created (the deposit then lives in PENDING_DEPOSIT) or on cancel.
@@ -5452,7 +5771,8 @@ def _empty_intent(intent_type, **fields):
     out = {
         "intent": intent_type, "platform": None, "service_hint": None,
         "service_id": None, "link": None, "quantity": None,
-        "interval_minutes": None, "amount": None, "method": None,
+        "interval_minutes": None, "delay_minutes": None, "amount": None,
+        "method": None,
         "phone": None, "quantity_multiplier": None, "orders": None,
         "split": None,
     }
@@ -6513,6 +6833,14 @@ def pending_note(user_id: int, lang: str) -> str:
             service=short_service_name(pending["service"].get("name")),
             quantity=pending["quantity"],
         )
+    _did, delayed = pending_delayed_for_user(user_id)
+    if delayed is not None:
+        return t(
+            "delayed_pending_reminder", lang,
+            service=short_service_name(delayed["service"].get("name")),
+            quantity=delayed["quantity"],
+            time=format_eat_run_at(delayed["run_at"]),
+        )
     partial = PARTIAL.get(user_id) or {}
     if not partial.get("link"):
         return ""
@@ -6910,6 +7238,37 @@ def _classify_state_block(user_id: int):
         line = f"Current state: waiting for Confirm on {name}"
         if qty is not None:
             line += f" x{qty}"
+        return line + "."
+    _, delayed = pending_delayed_for_user(user_id)
+    if delayed is not None:
+        service = delayed.get("service") or {}
+        name = short_service_name(service.get("name")) or "the order"
+        qty = delayed.get("quantity")
+        line = f"Current state: waiting for Confirm on a delayed order — {name}"
+        if qty is not None:
+            line += f" x{qty}"
+        return line + f", to be placed at about {format_eat_run_at(delayed.get('run_at'))}."
+    delayed_draft = DELAYED_DRAFT.get(user_id) or {}
+    if delayed_draft:
+        parts = [p for p in (
+            delayed_draft.get("platform"), delayed_draft.get("service_hint"),
+        ) if p]
+        line = "Current state: building a delayed order"
+        if parts:
+            line += " — " + " ".join(parts)
+        if delayed_draft.get("quantity") is not None:
+            line += f" x{delayed_draft.get('quantity')}"
+        if delayed_draft.get("delay_minutes") is not None:
+            line += f", in {format_interval(delayed_draft.get('delay_minutes'))}"
+        missing = []
+        if not delayed_draft.get("link"):
+            missing.append("waiting for the link")
+        if delayed_draft.get("quantity") is None:
+            missing.append("waiting for the quantity")
+        if delayed_draft.get("delay_minutes") is None:
+            missing.append("waiting for the delay")
+        if missing:
+            line += ", " + " and ".join(missing)
         return line + "."
     draft = PARTIAL.get(user_id) or {}
     if draft:
@@ -7682,6 +8041,109 @@ async def schedules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     record_exchange(user.id, update.message.text or "/schedules", text)
 
 
+async def delayed_orders_text(user_id: int, lang: str) -> str:
+    """Short list of the user's scheduled (delayed) orders, soonest
+    first, or the no-scheduled-orders line. Shared by the
+    delayed_orders intent and /delayed."""
+    try:
+        orders = await delayed_store_list(user_id)
+    except Exception as exc:
+        log.warning("delayed_store_list failed: %s", exc)
+        return t("not_understood", lang)
+    if not orders:
+        return t("no_delayed_orders", lang)
+    try:
+        services = await paxyo.services()
+    except Exception:
+        services = []
+    by_id = {}
+    for s in services or []:
+        try:
+            by_id[int(s.get("service"))] = s
+        except (TypeError, ValueError):
+            continue
+    lines = [t("delayed_list_title", lang)]
+    for i, order in enumerate(orders, 1):
+        service = by_id.get(order.get("service_id") or 0)
+        name = (
+            short_service_name(service.get("name"))
+            if service
+            else f"service {order.get('service_id')}"
+        )
+        lines.append(
+            f"{i}. {name} ×{order.get('quantity')} — "
+            f"{format_eat_run_at(order.get('run_at'))}"
+        )
+    return "\n".join(lines)
+
+
+async def delayed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    lang = lang_of("", user.language_code)
+    text = await delayed_orders_text(user.id, lang)
+    await update.message.reply_text(text)
+    record_exchange(user.id, update.message.text or "/delayed", text)
+
+
+def delayed_cancel_keyboard(orders):
+    """One button per scheduled order: "Cancel <name> ×<qty>".
+    Callback data "canceldelay:<id>" — the id is the server id or
+    the memory id, both short enough for Telegram's 64-byte limit."""
+    buttons = []
+    for order in orders:
+        label = f"Cancel ×{order.get('quantity')} — {format_eat_run_at(order.get('run_at'))}"
+        buttons.append([
+            InlineKeyboardButton(
+                label, callback_data=f"canceldelay:{order.get('id')}"
+            )
+        ])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def handle_cancel_delayed(update, lang, voice=False):
+    """Cancel one scheduled order. One scheduled order cancels at
+    once; several -> the user picks which one."""
+    user = update.effective_user
+    try:
+        orders = await delayed_store_list(user.id)
+    except Exception as exc:
+        log.warning("delayed_store_list failed: %s", exc)
+        await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
+        return
+    if not orders:
+        await reply_message(update.message, t("no_delayed_orders", lang), lang, voice=voice)
+        return
+    if len(orders) == 1:
+        order = orders[0]
+        await delayed_store_cancel(order, user.id)
+        try:
+            services = await paxyo.services()
+        except Exception:
+            services = []
+        service = None
+        for s in services or []:
+            try:
+                if int(s.get("service")) == int(order.get("service_id") or 0):
+                    service = s
+                    break
+            except (TypeError, ValueError):
+                continue
+        name = (
+            short_service_name(service.get("name"))
+            if service
+            else f"service {order.get('service_id')}"
+        )
+        await reply_message(
+            update.message, t("delayed_cancelled", lang, service=name),
+            lang, voice=voice,
+        )
+        return
+    await reply_message(
+        update.message, t("ask_which_delayed", lang), lang, voice=voice,
+        reply_markup=delayed_cancel_keyboard(orders),
+    )
+
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     lang = lang_of("", user.language_code)
@@ -7828,6 +8290,226 @@ async def start_recurring_plan(draft, user_id: int):
         return None, "plan_failed"
     schedule = result.get("schedule", result) if isinstance(result, dict) else {}
     return schedule, None
+
+
+def pending_delayed_for_user(user_id: int):
+    """(confirm_id, draft) of the user's most recent delayed order
+    awaiting Confirm, or (None, None)."""
+    for confirm_id, draft in reversed(list(PENDING_DELAYED.items())):
+        if draft["user_id"] == user_id:
+            return confirm_id, draft
+    return None, None
+
+
+def _delayed_record_fields(record):
+    """A server or memory delayed-order row -> the common dict the
+    scheduler and the list use. Server rows carry the same keys;
+    memory rows already do. Coerces the numeric fields."""
+    return {
+        "id": record.get("id"),
+        "telegram_id": record.get("telegram_id"),
+        "service_id": int(record["service_id"]) if record.get("service_id") is not None else None,
+        "link": record.get("link"),
+        "quantity": int(record["quantity"]) if record.get("quantity") is not None else None,
+        "total": record.get("total"),
+        "run_at": record.get("run_at"),
+        "status": record.get("status") or "scheduled",
+        "idempotency_key": record.get("idempotency_key"),
+        "created_at": record.get("created_at"),
+        "order_id": record.get("order_id"),
+        "reason": record.get("reason"),
+        "_memory": str(record.get("id", "")).startswith("mem-"),
+    }
+
+
+async def delayed_store_create(draft, user_id: int):
+    """Save a confirmed delayed order: server first (POST
+    /delayed-orders), memory when the endpoint is not live yet (404)
+    or the API is unreachable. Returns (record, error_key): record
+    is the common dict above, error_key is "delayed_save_failed" or
+    None. The memory fallback keeps the order even when the server
+    is down — but memory does not survive a restart, so the server
+    is the durable home; the scheduler warns when it places a
+    memory-only order."""
+    try:
+        result = await paxyo.create_delayed_order(
+            user_id,
+            int(draft["service"]["service"]),
+            draft["link"],
+            draft["quantity"],
+            draft["total"],
+            draft["run_at"],
+            draft["idempotency_key"],
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            result = None  # endpoint not live yet -> memory
+        else:
+            log.warning("create_delayed_order rejected: %s", exc.response.status_code)
+            return None, "delayed_save_failed"
+    except Exception as exc:
+        log.warning("create_delayed_order failed: %s", exc)
+        result = None  # API unreachable -> memory
+    if result is None:
+        record = _delayed_record_fields({
+            "id": "mem-" + uuid.uuid4().hex[:8],
+            "telegram_id": user_id,
+            "service_id": draft["service"]["service"],
+            "link": draft["link"],
+            "quantity": draft["quantity"],
+            "total": draft["total"],
+            "run_at": draft["run_at"],
+            "status": "scheduled",
+            "idempotency_key": draft["idempotency_key"],
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        DELAYED_MEMORY[record["id"]] = record
+        return record, None
+    record = result.get("delayed_order", result) if isinstance(result, dict) else {}
+    if not record or record.get("id") is None:
+        # The server answered but gave no id: keep the order in
+        # memory so it is not lost, rather than reporting success
+        # for an order nobody will place.
+        record = _delayed_record_fields({
+            "id": "mem-" + uuid.uuid4().hex[:8],
+            "telegram_id": user_id,
+            "service_id": draft["service"]["service"],
+            "link": draft["link"],
+            "quantity": draft["quantity"],
+            "total": draft["total"],
+            "run_at": draft["run_at"],
+            "status": "scheduled",
+            "idempotency_key": draft["idempotency_key"],
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        DELAYED_MEMORY[record["id"]] = record
+    return _delayed_record_fields(record), None
+
+
+async def delayed_store_list(user_id: int):
+    """The user's scheduled delayed orders: server rows plus
+    memory rows, soonest first. A server failure returns only the
+    memory rows, never an exception."""
+    rows = []
+    try:
+        rows.extend(await paxyo.list_delayed_orders(user_id))
+    except Exception as exc:
+        log.warning("list_delayed_orders failed: %s", exc)
+    rows.extend(
+        r for r in DELAYED_MEMORY.values()
+        if r.get("telegram_id") == user_id and r.get("status") == "scheduled"
+    )
+    out = [_delayed_record_fields(r) for r in rows]
+    out.sort(key=lambda r: str(r.get("run_at") or ""))
+    return out
+
+
+async def delayed_store_cancel(record, user_id: int):
+    """Cancel one scheduled delayed order (memory or server).
+    Returns True when it was cancelled, False otherwise."""
+    if record.get("_memory"):
+        return DELAYED_MEMORY.pop(record["id"], None) is not None
+    try:
+        result = await paxyo.cancel_delayed_order(record["id"], user_id)
+    except Exception as exc:
+        log.warning("cancel_delayed_order failed: %s", exc)
+        return False
+    return result is not None
+
+
+async def delayed_store_due():
+    """All scheduled delayed orders whose run_at is now or past:
+    server rows plus memory rows. A server failure returns only the
+    memory rows, never an exception."""
+    rows = []
+    try:
+        rows.extend(await paxyo.due_delayed_orders())
+    except Exception as exc:
+        log.warning("due_delayed_orders failed: %s", exc)
+    now = datetime.now(timezone.utc)
+    for record in DELAYED_MEMORY.values():
+        # A row stuck 'placing' for over 30 minutes is treated as due
+        # again (the claimer crashed between claim and place) — the
+        # claim below still guards against a double placement.
+        if record.get("status") == "placing":
+            try:
+                claimed_at = datetime.strptime(
+                    str(record.get("claimed_at")), "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                claimed_at = None
+            if claimed_at is None or now - claimed_at > timedelta(minutes=30):
+                rows.append(record)
+            continue
+        if record.get("status") != "scheduled":
+            continue
+        try:
+            run_at = datetime.strptime(
+                str(record.get("run_at")), "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if run_at <= now:
+            rows.append(record)
+    out = [_delayed_record_fields(r) for r in rows]
+    out.sort(key=lambda r: str(r.get("run_at") or ""))
+    return out
+
+
+async def delayed_store_claim(record):
+    """Claim a due delayed order for placement. The claim happens
+    BEFORE the order is placed, so a crash between claim and place
+    cannot double-place it: the server claim is an atomic UPDATE
+    (only a row still 'scheduled' is claimed); a memory row is
+    marked 'placing' in place. Returns True when this caller owns
+    the placement, False when someone else already claimed it."""
+    if record.get("_memory"):
+        stored = DELAYED_MEMORY.get(record["id"])
+        if stored is None or stored.get("status") not in ("scheduled", "placing"):
+            return False
+        if stored.get("status") == "placing":
+            # Re-claim of a stale claim only: a fresh claim is still
+            # owned by whoever made it.
+            try:
+                claimed_at = datetime.strptime(
+                    str(stored.get("claimed_at")), "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                claimed_at = None
+            if claimed_at is not None and datetime.now(timezone.utc) - claimed_at <= timedelta(minutes=30):
+                return False
+        stored["status"] = "placing"
+        stored["claimed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        return True
+    try:
+        return bool(await paxyo.claim_delayed_order(
+            record["id"], record.get("telegram_id")
+        ))
+    except Exception as exc:
+        log.warning("claim_delayed_order failed: %s", exc)
+        return False
+
+
+async def delayed_store_finish(record, status, order_id=None, reason=None):
+    """Mark a claimed delayed order placed or failed (server or
+    memory). Best-effort: a failure here never raises, so the
+    scheduler never crashes on bookkeeping."""
+    if record.get("_memory"):
+        stored = DELAYED_MEMORY.get(record["id"])
+        if stored is not None:
+            stored["status"] = status
+            if order_id is not None:
+                stored["order_id"] = order_id
+            if reason is not None:
+                stored["reason"] = reason
+        return
+    try:
+        await paxyo.finish_delayed_order(
+            record["id"], record.get("telegram_id"), status,
+            order_id=order_id, reason=reason,
+        )
+    except Exception as exc:
+        log.warning("finish_delayed_order failed: %s", exc)
 
 
 def pending_deposit_for_user(user_id: int):
@@ -8386,6 +9068,146 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         f"🔗 {merged['link']}",
     ]
     # Plan summary: always text — it carries the Confirm buttons.
+    await reply_message(
+        update.message, "\n".join(lines), lang,
+        reply_markup=confirm_keyboard(confirm_id),
+    )
+
+
+async def handle_delayed_order_text(update, text, intent, lang, voice=False):
+    """Build a one-time delayed order over several turns, then show
+    the Confirm card with the scheduled time. Nothing is scheduled
+    on the server until the user taps Confirm (or says yes): an
+    order that places itself later must never start on a
+    misunderstood message.
+
+    Missing pieces are asked in order: platform -> link -> quantity
+    -> delay. The link is resolved from the user's most recent order
+    when they say "that link" or give no link at all — the Confirm
+    card shows the link and the scheduled time, and Confirm is the
+    safety net.
+    """
+    user = update.effective_user
+    stored = DELAYED_DRAFT.get(user.id) or {}
+    new_platform = (intent.get("platform") or "").strip().lower()
+    stored_platform = (stored.get("platform") or "").strip().lower()
+    if new_platform and stored_platform and new_platform != stored_platform:
+        stored = {}
+    merged = {}
+    for key in ("platform", "service_hint", "link", "quantity", "delay_minutes"):
+        value = intent.get(key)
+        merged[key] = value if value is not None else stored.get(key)
+    if merged.get("delay_minutes") is None:
+        merged["delay_minutes"] = parse_delay_minutes(text)
+    try:
+        delay = (
+            int(merged["delay_minutes"])
+            if merged.get("delay_minutes") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        delay = None
+    merged["delay_minutes"] = delay
+    last_service_id = None
+    if not merged.get("link"):
+        last = await resolve_last_order(user.id)
+        if last and last.get("link"):
+            merged["link"] = last.get("link")
+            last_service_id = last.get("service_id")
+    if not merged.get("platform") and not merged.get("service_hint") and last_service_id is None:
+        DELAYED_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
+        return
+    if not merged.get("link"):
+        DELAYED_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(
+            update.message,
+            ask_link_text(merged.get("platform"), merged.get("service_hint"), lang),
+            lang, voice=voice,
+        )
+        return
+    if not merged.get("quantity"):
+        DELAYED_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(update.message, t("ask_quantity", lang), lang, voice=voice)
+        return
+    if not merged.get("delay_minutes"):
+        DELAYED_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(update.message, t("ask_delay", lang), lang, voice=voice)
+        return
+
+    # Complete order: pick the service and show the Confirm card with
+    # the scheduled time.
+    DELAYED_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("services fetch failed: %s", exc)
+        await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
+        return
+    service = None
+    if (
+        last_service_id is not None
+        and not merged.get("platform")
+        and not merged.get("service_hint")
+    ):
+        for s in services:
+            try:
+                if int(s.get("service", 0)) == int(last_service_id):
+                    service = s
+                    break
+            except (TypeError, ValueError):
+                continue
+    if service is None:
+        picks = pick_services(
+            services, platform=merged.get("platform"),
+            service_hint=merged.get("service_hint"),
+            reaction_emoji=reaction_emoji(text),
+        )
+        if not picks:
+            await reply_message(update.message, t("no_service", lang), lang, voice=voice)
+            return
+        service = picks[0]
+    error = validate_quantity(merged.get("quantity"), service)
+    if error:
+        await reply_message(
+            update.message,
+            t(
+                "bad_quantity",
+                lang,
+                service=short_service_name(service.get("name")),
+                min=service.get("min"),
+                max=service.get("max"),
+            ),
+            lang,
+            voice=voice,
+        )
+        return
+    quantity = int(merged["quantity"])
+    rate = float(service.get("rate_etb_per_1000", 0))
+    total = estimated_total_etb(rate, quantity)
+    run_at = delayed_run_at_iso(merged["delay_minutes"])
+    confirm_id = uuid.uuid4().hex[:12]
+    DELAYED_DRAFT.pop(user.id, None)
+    PENDING_DELAYED[confirm_id] = {
+        "user_id": user.id,
+        "service": service,
+        "link": merged["link"],
+        "quantity": quantity,
+        "total": total,
+        "run_at": run_at,
+        "idempotency_key": "delay-" + uuid.uuid4().hex[:16],
+    }
+    lines = [
+        t("confirm_title", lang),
+        "",
+        f"{short_service_name(service.get('name'))}",
+        f"🔢 {quantity}",
+        f"🧾 {format_money(total)} ETB",
+        f"🔗 {merged['link']}",
+        "",
+        t("delayed_confirm_note", lang, time=format_eat_run_at(run_at)),
+    ]
+    # Confirm card: always text — it carries the Confirm buttons.
     await reply_message(
         update.message, "\n".join(lines), lang,
         reply_markup=confirm_keyboard(confirm_id),
@@ -9993,6 +10815,26 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             )
             return
+        # A "yes" can also confirm a one-time delayed order awaiting
+        # Confirm: schedule it and answer with a short text
+        # confirmation (a scheduled order is always text).
+        delay_id, delay_draft = pending_delayed_for_user(user.id)
+        if delay_draft is not None:
+            PENDING_DELAYED.pop(delay_id, None)
+            record, error = await delayed_store_create(delay_draft, user.id)
+            if error:
+                await update.message.reply_text(t("delayed_save_failed", lang))
+                return
+            await update.message.reply_text(
+                t(
+                    "delayed_started",
+                    lang,
+                    quantity=delay_draft["quantity"],
+                    service=short_service_name(delay_draft["service"].get("name")),
+                    time=format_eat_run_at(delay_draft["run_at"]),
+                )
+            )
+            return
         # A "yes" can also confirm a deposit awaiting Confirm: start
         # it and answer with the payment instructions IN TEXT (they
         # carry a link/code the user must read, so voice is wrong).
@@ -10318,6 +11160,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
             log_confusion(user.id, text, t("cancelled", lang), "abandoned")
             return
+        delay_id, delay_draft = pending_delayed_for_user(user.id)
+        if delay_draft is not None and pending is None and rec_draft is None and dep_draft is None and batch is None:
+            PENDING_DELAYED.pop(delay_id, None)
+            DELAYED_DRAFT.pop(user.id, None)
+            await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
+            return
         if pending is not None:
             try:
                 schedules = await paxyo.list_recurring(user.id)
@@ -10355,6 +11204,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if schedules:
             await stop_schedules_flow(update, schedules, lang, voice=voice)
             return
+        # Or a scheduled (delayed) order.
+        try:
+            delayed = await delayed_store_list(user.id)
+        except Exception:
+            delayed = []
+        if delayed:
+            await handle_cancel_delayed(update, lang, voice=voice)
+            return
         # Nothing was being built or waiting: say so instead of
         # "Order cancelled." (live bug, 14 Nov 2026 19:10 and 19:29
         # EAT — a bare "Cancel" with nothing pending got a free AI
@@ -10363,11 +11220,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         had_something = bool(
             PARTIAL.get(user.id)
             or RECURRING_DRAFT.get(user.id)
+            or DELAYED_DRAFT.get(user.id)
             or DEPOSIT_DRAFT.get(user.id)
             or SPLIT_DRAFT.get(user.id)
         )
         clear_order_state(user.id)
         RECURRING_DRAFT.pop(user.id, None)
+        DELAYED_DRAFT.pop(user.id, None)
         DEPOSIT_DRAFT.pop(user.id, None)
         SPLIT_DRAFT.pop(user.id, None)
         dep_id, _dep = pending_deposit_for_user(user.id)
@@ -10376,6 +11235,9 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         batch_id, _batch = pending_batch_for_user(user.id)
         if batch_id is not None:
             PENDING_BATCH.pop(batch_id, None)
+        delay_id, _delay = pending_delayed_for_user(user.id)
+        if delay_id is not None:
+            PENDING_DELAYED.pop(delay_id, None)
         await reply_message(
             update.message,
             t(
@@ -10389,6 +11251,15 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if intent_type == "recurring":
         await handle_recurring_text(update, text, intent, lang, voice=voice)
+        return
+    if intent_type == "delayed_orders":
+        await reply_message(
+            update.message, await delayed_orders_text(user.id, lang),
+            lang, voice=voice,
+        )
+        return
+    if intent_type == "cancel_delayed":
+        await handle_cancel_delayed(update, lang, voice=voice)
         return
     if intent_type == "schedules":
         await reply_message(
@@ -10673,6 +11544,33 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "service_hint": stored_split.get("service_hint"),
         }, lang, voice=voice)
         return
+
+    # A one-time delayed order (owner, 14 Nov 2026): "order 10k views
+    # to this link after 3 hrs". The delay rides in the intent
+    # (delay_minutes, from the classifier or local_intent) or is read
+    # from the message itself; a delayed draft already being built
+    # keeps routing here on follow-up turns (link / quantity / delay
+    # answers), unless the message names a different platform — that
+    # starts a new order and drops the delayed draft, the same rule
+    # the normal order flow uses.
+    _delay = intent.get("delay_minutes") or parse_delay_minutes(text)
+    if intent_type == "delayed_order" or (_delay is not None and intent_type == "order"):
+        intent = dict(intent)
+        intent["delay_minutes"] = _delay
+        await handle_delayed_order_text(update, text, intent, lang, voice=voice)
+        return
+    if user.id in DELAYED_DRAFT and intent_type in ("order", "unclear", "delayed_order"):
+        _stored_delayed = DELAYED_DRAFT[user.id]
+        _new_platform = (intent.get("platform") or "").strip().lower()
+        _stored_platform = (_stored_delayed.get("platform") or "").strip().lower()
+        if _stored_delayed.get("delay_minutes") is not None and not (
+            _new_platform and _stored_platform and _new_platform != _stored_platform
+        ):
+            await handle_delayed_order_text(update, text, intent, lang, voice=voice)
+            return
+        # A different platform: drop the delayed draft and fall
+        # through to the normal order flow.
+        DELAYED_DRAFT.pop(user.id, None)
 
     # --- order flow: multi-turn state ---
     # What the user already gave is remembered per user in PARTIAL, so a
@@ -11849,6 +12747,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # starts a fresh order.
         PARTIAL.pop(user.id, None)
         RECURRING_DRAFT.pop(user.id, None)
+        DELAYED_DRAFT.pop(user.id, None)
         await query.edit_message_text(t("ask_platform", lang))
         return
 
@@ -11901,6 +12800,43 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = short_service_name(sched.get("service_name")) or f"service {sched.get('service_id')}"
         await query.edit_message_text(
             t("schedule_stopped", lang, service=name)
+        )
+        return
+
+    if action == "canceldelay":
+        # Cancel one scheduled order from a button.
+        try:
+            orders = await delayed_store_list(user.id)
+        except Exception as exc:
+            log.warning("delayed_store_list failed: %s", exc)
+            await query.edit_message_text(t("not_understood", lang))
+            return
+        order = next(
+            (o for o in orders if str(o.get("id")) == arg), None
+        )
+        if order is None:
+            await query.edit_message_text(t("no_delayed_orders", lang))
+            return
+        await delayed_store_cancel(order, user.id)
+        try:
+            services = await paxyo.services()
+        except Exception:
+            services = []
+        service = None
+        for s in services or []:
+            try:
+                if int(s.get("service")) == int(order.get("service_id") or 0):
+                    service = s
+                    break
+            except (TypeError, ValueError):
+                continue
+        name = (
+            short_service_name(service.get("name"))
+            if service
+            else f"service {order.get('service_id')}"
+        )
+        await query.edit_message_text(
+            t("delayed_cancelled", lang, service=name)
         )
         return
 
@@ -11972,6 +12908,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 quantity=rec_draft["quantity"],
                 service=short_service_name(rec_draft["service"].get("name")),
                 interval=format_interval(rec_draft["interval_minutes"]),
+            )
+        )
+        return
+
+    delay_draft = PENDING_DELAYED.pop(arg, None)
+    if delay_draft is not None:
+        if delay_draft["user_id"] != user.id:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        if action == "cancel":
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        # Confirm tap: schedule the order and replace the card with
+        # a short confirmation (text).
+        record, error = await delayed_store_create(delay_draft, user.id)
+        if error:
+            await query.edit_message_text(t("delayed_save_failed", lang))
+            return
+        await query.edit_message_text(
+            t(
+                "delayed_started",
+                lang,
+                quantity=delay_draft["quantity"],
+                service=short_service_name(delay_draft["service"].get("name")),
+                time=format_eat_run_at(delay_draft["run_at"]),
             )
         )
         return
@@ -12130,19 +13091,149 @@ async def run_one_schedule(app, sched, services_by_id):
     )
 
 
-async def run_scheduler_cycle(app):
-    """One pass over due repeating orders. Never raises."""
+def _delayed_failure_reason(exc):
+    """An honest short reason for a failed delayed placement, from
+    the server's error body when it has one — never invented."""
+    response = getattr(exc, "response", None)
+    data = {}
+    if response is not None:
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+    if isinstance(data, dict):
+        message = data.get("error") or data.get("message")
+        if message:
+            return str(message)
+    return "the order could not be placed"
+
+
+async def run_one_delayed(app, item, services_by_id):
+    """Place one due one-time delayed order, exactly once.
+
+    Balance is checked BEFORE the claim (a transient balance
+    failure just retries next cycle); the claim happens BEFORE the
+    order is placed, so a crash between claim and place cannot
+    double-place it — a row stuck 'placing' for over 30 minutes is
+    treated as due again (see api-delayed-orders.php), so a crash
+    delays the order instead of losing it. On success the user is
+    messaged with the order ID; on failure, honestly with the
+    reason — never invented."""
+    delayed_id = item.get("id")
+    user_id = item.get("telegram_id")
     try:
-        due = await paxyo.due_recurring()
+        service_id = int(item.get("service_id"))
+    except (TypeError, ValueError):
+        service_id = None
+    service = services_by_id.get(service_id) if service_id is not None else None
+    if service is None:
+        log.warning(
+            "delayed %s: service %s not found, marking failed",
+            delayed_id, item.get("service_id"),
+        )
+        await delayed_store_finish(
+            item, "failed", reason="the service is no longer available"
+        )
+        if user_id is not None:
+            await notify_user(
+                app, user_id,
+                t(
+                    "delayed_failed", "en",
+                    service=f"service {item.get('service_id')}",
+                    reason="the service is no longer available",
+                ),
+            )
+        return
+    try:
+        quantity = int(item.get("quantity") or 0)
+    except (TypeError, ValueError):
+        quantity = 0
+    if quantity <= 0:
+        log.warning("delayed %s: bad quantity, marking failed", delayed_id)
+        await delayed_store_finish(
+            item, "failed", reason="the quantity is not valid anymore"
+        )
+        if user_id is not None:
+            await notify_user(
+                app, user_id,
+                t(
+                    "delayed_failed", "en",
+                    service=short_service_name(service.get("name")),
+                    reason="the quantity is not valid anymore",
+                ),
+            )
+        return
+    total = estimated_total_etb(float(service.get("rate_etb_per_1000", 0)), quantity)
+    try:
+        bal = await paxyo.balance(user_id)
     except Exception as exc:
-        log.warning("recurring due fetch failed: %s", exc)
+        log.warning("delayed %s: balance check failed: %s", delayed_id, exc)
+        return  # retry next cycle; nothing claimed, nothing placed
+    balance = float(bal.get("balance", 0)) if bal.get("found") else 0.0
+    name = short_service_name(service.get("name"))
+    if balance < total:
+        # Never place an order the user cannot pay for: mark the
+        # scheduled order failed and tell the user why, once.
+        await delayed_store_finish(
+            item, "failed", reason="insufficient balance"
+        )
+        await notify_user(
+            app, user_id,
+            t(
+                "delayed_insufficient", "en",
+                balance=format_money(balance), total=format_money(total),
+            ),
+        )
+        return
+    if not await delayed_store_claim(item):
+        # Someone (another process, or a previous cycle) already
+        # claimed it: exactly-once means this caller does nothing.
+        return
+    try:
+        result = await paxyo.create_order(
+            user_id, int(service["service"]), item.get("link"), quantity,
+            item.get("idempotency_key") or f"delay-{delayed_id}",
+        )
+    except Exception as exc:
+        reason = _delayed_failure_reason(exc)
+        log.warning("delayed %s: order failed: %s", delayed_id, exc)
+        await delayed_store_finish(item, "failed", reason=reason)
+        await notify_user(
+            app, user_id,
+            t("delayed_failed", "en", service=name, reason=reason),
+        )
+        return
+    order = result.get("order", result) if isinstance(result, dict) else {}
+    order_id = order.get("id") or order.get("order_id") or "?"
+    status = order.get("status", "pending")
+    await delayed_store_finish(item, "placed", order_id=order_id)
+    await notify_user(
+        app, user_id,
+        t(
+            "delayed_placed", "en", quantity=quantity, service=name,
+            order_id=order_id, status=status,
+        ),
+    )
+
+
+async def run_delayed_cycle(app):
+    """One pass over due one-time delayed orders. Never raises.
+
+    Caveat (owner, 14 Nov 2026): on free Render the process sleeps
+    ~15 minutes idle, so a due order may run late, on the next
+    wake — exact timing needs an always-on server (the Google
+    Cloud move, approved 22:58 EAT, fixes this too)."""
+    try:
+        due = await delayed_store_due()
+    except Exception as exc:
+        log.warning("delayed due fetch failed: %s", exc)
         return
     if not due:
         return
     try:
         services = await paxyo.services()
     except Exception as exc:
-        log.warning("recurring services fetch failed: %s", exc)
+        log.warning("delayed services fetch failed: %s", exc)
         return
     by_id = {}
     for s in services or []:
@@ -12150,16 +13241,43 @@ async def run_scheduler_cycle(app):
             by_id[int(s.get("service"))] = s
         except (TypeError, ValueError):
             continue
-    for sched in due:
-        if not isinstance(sched, dict):
+    for item in due:
+        if not isinstance(item, dict):
             continue
-        await run_one_schedule(app, sched, by_id)
+        await run_one_delayed(app, item, by_id)
+
+
+async def run_scheduler_cycle(app):
+    """One pass over due repeating orders and due one-time delayed
+    orders. Never raises."""
+    try:
+        due = await paxyo.due_recurring()
+    except Exception as exc:
+        log.warning("recurring due fetch failed: %s", exc)
+        due = []
+    if due:
+        try:
+            services = await paxyo.services()
+        except Exception as exc:
+            log.warning("recurring services fetch failed: %s", exc)
+            services = []
+        by_id = {}
+        for s in services or []:
+            try:
+                by_id[int(s.get("service"))] = s
+            except (TypeError, ValueError):
+                continue
+        for sched in due:
+            if not isinstance(sched, dict):
+                continue
+            await run_one_schedule(app, sched, by_id)
+    await run_delayed_cycle(app)
 
 
 async def scheduler_loop(app):
-    """Background loop: run the due repeating orders every 60 seconds
-    until the task is cancelled (on shutdown). Started next to the
-    webhook server in serve_webhook()."""
+    """Background loop: run the due repeating orders and due delayed
+    orders every 60 seconds until the task is cancelled (on
+    shutdown). Started next to the webhook server in serve_webhook()."""
     while True:
         await run_scheduler_cycle(app)
         await asyncio.sleep(RECURRING_CHECK_SECONDS)
@@ -12207,6 +13325,7 @@ def build_application():
     app.add_handler(CommandHandler("balance", balance_cmd))
     app.add_handler(CommandHandler("orders", orders_cmd))
     app.add_handler(CommandHandler("schedules", schedules_cmd))
+    app.add_handler(CommandHandler("delayed", delayed_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))

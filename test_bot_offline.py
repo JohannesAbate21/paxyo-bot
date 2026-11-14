@@ -397,7 +397,8 @@ class FakePaxyo:
     def __init__(self, balance=1000.0, recent=None, schedules=None, due=None,
                  deposit_none=False, deposit_error=None,
                  deposits=None, deposits_none=False, status="pending",
-                 session=None):
+                 session=None, delayed=None, delayed_due=None,
+                 delayed_none=False, claim_ok=True):
         self._balance = balance
         self._status = status
         self.orders_created = []
@@ -421,6 +422,18 @@ class FakePaxyo:
         self.session_loads = []
         self.sessions_saved = []
         self.confusions_logged = []
+        # One-time delayed orders (14 Nov 2026): a seeded list for
+        # list_delayed_orders, due rows for due_delayed_orders, and
+        # a record of every create / cancel / claim / finish.
+        self._delayed = list(delayed) if delayed is not None else []
+        self._delayed_due = list(delayed_due) if delayed_due is not None else []
+        self._delayed_none = delayed_none
+        self._claim_ok = claim_ok
+        self._delayed_next_id = 101
+        self.delayed_created = []
+        self.delayed_cancelled = []
+        self.delayed_claims = []
+        self.delayed_finished = []
 
     async def services(self):
         return SAMPLE_SERVICES
@@ -538,6 +551,65 @@ class FakePaxyo:
             "reason": reason,
         })
         return {"ok": True, "id": len(self.confusions_logged)}
+
+    # One-time delayed orders (14 Nov 2026): mirror POST/GET
+    # /delayed-orders, /cancel, /due, /claim, /finish.
+    async def create_delayed_order(self, telegram_id, service_id, link,
+                                   quantity, total, run_at, idempotency_key):
+        """delayed_none=True returns None (the real client does that
+        on a 404: endpoint not live yet)."""
+        if self._delayed_none:
+            return None
+        record = {
+            "id": self._delayed_next_id, "telegram_id": telegram_id,
+            "service_id": service_id, "link": link,
+            "quantity": quantity, "total": total, "run_at": run_at,
+            "status": "scheduled", "idempotency_key": idempotency_key,
+            "created_at": "2026-11-14T20:00:00Z",
+        }
+        self._delayed_next_id += 1
+        self.delayed_created.append(record)
+        self._delayed.append(record)
+        return {"ok": True, "id": record["id"], "delayed_order": dict(record)}
+
+    async def list_delayed_orders(self, telegram_id, status="scheduled"):
+        return [dict(r) for r in self._delayed
+                if r.get("telegram_id") == telegram_id
+                and r.get("status") == status]
+
+    async def cancel_delayed_order(self, delayed_id, telegram_id):
+        self.delayed_cancelled.append(delayed_id)
+        for r in self._delayed:
+            if str(r.get("id")) == str(delayed_id):
+                r["status"] = "cancelled"
+        return {"ok": True}
+
+    async def due_delayed_orders(self):
+        return [dict(r) for r in self._delayed_due]
+
+    async def claim_delayed_order(self, delayed_id, telegram_id):
+        # Mirror the server: the first claim wins; a second claim
+        # for the same row is refused. claim_ok=False simulates a
+        # row someone else already claimed.
+        if not self._claim_ok:
+            return False
+        if delayed_id in self.delayed_claims:
+            return False
+        self.delayed_claims.append(delayed_id)
+        return True
+
+    async def finish_delayed_order(self, delayed_id, telegram_id, status,
+                                   order_id=None, reason=None):
+        self.delayed_finished.append({
+            "id": delayed_id, "status": status,
+            "order_id": order_id, "reason": reason,
+        })
+        # Mirror the server: the row is no longer due.
+        self._delayed_due = [
+            r for r in self._delayed_due
+            if str(r.get("id")) != str(delayed_id)
+        ]
+        return {"ok": True}
 
 
 class FakeQuery:
@@ -1277,6 +1349,20 @@ def recurring_intent(**fields):
     return out
 
 
+def delayed_intent(**fields):
+    """A delayed-order intent with order fields + delay in minutes."""
+    out = {
+        "intent": "delayed_order",
+        "platform": None,
+        "service_hint": None,
+        "link": None,
+        "quantity": None,
+        "delay_minutes": None,
+    }
+    out.update(fields)
+    return out
+
+
 class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
     """The plan feature: 'order 1k views on that link every 3 hours'
     builds a plan, shows a summary, and starts NOTHING until Confirm."""
@@ -1582,6 +1668,20 @@ def due_schedule(**overrides):
     return sched
 
 
+def due_delayed(**overrides):
+    """A scheduled delayed order whose run_at is in the past (due).
+    run_at is MySQL DATETIME format, as the server stores it."""
+    item = {
+        "id": 11, "telegram_id": 1, "service_id": 1001,
+        "link": "https://instagram.com/p/x", "quantity": 1000,
+        "total": 42.0, "run_at": "2026-11-13 15:00:00",
+        "status": "scheduled", "idempotency_key": "delay-abc123",
+        "created_at": "2026-11-13T12:00:00Z",
+    }
+    item.update(overrides)
+    return item
+
+
 class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
     """The 60-second loop: due schedules run once, balance is checked
     first, and a schedule that slept only ever runs once on wake."""
@@ -1684,6 +1784,604 @@ class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
         with mock.patch("bot.paxyo", BrokenPaxyo()):
             await bot.run_scheduler_cycle(app)  # must not raise
         self.assertEqual(app.bot.sent, [])
+
+
+class TestDelayedOrders(unittest.IsolatedAsyncioTestCase):
+    """One-time delayed orders (14 Nov 2026): "order 10k views to
+    this link after 3 hrs" builds a draft, shows a Confirm card with
+    the scheduled time in EAT, and places ONCE at that time — even
+    after a restart, even if the user is asleep. Nothing is
+    scheduled until Confirm."""
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.PENDING_DELAYED.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.DELAYED_MEMORY.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.PENDING_DELAYED.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.DELAYED_MEMORY.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    async def _send(self, text, intent, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _callback(self, data, paxyo=None):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def _extract(self, payload):
+        """extract_intent with the AI mocked to return `payload`."""
+        with mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(return_value=json.dumps(payload)),
+        ):
+            return await bot.extract_intent("test message")
+
+    def _delayed_intent(self):
+        return delayed_intent(
+            platform="instagram", service_hint="followers",
+            link="https://instagram.com/p/x", quantity=1000,
+            delay_minutes=180,
+        )
+
+    def _delayed_list(self):
+        return [
+            due_delayed(),
+            due_delayed(id=12, link="https://instagram.com/p/y",
+                        quantity=500),
+        ]
+
+    # (1) Delay parsing ------------------------------------------------
+
+    def test_parse_delay_minutes(self):
+        cases = {
+            "order 10k views to this link after 3 hrs": 180,
+            "in 2 hours": 120,
+            "after 30 minutes": 30,
+            "in 45 mins": 45,
+            "after 1 hour 30 minutes": 90,
+            "after 2 days": 2880,
+            "after three hours": 180,
+            "in forty five minutes": 45,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(bot.parse_delay_minutes(text), expected)
+
+    def test_parse_delay_minutes_rejects_non_delays(self):
+        for text in (
+            "order 1k views every 3 hours",  # recurring, not delayed
+            "order 1k views",
+            "in the morning",
+            "after 0 hours",
+            "after I pay",
+            "",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(bot.parse_delay_minutes(text))
+
+    def test_delayed_run_at_and_eat_format(self):
+        now = datetime.now(timezone.utc)
+        run_at = bot.delayed_run_at_iso(180)
+        run = datetime.strptime(run_at, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+        self.assertAlmostEqual(
+            (run - now).total_seconds(), 180 * 60, delta=120
+        )
+        # "HH:MM EAT" today, or "HH:MM EAT tomorrow" past midnight.
+        self.assertIn("EAT", bot.format_eat_run_at(run_at))
+        # Tomorrow noon EAT is always "tomorrow", whatever the hour.
+        eat_now = datetime.now(timezone.utc).astimezone(bot.EAT_TZ)
+        tomorrow_noon = (eat_now + timedelta(days=1)).replace(
+            hour=12, minute=0, second=0, microsecond=0
+        )
+        run_at_tomorrow = tomorrow_noon.astimezone(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        self.assertIn("tomorrow", bot.format_eat_run_at(run_at_tomorrow))
+        self.assertEqual(bot.format_eat_run_at("not a time"), "not a time")
+
+    # (2) Local intent + strict extraction ----------------------------
+
+    def test_local_intent_reads_delayed_order(self):
+        out = bot.local_intent("order 10k views to this link after 3 hrs")
+        self.assertEqual(out["intent"], "delayed_order")
+        self.assertEqual(out["delay_minutes"], 180)
+        self.assertEqual(out["quantity"], 10000)
+
+    def test_local_intent_recurring_stays_recurring(self):
+        out = bot.local_intent("order 1k views every 3 hours")
+        self.assertEqual(out["intent"], "recurring")
+        self.assertIsNone(out.get("delay_minutes"))
+
+    def test_local_intent_scheduled_orders_and_cancel(self):
+        self.assertEqual(
+            bot.local_intent("my scheduled orders")["intent"],
+            "delayed_orders",
+        )
+        self.assertEqual(
+            bot.local_intent("cancel my scheduled order")["intent"],
+            "cancel_delayed",
+        )
+        self.assertEqual(
+            bot.local_intent("show my delayed orders")["intent"],
+            "delayed_orders",
+        )
+
+    async def test_extract_intent_keeps_numeric_delay(self):
+        out = await self._extract({
+            "intent": "delayed_order", "platform": "tiktok",
+            "service_hint": "views",
+            "link": "https://www.tiktok.com/@x/video/1",
+            "quantity": 10000, "delay_minutes": 180,
+        })
+        self.assertEqual(out["intent"], "delayed_order")
+        self.assertEqual(out["delay_minutes"], 180)
+
+    async def test_extract_intent_rejects_word_delay(self):
+        out = await self._extract({
+            "intent": "delayed_order", "delay_minutes": "three hours",
+        })
+        self.assertIsNone(out["delay_minutes"])
+
+    async def test_extract_intent_rejects_unknown_delayed_intent(self):
+        out = await self._extract({"intent": "delayed_ordr"})
+        self.assertIsNotNone(out)
+        self.assertIsNone(out["intent"])
+
+    # (3) Draft + Confirm card ----------------------------------------
+
+    async def test_confirm_card_shows_scheduled_time_and_creates_nothing(self):
+        paxyo = FakePaxyo()
+        msg = await self._send(
+            "order 1000 followers on that link after 3 hours",
+            self._delayed_intent(), paxyo=paxyo,
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertNotIn("Instagram Followers | Fast", msg.text_sent[0])
+        self.assertIn("42.00", msg.text_sent[0])  # 42 ETB/1000 x 1000
+        self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        self.assertIn("Will be placed at about", msg.text_sent[0])
+        self.assertIn("EAT", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # Confirm/Cancel buttons
+        self.assertEqual(paxyo.delayed_created, [])  # nothing yet
+        self.assertEqual(len(bot.PENDING_DELAYED), 1)
+        confirm_id = next(iter(bot.PENDING_DELAYED))
+        draft = bot.PENDING_DELAYED[confirm_id]
+        run = datetime.strptime(
+            draft["run_at"], "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
+        self.assertAlmostEqual(
+            (run - datetime.now(timezone.utc)).total_seconds(),
+            180 * 60, delta=120,
+        )
+        self.assertTrue(draft["idempotency_key"].startswith("delay-"))
+
+    async def test_confirm_button_schedules_the_order(self):
+        paxyo = FakePaxyo()
+        await self._send(
+            "order 1000 followers after 3 hours", self._delayed_intent(),
+            paxyo=paxyo,
+        )
+        confirm_id = next(iter(bot.PENDING_DELAYED))
+        query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(len(paxyo.delayed_created), 1)
+        created = paxyo.delayed_created[0]
+        self.assertEqual(created["service_id"], 1001)
+        self.assertEqual(created["quantity"], 1000)
+        self.assertTrue(created["idempotency_key"].startswith("delay-"))
+        self.assertEqual(bot.PENDING_DELAYED, {})
+        self.assertIn("Scheduled!", query.edited[0])
+        self.assertIn("EAT", query.edited[0])
+
+    async def test_yes_acceptance_schedules_the_order(self):
+        paxyo = FakePaxyo()
+        await self._send(
+            "order 1000 followers after 3 hours", self._delayed_intent(),
+            paxyo=paxyo,
+        )
+        msg = await self._send("yes", intent_of("unclear"), paxyo=paxyo)
+        self.assertEqual(len(paxyo.delayed_created), 1)
+        self.assertIn("Scheduled!", msg.text_sent[0])
+        self.assertIn("EAT", msg.text_sent[0])
+
+    async def test_cancel_button_schedules_nothing(self):
+        paxyo = FakePaxyo()
+        await self._send(
+            "order 1000 followers after 3 hours", self._delayed_intent(),
+            paxyo=paxyo,
+        )
+        confirm_id = next(iter(bot.PENDING_DELAYED))
+        query = await self._callback(f"cancel:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(paxyo.delayed_created, [])
+        self.assertEqual(query.edited, ["Order cancelled."])
+        self.assertEqual(bot.PENDING_DELAYED, {})
+
+    async def test_missing_delay_asks_how_long(self):
+        paxyo = FakePaxyo()
+        msg = await self._send(
+            "order 1000 followers on that link",
+            delayed_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(
+            msg.text_sent, ["In how long? (for example: after 3 hours)"]
+        )
+        self.assertEqual(paxyo.delayed_created, [])
+        self.assertEqual(bot.DELAYED_DRAFT[1]["quantity"], 1000)
+
+    async def test_missing_quantity_asks_how_many(self):
+        paxyo = FakePaxyo()
+        msg = await self._send(
+            "order followers on that link after 3 hours",
+            delayed_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", delay_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(msg.text_sent, ["How many? (for example 1000)"])
+        self.assertEqual(paxyo.delayed_created, [])
+
+    async def test_multi_turn_link_completes_delayed_draft(self):
+        paxyo = FakePaxyo()
+        msg = await self._send(
+            "order 1000 followers after 3 hours",
+            delayed_intent(
+                platform="instagram", service_hint="followers",
+                quantity=1000, delay_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(
+            msg.text_sent, ["Please send your Instagram profile link."]
+        )
+        msg = await self._send(
+            "https://instagram.com/p/x",
+            intent_of("order", link="https://instagram.com/p/x"),
+            paxyo=paxyo,
+        )
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertIn("Will be placed at about", msg.text_sent[0])
+        self.assertIn("EAT", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_normal_order_without_delay_is_not_delayed(self):
+        paxyo = FakePaxyo()
+        msg = await self._send(
+            "order 1000 followers on that link",
+            intent_of(
+                "order", platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertEqual(bot.PENDING_DELAYED, {})
+        self.assertNotIn("Will be placed", msg.text_sent[0])
+
+    async def test_different_platform_drops_delayed_draft(self):
+        paxyo = FakePaxyo()
+        await self._send(
+            "order 1000 followers after 3 hours",
+            delayed_intent(
+                platform="instagram", service_hint="followers",
+                quantity=1000, delay_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(bot.DELAYED_DRAFT[1]["platform"], "instagram")
+        msg = await self._send(
+            "order 1000 tiktok followers",
+            intent_of(
+                "order", platform="tiktok", service_hint="followers",
+                quantity=1000,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(bot.DELAYED_DRAFT, {})
+        self.assertIn("TikTok", msg.text_sent[0])
+        self.assertIn("profile link", msg.text_sent[0])
+
+    # (4) State block ---------------------------------------------------
+
+    def test_state_block_names_delayed_confirm(self):
+        bot.PENDING_DELAYED["c1"] = {
+            "user_id": 1,
+            "service": {"name": "Instagram Followers | Fast"},
+            "link": "https://instagram.com/p/x",
+            "quantity": 1000, "total": 42.0,
+            "run_at": bot.delayed_run_at_iso(180),
+            "idempotency_key": "delay-abc",
+        }
+        block = bot._classify_state_block(1)
+        self.assertIn("waiting for Confirm", block)
+        self.assertIn("delayed order", block)
+        self.assertIn("EAT", block)
+
+    def test_state_block_names_delayed_draft(self):
+        bot.DELAYED_DRAFT[1] = {
+            "platform": "tiktok", "service_hint": "views",
+            "quantity": 1000,
+        }
+        block = bot._classify_state_block(1)
+        self.assertIn("building a delayed order", block)
+        self.assertIn("waiting for the delay", block)
+
+    # (5) List and cancel ------------------------------------------------
+
+    async def test_delayed_orders_intent_lists_them(self):
+        msg = await self._send(
+            "my scheduled orders", intent_of("delayed_orders"),
+            paxyo=FakePaxyo(delayed=self._delayed_list()),
+        )
+        self.assertIn("Your scheduled orders:", msg.text_sent[0])
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertNotIn("Instagram Followers | Fast", msg.text_sent[0])
+        self.assertIn("×1000", msg.text_sent[0])
+        self.assertIn("×500", msg.text_sent[0])
+        self.assertIn("EAT", msg.text_sent[0])
+
+    async def test_delayed_orders_intent_with_none(self):
+        msg = await self._send(
+            "my scheduled orders", intent_of("delayed_orders"),
+            paxyo=FakePaxyo(delayed=[]),
+        )
+        self.assertEqual(msg.text_sent, ["You have no scheduled orders."])
+
+    async def test_delayed_command_lists_them(self):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.paxyo", FakePaxyo(delayed=self._delayed_list())
+        ):
+            await bot.delayed_cmd(update, None)
+        self.assertIn("Your scheduled orders:", msg.text_sent[0])
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+
+    async def test_cancel_delayed_with_one_cancels_it(self):
+        paxyo = FakePaxyo(delayed=self._delayed_list()[:1])
+        msg = await self._send(
+            "cancel my scheduled order", intent_of("cancel_delayed"),
+            paxyo=paxyo,
+        )
+        self.assertEqual(paxyo.delayed_cancelled, [11])
+        self.assertEqual(
+            msg.text_sent,
+            ["Cancelled the scheduled order for Instagram Followers."],
+        )
+
+    async def test_cancel_delayed_with_several_asks_which(self):
+        paxyo = FakePaxyo(delayed=self._delayed_list())
+        msg = await self._send(
+            "cancel my scheduled order", intent_of("cancel_delayed"),
+            paxyo=paxyo,
+        )
+        self.assertEqual(paxyo.delayed_cancelled, [])
+        self.assertEqual(
+            msg.text_sent, ["Which scheduled order do you want to cancel?"]
+        )
+        self.assertIsNotNone(msg.markups[0])  # cancel buttons
+
+    async def test_canceldelay_button_cancels_that_order(self):
+        paxyo = FakePaxyo(delayed=self._delayed_list())
+        query = await self._callback("canceldelay:12", paxyo=paxyo)
+        self.assertEqual(paxyo.delayed_cancelled, [12])
+        self.assertEqual(
+            query.edited,
+            ["Cancelled the scheduled order for Instagram Followers."],
+        )
+
+    async def test_save_failure_says_try_again(self):
+        class FailingSavePaxyo(FakePaxyo):
+            async def create_delayed_order(self, *args, **kwargs):
+                req = bot.httpx.Request(
+                    "POST", "https://paxyo.et/api/bot/delayed-orders"
+                )
+                resp = bot.httpx.Response(
+                    500, json={"error": "db down"}, request=req
+                )
+                raise bot.httpx.HTTPStatusError(
+                    "server error", request=req, response=resp
+                )
+
+        paxyo = FailingSavePaxyo()
+        await self._send(
+            "order 1000 followers after 3 hours", self._delayed_intent(),
+            paxyo=paxyo,
+        )
+        confirm_id = next(iter(bot.PENDING_DELAYED))
+        query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(paxyo.delayed_created, [])
+        self.assertEqual(len(bot.DELAYED_MEMORY), 0)
+        self.assertEqual(
+            query.edited,
+            ["I couldn't schedule that order. Please try again."],
+        )
+
+    def test_pending_note_names_delayed_confirm(self):
+        bot.PENDING_DELAYED["c1"] = {
+            "user_id": 1,
+            "service": {"name": "Instagram Followers | Fast"},
+            "link": "https://instagram.com/p/x",
+            "quantity": 1000, "total": 42.0,
+            "run_at": bot.delayed_run_at_iso(180),
+            "idempotency_key": "delay-abc",
+        }
+        note = bot.pending_note(1, "en")
+        self.assertIn("scheduled order waiting", note)
+        self.assertIn("EAT", note)
+
+    # (6) Scheduler: due runs once, balance first, never early ----------
+
+    async def test_due_delayed_places_one_order_and_notifies(self):
+        paxyo = FakePaxyo(delayed_due=[due_delayed()])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(len(paxyo.orders_created), 1)
+        self.assertEqual(
+            paxyo.orders_created[0],
+            (1001, "https://instagram.com/p/x", 1000),
+        )
+        self.assertEqual(paxyo.order_keys, ["delay-abc123"])
+        self.assertEqual(
+            paxyo.delayed_finished,
+            [{"id": 11, "status": "placed", "order_id": 1827,
+              "reason": None}],
+        )
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertEqual(app.bot.sent[0][0], 1)
+        self.assertIn("scheduled order is placed", app.bot.sent[0][1])
+        self.assertIn("1827", app.bot.sent[0][1])
+
+    async def test_two_cycles_place_once(self):
+        paxyo = FakePaxyo(delayed_due=[due_delayed()])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.run_scheduler_cycle(app)
+            await bot.run_scheduler_cycle(app)  # second cycle, same row
+        self.assertEqual(len(paxyo.orders_created), 1)
+        self.assertEqual(len(paxyo.order_keys), 1)
+        self.assertEqual(paxyo.order_keys[0], "delay-abc123")
+
+    async def test_balance_short_fails_and_notifies_no_order(self):
+        paxyo = FakePaxyo(balance=10.0, delayed_due=[due_delayed()])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(
+            paxyo.delayed_finished,
+            [{"id": 11, "status": "failed", "order_id": None,
+              "reason": "insufficient balance"}],
+        )
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("balance is 10.00 ETB", app.bot.sent[0][1])
+        self.assertIn("needs 42.00 ETB", app.bot.sent[0][1])
+
+    async def test_already_claimed_places_nothing(self):
+        paxyo = FakePaxyo(claim_ok=False, delayed_due=[due_delayed()])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_not_yet_due_does_not_fire(self):
+        # A scheduled order whose run_at is still in the future —
+        # kept in memory (the API-down path) — must not fire.
+        run_at = bot.delayed_run_at_iso(180)
+        bot.DELAYED_MEMORY["mem-test1"] = {
+            "id": "mem-test1", "telegram_id": 1, "service_id": 1001,
+            "link": "https://instagram.com/p/x", "quantity": 1000,
+            "total": 42.0, "run_at": run_at, "status": "scheduled",
+            "idempotency_key": "delay-mem1",
+            "created_at": "2026-11-14T20:00:00Z",
+        }
+        paxyo = FakePaxyo()
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(
+            bot.DELAYED_MEMORY["mem-test1"]["status"], "scheduled"
+        )
+
+    async def test_order_failure_notifies_honestly(self):
+        class FailingPaxyo(FakePaxyo):
+            async def create_order(self, *args, **kwargs):
+                raise RuntimeError("provider down")
+
+        paxyo = FailingPaxyo(delayed_due=[due_delayed()])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(paxyo.delayed_finished[0]["status"], "failed")
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("could not be placed", app.bot.sent[0][1])
+
+    # (7) Graceful degradation: API down -> memory ----------------------
+
+    async def test_confirm_with_api_down_keeps_order_in_memory(self):
+        paxyo = FakePaxyo(delayed_none=True)
+        await self._send(
+            "order 1000 followers after 3 hours", self._delayed_intent(),
+            paxyo=paxyo,
+        )
+        confirm_id = next(iter(bot.PENDING_DELAYED))
+        query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(paxyo.delayed_created, [])
+        self.assertEqual(len(bot.DELAYED_MEMORY), 1)
+        record = next(iter(bot.DELAYED_MEMORY.values()))
+        self.assertEqual(record["status"], "scheduled")
+        self.assertIn("Scheduled!", query.edited[0])
+        # The memory row is listed like a server row.
+        msg = await self._send(
+            "my scheduled orders", intent_of("delayed_orders"),
+            paxyo=paxyo,
+        )
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertIn("EAT", msg.text_sent[0])
+
+    async def test_memory_due_order_runs_once_on_wake(self):
+        # The process slept and woke: a due memory order runs once,
+        # then is marked placed so the next cycle leaves it alone.
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        bot.DELAYED_MEMORY["mem-test1"] = {
+            "id": "mem-test1", "telegram_id": 1, "service_id": 1001,
+            "link": "https://instagram.com/p/x", "quantity": 1000,
+            "total": 42.0, "run_at": past, "status": "scheduled",
+            "idempotency_key": "delay-mem1",
+            "created_at": "2026-11-14T20:00:00Z",
+        }
+        paxyo = FakePaxyo()
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.run_scheduler_cycle(app)
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(len(paxyo.orders_created), 1)
+        self.assertEqual(paxyo.order_keys, ["delay-mem1"])
+        self.assertEqual(
+            bot.DELAYED_MEMORY["mem-test1"]["status"], "placed"
+        )
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("scheduled order is placed", app.bot.sent[0][1])
 
 
 class FakeCloudTTSResponse:
@@ -1861,12 +2559,12 @@ class TestWebhook(unittest.TestCase):
 
 
 class TestBuildApplication(unittest.TestCase):
-    def test_twelve_handlers_registered(self):
-        # start, balance, orders, schedules, help, text, voice,
-        # video-note, GIF (animation), sticker, photo, callback
+    def test_thirteen_handlers_registered(self):
+        # start, balance, orders, schedules, delayed, help, text,
+        # voice, video-note, GIF (animation), sticker, photo, callback
         app = bot.build_application()
         total = sum(len(handlers) for handlers in app.handlers.values())
-        self.assertEqual(total, 12)
+        self.assertEqual(total, 13)
 
 
 class TestWebhookServer(tornado.testing.AsyncHTTPTestCase):
@@ -1917,7 +2615,7 @@ class TestMainWebhook(unittest.TestCase):
         app_arg, port_arg = run.call_args.args
         self.assertEqual(port_arg, 10000)
         total = sum(len(h) for h in app_arg.handlers.values())
-        self.assertEqual(total, 12)
+        self.assertEqual(total, 13)
 
     def test_main_exits_without_webhook_base_url(self):
         # Secrets are the test values from import time, so only the
@@ -12403,11 +13101,16 @@ class TestPromptShrink(unittest.IsolatedAsyncioTestCase):
         # instead of re-billing it in full. Do NOT re-expand it with
         # long examples — the whole dataset lives in the offline
         # tests, not in the prompt.
-        self.assertLess(len(bot.SYSTEM_PROMPT), 9400)
+        # One-time delayed orders (14 Nov 2026) re-grew it to
+        # ~9,600 / ~2,060: three intents + delay_minutes + one
+        # example. The new bullets are kept to one short line each —
+        # that is the whole allowance for this feature.
+        self.assertLess(len(bot.SYSTEM_PROMPT), 9700)
         self.assertLess(len(bot.SYSTEM_PROMPT.split()) * 1.33, 2100)
         # Every intent the code switches on is still listed.
         for intent in (
             "order", "recurring", "schedules", "stop_schedule",
+            "delayed_order", "delayed_orders", "cancel_delayed",
             "balance", "orders", "deposit", "deposit_status", "help",
             "how_to_order", "miniapp", "social", "greeting",
             "paxyo_info", "source_question", "reseller", "contact",
@@ -16008,7 +16711,7 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
             "goal", "free_sample", "source_question", "reseller",
             "paused_services", "change_order", "off_topic", "how_to",
             "usual", "discount", "safety", "deposit", "cancel",
-            "orders",
+            "orders", "delayed_order",
         ):
             with self.subTest(intent=intent):
                 self.assertIn(intent, bot.FEW_SHOT_EXAMPLES)
@@ -16016,11 +16719,11 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
         self.assertIn("10 🙏", bot.FEW_SHOT_EXAMPLES)
 
     def test_few_shot_block_stays_compact(self):
-        # 1 header + 20 examples, each one short line: the whole
+        # 1 header + 21 examples, each one short line: the whole
         # dataset does NOT go in the prompt (that would be ~1,000
         # lines and every chat would get slow and costly).
         lines = bot.FEW_SHOT_EXAMPLES.splitlines()
-        self.assertEqual(len(lines), 21)
+        self.assertEqual(len(lines), 22)
         self.assertLess(len(bot.FEW_SHOT_EXAMPLES), 1200)
         for line in lines[1:]:
             with self.subTest(line=line):
