@@ -39,13 +39,28 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   🙏-only (Pray) service, never to the Positive mix; 👍 only to
   thumbs-up/like, ❤️ only to heart, 🔥 only to fire, and so on
   (👎 thumbs down, 😡 angry face, 😎 cool, 🤔 thinking, 🎉
-  celebration, 😍 heart eyes). A service named with the emoji
-  alone ("Telegram Reactions 👍 | Fast") is that emoji's service
-  too, as long as it carries no other reaction emoji — a
-  multi-emoji name is a mix, never a single type. If NO service
-  exists for the emoji the user named (😮 has none), the bot says
-  so honestly — "I don't have a 😮-only service. The closest is
-  the Positive mix" — instead of silently selling the mix.
+  celebration, 😍 heart eyes, 😆 the 😆 reaction). THE EMOJI IN
+  THE SERVICE NAME DECIDES, not the word: "heart" as a substring
+  also sits inside lookalikes — "Heart Eyes 😍", "Heart on fire
+  ❤️‍🔥", "Broken heart 💔" — and the old word match sold Heart
+  Eyes #1725 for a ❤️ order live (14 Nov 2026 17:01 EAT). A
+  service matches an emoji only when the known emoji in its name
+  are exactly one and it is that emoji; a multi-emoji name is a
+  mix, never a single type. Within ONE exact emoji the CHEAPEST
+  service wins (not fastest — fastest-first is what picked the
+  Heart Eyes lookalike, whose time was shorter than Heart's):
+  ❤️ → Heart #6537 (5.46 ETB/1000), 😍 → Heart Eyes #1725
+  (12.60), 👍 → Thumbs up #6541 (5.46), 🔥 → Fire #6540 (5.46),
+  🙏 → Pray #1723 (12.60). The rule is PLATFORM-GENERAL: it
+  covers Facebook reactions too (owner, 14 Nov 2026) — a
+  Facebook ❤️ order picks the Facebook Heart-only service
+  (#5105, 29.40 ETB/1000), a Facebook mix is never sold as an
+  exact emoji, and a Facebook correction re-picks on Facebook
+  (the correction used to hardcode platform="telegram"). If NO
+  service exists for the emoji the user named (😮 has none on
+  Telegram, 🙏 has none on Facebook), the bot says so honestly
+  — "I don't have a 😮-only service. The closest is the
+  Positive mix" — instead of silently selling the mix.
   A bare "thank you 🙏" is thanks, not a reaction order: 🙏 only
   counts as a reaction when the message is about reactions.
 - A CORRECTION RE-PICKS THE CARD (owner, 14 Nov 2026): while a
@@ -87,6 +102,28 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   Show the FULL long name ONLY when the user entered a service ID.
 - Never lose a half-built order on interruption. A draft order is editable
   and cancellable; a placed order shows its status.
+- LINK QUESTIONS ARE SPECIFIC (owner, 14 Nov 2026): when the bot
+  needs a link it asks for the exact thing — followers get the
+  profile link naming the platform ("Please send your TikTok
+  profile link"), video views get the video link, Telegram post
+  interaction (reactions, post views) gets the Telegram post link,
+  likes get the link of the post/video to like, comments get the
+  link of the post/video to comment on, comment likes keep the
+  existing two-thing question (the link of the video/post the
+  comment is on, AND the link of the comment itself or the
+  username). The bare generic "Please send the link the order is
+  for." is used ONLY when the order type is genuinely unknown.
+- LINK RECALL (owner, 14 Nov 2026): when a user asks for the link
+  of a past order ("please send me the link of the last order
+  about the Telegram reaction"), answer with the ACTUAL link of
+  the most recent matching order from their history — the API's
+  GET /orders list returns the link for each order. Match by what
+  the user names (Telegram reaction → the most recent Telegram
+  reactions order; no type named → the single most recent order).
+  If no order matches, or the order has no link saved, say so
+  honestly — never invent a link, never answer with the history
+  table instead. Works for voice too: the request arrives as
+  transcribed text and takes the same path.
 - API errors are reported in one plain line. The bot NEVER goes silent:
   if the AI fails, local rules answer instead.
 
@@ -150,13 +187,21 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   and add: the sooner we place the order, the sooner it will be completed
   — let's order now. Never the vague "shown before you confirm" line.
 - WEBSITE: when asked about the website, always mention paxyo.et.
-- BANNED / SHADOWBANNED: answer YES, it can happen — anybody can
-  buy followers, likes or views for your account without your
-  permission, and TikTok can shadowban or strike/ban an account
-  over fake followers, likes or views. (Owner, 14 Nov 2026 —
-  REVERSING the 13 Nov NO answer "you can't be banned without
-  your permission", which the 16:42 live retest had just
-  confirmed; that check is now outdated.)
+- BANNED / SHADOWBANNED: answer NO — no social media platform
+  bans or strikes an account over fake followers, likes or views.
+  Anyone can buy them for you without your permission, so that
+  alone can't get your account banned or shadowbanned. This is
+  true for TikTok, Instagram, Facebook, Telegram and every other
+  platform alike — the answer never names one platform only.
+  (Owner, 14 Nov 2026 — FINAL. HISTORY, so nobody flips it
+  again: 13 Nov the owner set NO ("can't be banned without your
+  permission"); 14 Nov 16:49 his message was misread as YES
+  ("it can happen") and deployed; 14 Nov 17:06 he corrected it
+  — "I was saying opposite" — and confirmed NO with the wording
+  "TikTok doesn't use fake followers, likes or views to ban or
+  strike an account"; 17:07 he widened it to all platforms. The
+  17:00-17:02 live retest's ban PASS was for the YES wording
+  and is outdated.)
 - CONTACT: when a customer asks for support, to talk to a human, or
   to contact the owner/admin, answer: contact William at t.me/paxyo.
   Same one line if they ask again. (Owner, 14 Nov 2026 — this
@@ -192,11 +237,12 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   followers" or anything like it. The system prompt forbids it, and
   any such line the AI writes anyway is stripped from the reply
   before it is sent. The ban question is NOT a lecture — it gets
-  the owner's stated fact only: "Yes — it can happen. Anyone can
-  buy followers, likes or views for your account without your
-  permission, and TikTok can shadowban or strike/ban an account
-  over fake followers, likes or views." (14 Nov 2026, reversing
-  the 13 Nov NO answer.)
+  the owner's stated fact only: "No — no social media platform
+  bans or strikes an account over fake followers, likes or views.
+  Anyone can buy them for you without your permission, so that
+  alone can't get your account banned or shadowbanned." (Owner,
+  14 Nov 2026 — FINAL, platform-general; see the ban history
+  under BANNED / SHADOWBANNED above.)
 - PRICE ALWAYS (owner, 14 Nov 2026): a price question NEVER gets a
   free AI reply without a price. Price detection runs before the
   free-answer paths; if a service can be named, the deterministic
@@ -285,10 +331,43 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   ("You said: ..."), then handle the text like a typed message. The bot
   answers in text only, never with voice. (Voice-order claims were removed
   from the bot's texts until the voice fix is verified live.)
+  VOICE LANGUAGE BUG (owner, 14 Nov 2026): Whisper auto-detects
+  the language and its Amharic is weak, so a short Amharic voice
+  note can be mis-detected as Arabic — both are Semitic languages
+  — and the Arabic-script text then flowed into the order flow,
+  where language detection has no Arabic branch and the AI
+  mirrored the Arabic back. The fix: transcribe once (auto-detect,
+  unchanged); if the result is Arabic-script, retry ONCE with a
+  language hint from the user's last detected language, their
+  Telegram language, or Amharic; if the retry is still Arabic,
+  say honestly that the voice message could not be understood.
+  And a guard: Arabic-script text NEVER reaches the classifier or
+  the AI — the bot answers "I didn't understand that — please
+  send it in English or Amharic." Arabic must never appear unless
+  the user actually speaks Arabic (and the bot has no Arabic
+  replies at all).
 - Photos: read them (payment screenshot, profile screenshot, error
   screenshot) and understand what the user wants from them.
 - GIFs and stickers: always reply, never stay silent. A caption on a
-  GIF/sticker is the user's message.
+  GIF/sticker is the user's message. CONTEXT-AWARE MEDIA REPLIES
+  (owner, 14 Nov 2026): the bot responds like a person to emoji,
+  GIFs and stickers — differently each time, understanding the
+  situation from context and memory. A delayed/pending order plus
+  a frustrated GIF/sticker/emoji (😤 😡 🤬 😩) gets empathy about
+  the delay — the frustration acknowledged, sorry it is delayed,
+  the REAL order status and average time, never "soon". An order
+  just completed plus a happy GIF/emoji (🎉 😍 ❤️) gets a short
+  celebration. A greeting/thanks emoji (👋 🙏) gets a warm, short,
+  natural reply. Replies ROTATE (2–3 variants per mood and
+  situation) so the same user never gets the same canned line
+  twice, match the user's language, and stay short and human. A
+  GIF carries no emoji, so its mood comes from the situation —
+  a GIF while an order is delayed reads as frustration, a GIF
+  after a completed order reads as celebration. A media reaction
+  is a reply, not a reset: it never loses a half-built order or a
+  pending Confirm card. And it never invents an order: with no
+  order at all, a frustrated GIF gets empathy WITHOUT claiming
+  an order exists ("I don't see an order from you right now").
 - Video likes vs comment likes vs comments: "likes for my video" = video
   likes; "likes for my comment" = likes ON a comment (#5854); "comments
   on my video" = comments service. Never mix them up.

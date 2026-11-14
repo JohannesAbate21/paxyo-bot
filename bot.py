@@ -352,10 +352,12 @@ PAXYO_KNOWLEDGE = """Facts about Paxyo:
   example TikTok views usually start within 1 minute. Never say the
   time is only shown before confirming: give the real time and nudge
   the user to order now.
-- Banned or shadowbanned? Yes, it can happen — anybody can buy
-  followers, likes or views for your account without your
-  permission, and TikTok can shadowban or strike/ban an account
-  over fake followers, likes or views.
+- Banned or shadowbanned? No — no social media platform bans or
+  strikes an account over fake followers, likes or views. Anyone
+  can buy them for you without your permission, so that alone
+  can't get your account banned or shadowbanned. This is true
+  for TikTok, Instagram, Facebook, Telegram and every other
+  platform alike.
 - Terms: refunds go back to Paxyo balance only, never to a bank
   account or mobile money; Paxyo balance can't be withdrawn as cash;
   orders can't be cancelled or changed once processing has started;
@@ -501,6 +503,73 @@ TEXT = {
     "ask_link": {
         "am": "Link ይላኩልኝ — order የሚደረግበት link።",
         "en": "Please send the link the order is for.",
+    },
+    # Link questions per order type (owner, 14 Nov 2026): the bot
+    # asks for the specific thing — profile / video / post — never
+    # the bare generic "send the link" when it knows the order
+    # type. ask_link above stays only for a genuinely unknown type.
+    "ask_link_profile": {
+        "am": "የ{platform} profile linkዎን ይላኩልኝ።",
+        "en": "Please send your {platform} profile link.",
+    },
+    "ask_link_video": {
+        "am": "የቪዲዮው link ይላኩልኝ።",
+        "en": "Please send the link of the video.",
+    },
+    "ask_link_post": {
+        "am": "የ{platform} ፖስቱ link ይላኩልኝ።",
+        "en": "Please send the link of the {platform} post.",
+    },
+    "ask_link_post_generic": {
+        "am": "የፖስቱ link ይላኩልኝ።",
+        "en": "Please send the link of the post.",
+    },
+    "ask_link_like": {
+        "am": "like ማድረግ የሚፈልጉትን ፖስት ወይም ቪዲዮ link ይላኩልኝ።",
+        "en": "Please send the link of the post or video you want liked.",
+    },
+    "ask_link_comment": {
+        "am": "comment ማድረግ የሚፈልጉትን ፖስት ወይም ቪዲዮ link ይላኩልኝ።",
+        "en": "Please send the link of the post or video you want commented on.",
+    },
+    "ask_link_group": {
+        "am": "የግሩፑ ወይም የቻናሉ link ይላኩልኝ።",
+        "en": "Please send the link of the group or channel.",
+    },
+    "ask_link_channel": {
+        "am": "የቻናሉ link ይላኩልኝ።",
+        "en": "Please send the link of the channel.",
+    },
+    "ask_link_share": {
+        "am": "share ማድረግ የሚፈልጉትን ፖስት ወይም ቪዲዮ link ይላኩልኝ።",
+        "en": "Please send the link of the post or video you want shared.",
+    },
+    # Link recall from order history (owner, 14 Nov 2026): the
+    # bot answers with the ACTUAL link of the most recent matching
+    # order — never an invented one, never just the history list.
+    "link_recall_found": {
+        "am": "የመጨረሻው {desc}orderዎ link ይህ ነው፦ {link}",
+        "en": "Here is the link of your last {desc}order: {link}",
+    },
+    "link_recall_none": {
+        "am": "በhistoryዎ ውስጥ ምንም order አላገኘሁም።",
+        "en": "I couldn't find any order in your history.",
+    },
+    "link_recall_no_match": {
+        "am": "በhistoryዎ ውስጥ {desc}order አላገኘሁም።",
+        "en": "I couldn't find a {desc}order in your history.",
+    },
+    "link_recall_no_link": {
+        "am": "የመጨረሻው orderዎ link አልተቀመጠም — እባክዎ link ይላኩልኝ።",
+        "en": "Your last order doesn't have a link saved, so I can't send it — please send the link yourself.",
+    },
+    # Arabic-script text (owner, 14 Nov 2026): the bot has no
+    # Arabic and must never mirror Arabic back — it can only
+    # arrive from a mis-transcribed voice note or a typed message
+    # in a language the bot does not speak.
+    "not_understood_language": {
+        "am": "አልገባኝም — እባክዎ በእንግሊዝኛ ወይም በአማርኛ ይላኩልኝ።",
+        "en": "I didn't understand that — please send it in English or Amharic.",
     },
     "ask_quantity": {
         "am": "Quantity ስንት ይሁን? (ለምሳሌ 1000)",
@@ -1259,14 +1328,25 @@ TEXT = {
             "order it."
         ),
     },
-    # Ban / shadowban (owner, 14 Nov 2026, REVERSING the 13 Nov NO
-    # answer): the answer is YES, it can happen — anyone can buy
-    # followers for you without your permission and get you banned
-    # or shadowbanned; TikTok treats fake followers, likes and
-    # views as grounds for a shadowban, a strike, or a ban.
-    "ban_yes": {
-        "am": "አዎ — ሊከሰት ይችላል። ማንም ሰው ያለእርስዎ ፈቃድ ለaccountዎ followers፣ likes ወይም views መግዛት ይችላል፤ TikTok ደግሞ በሐሰተኛ followers፣ likes ወይም views ምክንያት accountዎን shadow ban ማድረግ፣ strike መስጠት ወይም ማገድ ይችላል።",
-        "en": "Yes — it can happen. Anyone can buy followers, likes or views for your account without your permission, and TikTok can shadowban or strike/ban an account over fake followers, likes or views.",
+    # Ban / shadowban (owner, 14 Nov 2026 — FINAL, platform-general):
+    # the answer is NO — no social media platform bans or strikes
+    # an account over fake followers, likes or views, because
+    # anyone can buy them for an account without the owner's
+    # permission, so that alone can't get it banned or
+    # shadowbanned. Applies to TikTok, Instagram, Facebook,
+    # Telegram and every other platform alike (owner, 14 Nov 2026
+    # 17:07 EAT). HISTORY, so nobody flips it again: 13 Nov the
+    # owner set NO ("can't be banned without your permission");
+    # 14 Nov 16:49 his message was misread as YES ("it can
+    # happen") and deployed; 14 Nov 17:06 he corrected it — "I
+    # was saying opposite" — and confirmed NO with the wording
+    # "TikTok doesn't use fake followers, likes or views to ban
+    # or strike an account"; 17:07 he widened it to all platforms.
+    # The 17:00-17:02 live retest's ban PASS was for the YES
+    # wording and is outdated.
+    "ban_no": {
+        "am": "አይ — ምንም ማህበራዊ ሚዲያ መድረክ በሐሰተኛ followers፣ likes ወይም views ምክንያት accountን አያግድም ወይም strike አይሰጥም። ማንም ሰው ያለእርስዎ ፈቃድ ለእርስዎ መግዛት ይችላል፣ ስለዚህ ይህ ብቻውን accountዎ እንዲታገድ ወይም shadow ban እንዲደረግበት አያደርግም።",
+        "en": "No — no social media platform bans or strikes an account over fake followers, likes or views. Anyone can buy them for you without your permission, so that alone can't get your account banned or shadowbanned.",
     },
     # How to get the link of a Telegram post (owner, 14 Nov 2026):
     # a DETERMINISTIC answer — the AI kept getting it wrong
@@ -1924,7 +2004,10 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     single-post reactions services, in the emoji's family — see
     _reactions_pool. `reaction_emoji` is the emoji the user sent
     (👍, ❤️, 🔥); when it is None the request is a generic
-    reactions request and gets the Positive mix.
+    reactions request and gets the Positive mix. Within ONE exact
+    emoji the pick is cheapest first (owner, 14 Nov 2026), not
+    fastest — fastest-first picked the Heart Eyes lookalike over
+    Heart for a ❤️ order live.
     """
     wanted = (platform or "").strip().lower()
     hint = (service_hint or "").strip().lower()
@@ -1967,10 +2050,18 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     # reactions services, in the emoji's family — never a Bot Start
     # service and never an "Auto … 10 Future Posts" service for a
     # single post. The emoji may also ride in the hint itself.
+    reaction = None
     if _is_reactions_hint(hint, hint_kinds):
-        emoji = reaction_emoji or _reaction_emoji_in_hint(hint)
-        candidates = _reactions_pool(candidates, emoji)
-    if cheapest:
+        reaction = reaction_emoji or _reaction_emoji_in_hint(hint)
+        candidates = _reactions_pool(candidates, reaction)
+    if cheapest or reaction is not None:
+        # Cheapest first (owner, 14 Nov 2026): within ONE exact
+        # emoji the services are the same reaction, so the
+        # cheapest wins and the pick is deterministic whatever the
+        # average times say today — fastest-first picked Heart
+        # Eyes #1725 over Heart #6537 for a ❤️ order live, because
+        # its time was shorter. A generic reactions request (no
+        # emoji) still gets the fastest Positive mix.
         candidates.sort(
             key=lambda s: (
                 float(s.get("rate_etb_per_1000") or 0),
@@ -2009,10 +2100,15 @@ def _kinds_compatible(name_kinds, hint_kinds):
 # emoji with a dedicated single-emoji service in the catalogue:
 # 🙏 -> Pray #1723 (12.60 ETB/1000), 👎 -> Thumbs down / DisLike,
 # 😡 -> Angry Face, 😎 -> Cool, 🤔 -> Thinking, 🎉 -> Celebration,
-# 😍 -> Heart Eyes. An emoji with no dedicated service (😮 wow)
-# has a family word that matches nothing, so the pool falls
-# through to the honest "no exact service" answer instead of
-# silently selling the mix.
+# 😍 -> Heart Eyes, 😆 -> the 😆 reaction. An emoji with no
+# dedicated service (😮 wow) has a family word that matches
+# nothing, so the pool falls through to the honest "no exact
+# service" answer instead of silently selling the mix.
+# The words are only a FALLBACK (see _service_in_reaction_family):
+# the emoji in the service name decides first, because the word
+# "heart" also sits inside lookalikes — "Heart Eyes 😍", "Heart
+# on fire ❤️‍🔥", "Broken heart 💔" — and the substring match
+# sold Heart Eyes #1725 for a ❤️ order live (14 Nov 2026).
 REACTION_FAMILY_WORDS = {
     "👍": ("thumbs up", "like"),
     "❤️": ("heart",),
@@ -2020,6 +2116,7 @@ REACTION_FAMILY_WORDS = {
     "🔥": ("fire",),
     "😂": ("tears of joy", "laugh"),
     "🤣": ("laugh",),
+    "😆": ("laugh",),
     "😮": ("wow",),
     "😢": ("crying",),
     "🙏": ("pray",),
@@ -2030,6 +2127,49 @@ REACTION_FAMILY_WORDS = {
     "🎉": ("celebration",),
     "😍": ("heart eyes",),
 }
+
+
+def _service_in_reaction_family(service, emoji, family):
+    """True when a service is the requested emoji's OWN service.
+
+    Exact-emoji rule (owner, 14 Nov 2026 — a ❤️ order got Heart
+    Eyes #1725 live because the word "heart" matched "Heart
+    Eyes" as a substring): the emoji in the service's NAME
+    decides. A service matches only when the known emoji in its
+    name are exactly one and it is the requested emoji — so
+    "Heart ❤️" matches ❤️, "Heart Eyes 😍" does not, "Heart on
+    fire ❤️‍🔥" does not (two emoji), and a multi-emoji mix
+    never does. The same rule covers Facebook ("Facebook Post
+    Reactions [ ❤️ ]" matches ❤️; "[ 👍 ❤️ 😂 ]" does not).
+    Only when the name carries NO known emoji at all does the
+    family word decide — as a whole word, and only if no other
+    family's word is in the name. A generic request (emoji None)
+    keeps the old word match: the Positive mix.
+    """
+    name = str(service.get("name") or "")
+    lname = name.lower()
+    if emoji is None:
+        return any(w in lname for w in family)
+    found = emoji_meanings(name)
+    if len(found) == 1:
+        return found[0][0] == emoji
+    if found:
+        # A different (or several) reaction emoji in the name: a
+        # lookalike, never this emoji's service.
+        return False
+    if not any(
+        re.search(r"\b" + re.escape(w) + r"\b", lname) for w in family
+    ):
+        return False
+    for other_emoji, other_family in REACTION_FAMILY_WORDS.items():
+        if other_emoji == emoji:
+            continue
+        if any(
+            re.search(r"\b" + re.escape(w) + r"\b", lname)
+            for w in other_family
+        ):
+            return False
+    return True
 
 
 def _is_reactions_hint(hint, hint_kinds):
@@ -2062,13 +2202,16 @@ def _reactions_pool(candidates, emoji):
     the one post the user is ordering for. Within the pool the
     emoji picks the family (👍 -> thumbs up / like, ❤️ -> heart,
     🔥 -> fire, 🙏 -> pray); a generic request gets the Positive
-    mix. A service named with the emoji alone ("Telegram Reactions
-    👍 | Fast") is that emoji's service too, as long as it carries
-    no other reaction emoji — a multi-emoji name is a mix, never a
-    single type. When the family has no service, the pool is EMPTY
-    instead of falling back to the whole pool (owner, 14 Nov 2026:
-    a 🙏 order silently got the Positive mix) — the caller then says
-    honestly that there is no {emoji}-only service."""
+    mix. The family match is EXACT (see _service_in_reaction_family):
+    the emoji in the service name decides, so "Heart Eyes 😍",
+    "Heart on fire ❤️‍🔥" and "Broken heart 💔" are never ❤️
+    services, and a multi-emoji mix never matches one emoji.
+    The rule is platform-general: it covers Telegram and Facebook
+    reactions alike (owner, 14 Nov 2026). When the family has no
+    service, the pool is EMPTY instead of falling back to the
+    whole pool (owner, 14 Nov 2026: a 🙏 order silently got the
+    Positive mix) — the caller then says honestly that there is
+    no {emoji}-only service."""
     pool = []
     for s in candidates:
         name = str(s.get("name") or "").lower()
@@ -2086,20 +2229,10 @@ def _reactions_pool(candidates, emoji):
     else:
         family = ("positive",)
     if family:
-        matched = []
-        for s in pool:
-            lname = str(s.get("name") or "").lower()
-            if any(w in lname for w in family):
-                matched.append(s)
-                continue
-            # A service named with the emoji alone ("Telegram
-            # Reactions 👍 | Fast") is that emoji's service too —
-            # as long as it carries no other reaction emoji: a
-            # multi-emoji name is a mix, never a single type.
-            if emoji is not None:
-                found = emoji_meanings(str(s.get("name") or ""))
-                if len(found) == 1 and found[0][0] == emoji:
-                    matched.append(s)
+        matched = [
+            s for s in pool
+            if _service_in_reaction_family(s, emoji, family)
+        ]
         if matched:
             return matched
         if emoji is not None:
@@ -2533,13 +2666,20 @@ async def gemini_generate(prompt: str, system: str = None) -> str:
         return ""
 
 
-async def gemini_transcribe(audio_bytes: bytes) -> str:
+async def gemini_transcribe(audio_bytes: bytes, language: str = None) -> str:
     """Transcribe a Telegram voice message (.ogg) with Gemini."""
+    prompt = "Transcribe this voice message exactly, in the language spoken."
+    if language:
+        name = {
+            "am": "Amharic", "ti": "Tigrinya",
+            "om": "Oromo (Afaan Oromo)", "en": "English",
+        }.get(language, language)
+        prompt = f"Transcribe this voice message exactly, in {name}."
     payload = {
         "contents": [
             {
                 "parts": [
-                    {"text": "Transcribe this voice message exactly, in the language spoken."},
+                    {"text": prompt},
                     {
                         "inlineData": {
                             "mimeType": "audio/ogg",
@@ -2662,12 +2802,15 @@ async def openai_generate(prompt: str, system: str = None) -> str:
         return ""
 
 
-async def openai_transcribe(audio_bytes: bytes) -> str:
+async def openai_transcribe(audio_bytes: bytes, language: str = None) -> str:
     """Transcribe a Telegram voice message (.ogg) with Whisper."""
+    data = {"model": "whisper-1"}
+    if language:
+        data["language"] = language
     data = await _openai_post(
         "/audio/transcriptions",
         headers=_openai_headers(),
-        data={"model": "whisper-1"},
+        data=data,
         files={"file": ("voice.ogg", audio_bytes, "audio/ogg")},
     )
     return str(data.get("text") or "").strip()
@@ -2761,13 +2904,18 @@ async def groq_generate(prompt: str, system: str = None) -> str:
         return ""
 
 
-async def groq_transcribe(audio_bytes: bytes) -> str:
+async def groq_transcribe(audio_bytes: bytes, language: str = None) -> str:
     """Transcribe a Telegram voice message (.ogg) with Groq Whisper
-    (whisper-large-v3-turbo)."""
+    (whisper-large-v3-turbo). With no language the model
+    auto-detects — which is how Amharic speech can be mis-detected
+    as Arabic (owner, 14 Nov 2026). Pass language to force it."""
+    data = {"model": "whisper-large-v3-turbo"}
+    if language:
+        data["language"] = language
     data = await _groq_post(
         "/audio/transcriptions",
         headers=_groq_headers(),
-        data={"model": "whisper-large-v3-turbo"},
+        data=data,
         files={"file": ("voice.ogg", audio_bytes, "audio/ogg")},
     )
     return str(data.get("text") or "").strip()
@@ -3360,21 +3508,64 @@ async def translate_to_amharic(text: str) -> str:
     return await translate_to_language(text, "am")
 
 
-async def ai_transcribe(audio_bytes: bytes) -> str:
+async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
     """Voice transcription: Groq Whisper when GROQ_API_KEY is set,
     else Whisper when OPENAI_API_KEY is set, else Gemini. A provider
-    that raises falls through to the next one."""
+    that raises falls through to the next one. `language` is a
+    Whisper language hint (\"am\", \"ti\", \"om\", \"en\") — None means
+    auto-detect."""
     if GROQ_API_KEY:
         try:
-            return await groq_transcribe(audio_bytes)
+            return await groq_transcribe(audio_bytes, language=language)
         except Exception as exc:
             _log_ai_failure("Groq transcribe failed, trying next provider", exc)
     if OPENAI_API_KEY:
         try:
-            return await openai_transcribe(audio_bytes)
+            return await openai_transcribe(audio_bytes, language=language)
         except Exception as exc:
             _log_ai_failure("OpenAI transcribe failed, trying next provider", exc)
-    return await gemini_transcribe(audio_bytes)
+    return await gemini_transcribe(audio_bytes, language=language)
+
+
+def _has_arabic_script(text: str) -> bool:
+    """True when the text contains Arabic-script characters
+    (U+0600–U+06FF). Amharic is Ge'ez script, Tigrinya is Ge'ez,
+    Oromo is Latin — Arabic script in a transcription means the
+    transcriber mis-detected the language, unless the user
+    actually speaks Arabic."""
+    return bool(re.search(r"[\u0600-\u06ff]", text or ""))
+
+
+async def transcribe_voice_with_retry(audio, user_id: int, user_lang: str) -> str:
+    """Transcribe a voice note, with one language-hinted retry
+    when the first try comes back in Arabic script (owner, 14
+    Nov 2026). ROOT CAUSE of the owner's report: Whisper
+    auto-detects the language and its Amharic is weak, so short
+    Amharic clips can be mis-detected as Arabic — both are
+    Semitic languages — and the Arabic-script text then flows
+    into the order flow, where detect_language has no Arabic
+    branch and the AI mirrors the Arabic back. The retry hints
+    the user's last detected language (or their Telegram
+    language, or Amharic) and only then is the result trusted.
+    Returns \"\" when both tries fail or stay Arabic, so the
+    caller answers honestly instead of feeding Arabic to the
+    order flow."""
+    text = await ai_transcribe(audio)
+    if not _has_arabic_script(text):
+        return text
+    if (user_lang or "").lower().startswith("ar"):
+        return text
+    hint = LAST_LANG.get(user_id)
+    if hint not in ("am", "ti", "om", "en"):
+        code = (user_lang or "").lower()
+        hint = code[:2] if code[:2] in ("am", "ti", "om", "en") else "am"
+    try:
+        retry = await ai_transcribe(audio, language=hint)
+    except Exception:
+        return ""
+    if _has_arabic_script(retry):
+        return ""
+    return retry
 
 
 async def ai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
@@ -3454,8 +3645,10 @@ EMOJI_MEANINGS = {
     "🔥": "fire",
     "😂": "laugh",
     "🤣": "laugh",
+    "😆": "laugh",
     "😮": "wow",
     "😢": "sad",
+    "💔": "broken-heart",
     "🙏": "pray",
     "👀": "views",
     "😍": "heart-eyes",
@@ -3471,12 +3664,16 @@ EMOJI_MEANINGS = {
 }
 # Emoji that pick a Telegram reaction type when the user orders one
 # (round 8.1, 14 Nov 2026; extended 14 Nov 2026 — 👎 😡 😎 🤔 🎉 😍
-# have dedicated single-emoji services). 🙏 is deliberately NOT in
-# this tuple: on its own it is thanks ("thank you 🙏" -> None,
-# pinned by test), and only counts as a reaction in a
-# reactions-order context — see reaction_emoji.
+# have dedicated single-emoji services; 😆 added 14 Nov 2026 for
+# Facebook reactions, which have a dedicated 😆 service). 🙏 is
+# deliberately NOT in this tuple: on its own it is thanks
+# ("thank you 🙏" -> None, pinned by test), and only counts as a
+# reaction in a reactions-order context — see reaction_emoji.
+# The tuple is platform-general: the same emoji pick a Facebook
+# reaction service when the order is for Facebook (owner,
+# 14 Nov 2026 — the exact-emoji rule covers Facebook too).
 REACTION_EMOJI = (
-    "👍", "❤️", "❤", "🔥", "😂", "🤣", "😮", "😢",
+    "👍", "❤️", "❤", "🔥", "😂", "🤣", "😆", "😮", "😢",
     "👎", "😡", "😎", "🤔", "🎉", "😍",
 )
 # Emoji that are just chat (a laugh, a smile) — never an order.
@@ -4051,6 +4248,13 @@ PENDING = {}  # confirm_id -> {user_id, service, link, quantity, total}
 # with the fastest service instead. Dropped when the button is used.
 FASTEST_FALLBACK = {}
 LAST_ORDER = {}  # telegram_id -> order_id
+# The language of each user's most recent detected message
+# (\"am\", \"ti\", \"om\", \"en\"): the hint for the next voice-note
+# transcription, so an Amharic voice note is not auto-detected as
+# Arabic on the retry (owner, 14 Nov 2026). Set in
+# handle_order_text; cleared with the rest of the per-user state
+# in tests.
+LAST_LANG = {}
 # Multi-turn order state: telegram_id -> {"platform", "service_hint",
 # "link", "quantity"} of the order being built. The bot asks for one
 # missing piece at a time (platform -> link -> quantity); what the user
@@ -4254,8 +4458,9 @@ OFF_TOPIC_COUNT = {}  # telegram_id -> consecutive off-topic turns
 # free answers sometimes do exactly that ("avoid buying fake
 # followers"), so the rule is in every free-answer prompt AND in a
 # sanitizer that strips any such sentence if the AI still writes
-# one. The ban answer keeps the owner's YES line (14 Nov 2026,
-# reversing the 13 Nov NO line) — it states the fact for the ban
+# one. The ban answer keeps the owner's NO line (14 Nov 2026,
+# platform-general — no platform bans or strikes over fake
+# followers, likes or views) — it states the fact for the ban
 # question specifically and is not a lecture.
 _MORALIZING_RES = (
     re.compile(
@@ -5160,6 +5365,92 @@ async def resolve_last_order(user_id: int):
     return orders[0]
 
 
+_LINK_RECALL_PHRASES = (
+    "link of the last order", "link of my last order",
+    "link of the previous order", "link of the latest order",
+    "link of my order", "link of that order",
+    "send me the link of", "what was the link of",
+    "what is the link of", "give me the link of",
+    "link for the last order", "link from my last order",
+)
+
+
+def is_link_recall_question(text: str) -> bool:
+    """A request for the LINK of a past order (owner, 14 Nov
+    2026) — \"please send me the link of the last order about
+    the Telegram reaction\" — as opposed to a request for the
+    link of the order being built. The \"link of\" phrasing is
+    what separates the two: the order flow says \"send the link\"
+    with no \"of\"."""
+    s = " ".join((text or "").strip().lower().split())
+    if "link" not in s:
+        return False
+    return any(p in s for p in _LINK_RECALL_PHRASES)
+
+
+def _match_recall_order(orders, text):
+    """The most recent order matching what the user named: the
+    platform and the kind, when either is named. No type named
+    means the single most recent order. Returns None when
+    nothing matches."""
+    words = set(re.findall(r"[a-z]+", (text or "").lower()))
+    platform = next(
+        (p for p in _PLATFORMS if p in words), None
+    )
+    metric = kind_from_text(text)
+    for order in orders:
+        o_platform, _hint = _platform_hint_of_service(
+            {"name": order.get("service_name") or ""}
+        )
+        o_kind = kind_from_text(order.get("service_name") or "")
+        if platform is not None and o_platform != platform:
+            continue
+        if metric is not None and o_kind != metric:
+            continue
+        return order
+    return None
+
+
+def _recall_desc(text):
+    """The words describing the order the user asked about
+    (\"Telegram reactions \", \"Instagram followers \", or \"\"
+    when no type was named), for the recall reply."""
+    words = set(re.findall(r"[a-z]+", (text or "").lower()))
+    platform = next(
+        (p for p in _PLATFORMS if p in words), None
+    )
+    metric = kind_from_text(text)
+    parts = []
+    if platform:
+        parts.append(_PLATFORM_DISPLAY.get(platform, platform.title()))
+    if metric:
+        parts.append(metric)
+    return (" ".join(parts) + " ") if parts else ""
+
+
+async def link_recall_text(user_id: int, text: str, lang: str):
+    """The link of a past order (owner, 14 Nov 2026). The API's
+    GET /orders list DOES return the link for each order, so the
+    bot answers with the actual link of the most recent matching
+    order. When no order matches, or the order has no link
+    saved, it says so honestly — it never invents a link."""
+    try:
+        orders = await paxyo.recent_orders(user_id, limit=5)
+    except Exception as exc:
+        log.warning("link recall recent_orders failed: %s", exc)
+        return t("not_understood", lang)
+    if not orders:
+        return t("link_recall_none", lang)
+    desc = _recall_desc(text)
+    order = _match_recall_order(orders, text)
+    if order is None:
+        return t("link_recall_no_match", lang, desc=desc)
+    link = (order.get("link") or "").strip()
+    if not link:
+        return t("link_recall_no_link", lang)
+    return t("link_recall_found", lang, desc=desc, link=link)
+
+
 # ------------------------------------------------- edge-case helpers ----
 # Messy real-world inputs (owner spec, 13 Nov 2026): the helpers the
 # new intent handlers share. All of them are pure except the ones
@@ -5440,6 +5731,52 @@ def kind_from_text(text: str):
     if "👀" in (text or ""):
         return "views"
     return None
+
+
+_PLATFORM_DISPLAY = {
+    "telegram": "Telegram", "instagram": "Instagram",
+    "tiktok": "TikTok", "youtube": "YouTube",
+    "facebook": "Facebook", "x": "X",
+}
+
+
+def ask_link_text(platform, service_hint, lang):
+    """The link question for the order being built (owner, 14 Nov
+    2026): specific to what is being ordered — followers get the
+    profile link naming the platform, video views the video link,
+    Telegram post interaction the Telegram post link, likes the
+    post/video to like, comments the post/video to comment on,
+    comment likes the existing two-thing question. The bare
+    generic ask_link is used only when the order type is
+    genuinely unknown."""
+    metric = kind_from_text(service_hint or "")
+    platform = (platform or "").strip().lower() or None
+    disp = _PLATFORM_DISPLAY.get(
+        platform or "", (platform or "").title()
+    )
+    if metric == "followers" and platform:
+        return t("ask_link_profile", lang, platform=disp)
+    if metric == "views":
+        if platform == "telegram":
+            return t("ask_link_post", lang, platform=disp)
+        return t("ask_link_video", lang)
+    if metric == "reactions":
+        if platform:
+            return t("ask_link_post", lang, platform=disp)
+        return t("ask_link_post_generic", lang)
+    if metric == "likes":
+        return t("ask_link_like", lang)
+    if metric == "comments":
+        return t("ask_link_comment", lang)
+    if metric == "comment likes":
+        return t("comment_likes_need", lang)
+    if metric == "members":
+        return t("ask_link_group", lang)
+    if metric == "subscribers":
+        return t("ask_link_channel", lang)
+    if metric == "shares":
+        return t("ask_link_share", lang)
+    return t("ask_link", lang)
 
 
 # ------------------------------------------------- prompt shrink -------
@@ -6832,7 +7169,11 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         return
     if not merged.get("link"):
         RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
-        await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
+        await reply_message(
+            update.message,
+            ask_link_text(merged.get("platform"), merged.get("service_hint"), lang),
+            lang, voice=voice,
+        )
         return
     if not merged.get("quantity"):
         RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
@@ -7802,9 +8143,16 @@ async def try_reaction_correction(update, text, lang, voice=False):
     except Exception as exc:
         log.warning("correction services failed: %s", exc)
         _services = []
+    # The correction re-picks on the PENDING order's platform:
+    # a Facebook ❤️ correction must re-pick a Facebook service,
+    # not a Telegram one (owner, 14 Nov 2026 — the exact-emoji
+    # rule covers Facebook reactions too).
+    _platform, _hint = _platform_hint_of_service(_pending["service"])
+    if not _hint or "reaction" not in _hint:
+        _hint = f"{_platform} reactions" if _platform else "reactions"
     _picks = pick_services(
-        _services, platform="telegram",
-        service_hint="telegram reactions",
+        _services, platform=_platform,
+        service_hint=_hint,
         reaction_emoji=_new_emoji,
     ) if _services else []
     if not _picks:
@@ -7945,7 +8293,11 @@ async def handle_change_order(update, text, intent, lang, voice=False):
             return
         PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
         if not merged.get("link"):
-            await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
+            await reply_message(
+                update.message,
+                ask_link_text(merged.get("platform"), merged.get("service_hint"), lang),
+                lang, voice=voice,
+            )
         else:
             await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
         return
@@ -8280,8 +8632,26 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             _set_bridge_lang(_detected)
     # Conversation memory: remember who is speaking and what they
     # said, so the bot's first reply of this turn is recorded.
+    # The detected language is also remembered per user: the next
+    # voice note's transcription retry hints it (owner, 14 Nov
+    # 2026 — an Amharic voice note must not be auto-detected as
+    # Arabic on the retry).
     _CURRENT_USER_ID.set(user.id)
     _LAST_USER_TEXT.set(text)
+    LAST_LANG[user.id] = _detected
+
+    # Arabic-script text (owner, 14 Nov 2026): the bot has no
+    # Arabic templates and must never mirror Arabic back. It can
+    # only arrive from a mis-transcribed voice note (Whisper
+    # auto-detect confuses Amharic with Arabic) or a typed message
+    # in a language the bot does not speak. Answer honestly
+    # instead of feeding it to the classifier or the AI.
+    if _has_arabic_script(text):
+        await reply_message(
+            update.message, t("not_understood_language", lang),
+            lang, voice=voice,
+        )
+        return
 
     # Offensive users (owner, 13 Nov 2026): push back firmly and
     # bluntly — never polite, never apologetic. A second insult in
@@ -8339,6 +8709,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             update.message, t("paused_services", lang), lang, voice=voice
         )
         return
+
+    # A bare non-reaction emoji is a media reaction (owner, 14
+    # Nov 2026): it is answered from the user's situation — a
+    # delayed order, a completed order, a pending Confirm card,
+    # or nothing at all — never with the same canned line twice,
+    # and it never touches the draft or the Confirm card.
+    # Reaction emoji take the reactions path below instead.
+    _media_emoji = _bare_non_reaction_emoji(text)
+    if _media_emoji is not None:
+        if await media_reply_for_text(update, _media_emoji, lang, voice=voice):
+            return
 
     # A conversational message mid-order (round 8, 14 Nov 2026):
     # "do you understand", "what do you mean", free chat — answer
@@ -8637,7 +9018,16 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await reply_message(update.message, price, lang, voice=voice)
             return
     if is_ban_question(text):
-        await reply_message(update.message, with_pending_note(user.id, lang, t("ban_yes", lang)), lang, voice=voice)
+        await reply_message(update.message, with_pending_note(user.id, lang, t("ban_no", lang)), lang, voice=voice)
+        return
+    # The link of a past order (owner, 14 Nov 2026): answer with
+    # the ACTUAL link from history — never the history list, never
+    # an invented link. Runs before the history-table handler
+    # below, so "send me the link of the last order" does not get
+    # the table instead.
+    if is_link_recall_question(text):
+        recall = await link_recall_text(user.id, text, lang)
+        await reply_message(update.message, recall, lang, voice=voice)
         return
     _never_drop = never_drop_kind(
         text, intent.get("platform"), intent.get("service_hint")
@@ -8717,7 +9107,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     "service_id": service.get("service"),
                 }
                 PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
-                await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
+                await reply_message(
+                    update.message,
+                    ask_link_text(merged.get("platform"), merged.get("service_hint"), lang),
+                    lang, voice=voice,
+                )
                 return
 
     # --- conversational intents: answered before the order flow ---
@@ -9512,7 +9906,9 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if _emoji and "reaction" in (merged.get("service_hint") or "").lower():
             _reply = t("emoji_ack_order", lang, emoji=_emoji)
         else:
-            _reply = t("ask_link", lang)
+            _reply = ask_link_text(
+                merged.get("platform"), merged.get("service_hint"), lang
+            )
         # A price question that reached this far (the direct price
         # answer above found no service, or the catalogue hiccuped)
         # still gets its price in the very reply that asks for the
@@ -9618,7 +10014,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("voice_download_failed", lang))
         return
     try:
-        text = await ai_transcribe(audio)
+        text = await transcribe_voice_with_retry(
+            audio, user.id, user.language_code
+        )
     except Exception as exc:
         _log_ai_failure("voice transcription failed", exc)
         await update.message.reply_text(t("transcribe_failed", lang))
@@ -9645,32 +10043,370 @@ async def on_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(t("voice_video_note", lang))
 
 
+# ------------------------------------------- context-aware media ----
+# Media replies (owner, 14 Nov 2026): the bot responds like a
+# person to emoji, GIFs, stickers and photos — differently each
+# time, understanding the situation from context and memory. A
+# media reaction is a reply, not a reset: it never loses a
+# half-built order or a pending Confirm card, and it never
+# invents an order that does not exist.
+#
+# Mood comes from the emoji (a bare emoji, or a sticker's emoji);
+# a GIF carries no emoji, so its mood comes from the situation
+# instead — a GIF while an order is delayed gets the delay reply.
+# The situation comes from the real order state: the most recent
+# placed order's status and average time, a pending Confirm card,
+# a half-built draft, or nothing at all.
+_MEDIA_MOODS = {
+    "😤": "frustrated", "😡": "frustrated", "🤬": "frustrated",
+    "😩": "frustrated", "😠": "frustrated", "😖": "frustrated",
+    "😫": "frustrated", "😭": "frustrated", "😢": "frustrated",
+    "🎉": "happy", "🥳": "happy", "😍": "happy", "❤️": "happy",
+    "😄": "happy", "😁": "happy", "😀": "happy", "😃": "happy",
+    "🙂": "happy", "😊": "happy", "👍": "happy", "👏": "happy",
+    "😂": "happy", "🤣": "happy",
+    "🙏": "thanks", "👋": "thanks",
+}
+
+
+def media_mood(emoji):
+    """The mood of one emoji (\"frustrated\" / \"happy\" /
+    \"thanks\"), or None when it carries no mood."""
+    return _MEDIA_MOODS.get(emoji)
+
+
+def _bare_non_reaction_emoji(text):
+    """The emoji when the message IS just one non-reaction emoji
+    (\"😤\", \"🎉\", \"👋\"), else None. Reaction emoji (👍 ❤️ 🔥
+    🙏 😍 ...) take the reactions path instead, so they never
+    reach this branch."""
+    s = (text or "").strip()
+    if not s or reaction_emoji(s) is not None:
+        return None
+    for emoji in _MEDIA_MOODS:
+        if s.replace("\ufe0f", "") == emoji.replace("\ufe0f", ""):
+            return emoji
+    return None
+
+
+# The reply variants, per mood x situation, English + Amharic.
+# {order_id}, {service}, {status}, {total} come from the real
+# order state; {time} is \", usually about <average time>\" when
+# the average time is known, else empty — the bot never says
+# \"soon\" and never invents a time. Variants rotate per user, so
+# the same user never gets the same canned line twice in a row.
+_MEDIA_REPLIES = {
+    "frustrated_delayed": {
+        "en": [
+            "I'm really sorry it's taking so long — your order #{order_id} ({service}) is still {status}{time}.",
+            "I hear you — that wait is frustrating. Your order #{order_id} is still {status}{time}.",
+            "Sorry about the delay — your order #{order_id} ({service}) is still {status}{time}. It hasn't been forgotten.",
+        ],
+        "am": [
+            "ይቅርታ — በጣም ዘግይቷል። orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}።",
+            "ገብቶኛል — መጠበቁ አስቸጋሪ ነው። orderዎ #{order_id} አሁንም {status} ላይ ነው{time}።",
+            "ስለ መዘግየቱ ይቅርታ — orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}።",
+        ],
+    },
+    "frustrated_failed": {
+        "en": [
+            "That's not OK — your last order ({service}) didn't go through. Want me to place it again?",
+            "I'm sorry about that — your last order ({service}) failed. I can place it again for you, just say the word.",
+        ],
+        "am": [
+            "ይህ ትክክል አይደለም — የመጨረሻው orderዎ ({service}) አልተሳካም። እንደገና ልጀምር?",
+            "ይቅርታ — የመጨረሻው orderዎ ({service}) አልተሳካም። ከፈለጉ እንደገና እጀምራለሁ።",
+        ],
+    },
+    "frustrated_awaiting_confirm": {
+        "en": [
+            "I hear you — your order ({service}, {total} ETB) is ready and waiting for your Confirm. Tap Confirm and I'll place it right away.",
+            "Sorry for the wait — your order ({service}, {total} ETB) is built, it just needs your Confirm to go.",
+        ],
+        "am": [
+            "ገብቶኛል — orderዎ ({service}, {total} ETB) ዝግጁ ነው፣ Confirm ብቻ ነው የሚጠብቀው። Confirm ይጫኑና አስቀምጣለሁ።",
+            "ስለ መጠበቁ ይቅርታ — orderዎ ({service}, {total} ETB) ተዘጋጅቷል፣ Confirm ብቻ ነው የሚቀረው።",
+        ],
+    },
+    "frustrated_draft": {
+        "en": [
+            "I hear you — your order isn't finished yet. Send the link and I'll place it right away.",
+            "Sorry about that — we're still building your order. Send the link and I'll get it going.",
+        ],
+        "am": [
+            "ገብቶኛል — orderዎ ገና አልተጠናቀቀም። Link ይላኩልኝና አስቀምጣለሁ።",
+            "ይቅርታ — orderዎን ገና እየገነባን ነው። Link ይላኩልኝና እጀምራለሁ።",
+        ],
+    },
+    "frustrated_none": {
+        "en": [
+            "I hear you — that sounds frustrating. I don't see an order from you right now — tell me what happened and I'll sort it out.",
+            "Sorry you're dealing with that. I don't have an order from you at the moment — what were you trying to order?",
+        ],
+        "am": [
+            "ገብቶኛል — አስቸጋሪ ነው። አሁን ምንም order አላየሁም — ምን እንደተፈጠረ ንገሩኝ።",
+            "ይቅርታ — አሁን ምንም order አልያዝኩም — ምን ማዘዝ ይፈልጋሉ?",
+        ],
+    },
+    "happy_completed": {
+        "en": [
+            "🎉 It worked — your order #{order_id} ({service}) is done! Enjoy!",
+            "Yes! Your order #{order_id} is complete — {service} delivered. 🎉",
+            "There it is — order #{order_id} ({service}) finished! 🎉",
+        ],
+        "am": [
+            "🎉 ተሳክቷል — orderዎ #{order_id} ({service}) ተጠናቋል! ይደሰቱ!",
+            "አዎ! orderዎ #{order_id} ተጠናቋል — {service} ተደርሷል። 🎉",
+            "እነሆ — orderዎ #{order_id} ({service}) ተጠናቋል! 🎉",
+        ],
+    },
+    "happy_other": {
+        "en": [
+            "😄 Glad to hear it! What would you like to order next?",
+            "Haha, love that! Tell me what you need next.",
+        ],
+        "am": [
+            "😄 ደስ ብሎኛል! ቀጥሎ ምን ማዘዝ ይፈልጋሉ?",
+            "😄 በጣም ጥሩ ነው! ቀጥሎ ምን ይፈልጋሉ?",
+        ],
+    },
+    "thanks": {
+        "en": [
+            "You're welcome! 😊 Anything else you need?",
+            "Anytime! 😊 Just tell me what you'd like to order.",
+        ],
+        "am": [
+            "እንኳን ደህና መጡ! 😊 ሌላ ምን ይፈልጋሉ?",
+            "በደስታ! 😊 ምን ማዘዝ ይፈልጋሉ?",
+        ],
+    },
+    "neutral_delayed": {
+        "en": [
+            "Your order #{order_id} ({service}) is still {status}{time}. I'll keep an eye on it.",
+            "Still going — order #{order_id} is {status}{time}.",
+        ],
+        "am": [
+            "orderዎ #{order_id} ({service}) አሁንም {status} ላይ ነው{time}። እከታተላለሁ።",
+            "ገና በመሄድ ላይ ነው — orderዎ #{order_id} {status} ላይ ነው{time}።",
+        ],
+    },
+    "neutral_completed": {
+        "en": [
+            "🎉 Your order #{order_id} ({service}) is complete!",
+            "Good news — order #{order_id} ({service}) finished! 🎉",
+        ],
+        "am": [
+            "🎉 orderዎ #{order_id} ({service}) ተጠናቋል!",
+            "ጥሩ ዜና — orderዎ #{order_id} ({service}) ተጠናቋል! 🎉",
+        ],
+    },
+    "neutral_awaiting_confirm": {
+        "en": [
+            "Your order ({service}, {total} ETB) is still waiting for Confirm — tap it when you're ready.",
+            "Just a reminder — your order ({service}) is built and waiting for your Confirm.",
+        ],
+        "am": [
+            "orderዎ ({service}, {total} ETB) Confirm እየጠበቀ ነው — ሲዘጋጁ ይጫኑት።",
+            "ማስታወሻ — orderዎ ({service}) ተዘጋጅቶ Confirm እየጠበቀ ነው።",
+        ],
+    },
+    "neutral_none": {
+        "en": [
+            "😄 Nice one! What would you like to order?",
+            "😄 Haha, good one! What would you like to order?",
+        ],
+        "am": [
+            "😄 ጥሩ ነው! ምን ማዘዝ ይፈልጋሉ?",
+            "😄 አዝናኝ ነው! ምን ማዘዝ ይፈልጋሉ?",
+        ],
+    },
+}
+
+# (user_id, reply group) -> how many times that group was used:
+# the rotation counter, so the same user never gets the same
+# canned line twice in a row. Cleared with the per-user state in
+# tests.
+MEDIA_REPLY_COUNT = {}
+
+
+def media_reply_text(user_id: int, mood, ctx: dict, lang: str) -> str:
+    """The reply for a media reaction: mood x situation, rotating
+    the variants per user. `ctx` is media_order_context's dict."""
+    situation = ctx.get("situation") or "none"
+    if mood == "frustrated":
+        group = f"frustrated_{situation}"
+    elif mood == "happy":
+        group = (
+            "happy_completed" if situation == "completed"
+            else "happy_other"
+        )
+    elif mood == "thanks":
+        group = "thanks"
+    else:
+        group = {
+            "delayed": "neutral_delayed",
+            "completed": "neutral_completed",
+            "failed": "frustrated_failed",
+            "awaiting_confirm": "neutral_awaiting_confirm",
+        }.get(situation, "neutral_none")
+    variants = _MEDIA_REPLIES.get(group, _MEDIA_REPLIES["neutral_none"])
+    texts = variants.get(lang) or variants["en"]
+    key = (user_id, group)
+    idx = MEDIA_REPLY_COUNT.get(key, 0)
+    MEDIA_REPLY_COUNT[key] = idx + 1
+    template = texts[idx % len(texts)]
+    avg = ctx.get("avg")
+    if lang == "am":
+        time = (
+            f"፣ አብዛኛውን ጊዜ {avg} ያህል ይወስዳል" if avg else ""
+        )
+    else:
+        time = f", usually about {avg}" if avg else ""
+    total = ctx.get("total")
+    total = format_money(total) if isinstance(total, (int, float)) else ""
+    return template.format(
+        order_id=ctx.get("order_id") or "",
+        service=ctx.get("service") or "",
+        status=ctx.get("status") or "",
+        total=total,
+        time=time,
+    )
+
+
+async def media_order_context(user_id: int) -> dict:
+    """The order situation a media reply is grounded in: the most
+    recent placed order's real status and average time (same data
+    as the \"why hasn't it started\" answer), a pending Confirm
+    card, a half-built draft, or nothing at all. Never invents an
+    order — \"none\" means no order is claimed."""
+    try:
+        last = await resolve_last_order(user_id)
+    except Exception as exc:
+        log.warning("media order context failed: %s", exc)
+        last = None
+    if last:
+        status = str(last.get("status") or "").strip().lower()
+        service_id = last.get("service_id")
+        service_name = last.get("service_name")
+        avg = None
+        if service_id is not None:
+            try:
+                services = await paxyo.services()
+                found = find_service_by_id(services, service_id)
+                if found is not None:
+                    avg = found.get("average_time")
+                    service_name = found.get("name")
+            except Exception as exc:
+                log.warning("media order context services failed: %s", exc)
+        if status in ("completed", "complete"):
+            situation = "completed"
+        elif status in (
+            "pending", "in_progress", "in progress",
+            "processing", "partial",
+        ):
+            situation = "delayed"
+        elif status in ("failed", "cancelled", "canceled", "refunded"):
+            situation = "failed"
+        else:
+            situation = "none"
+        return {
+            "situation": situation,
+            "order_id": last.get("id") or last.get("order_id"),
+            "status": status,
+            "service": (
+                short_service_name(service_name)
+                or f"service {service_id}"
+            ),
+            "avg": avg, "total": last.get("charge"),
+        }
+    _cid, _pending = pending_for_user(user_id)
+    if _pending is not None:
+        service = _pending.get("service") or {}
+        return {
+            "situation": "awaiting_confirm",
+            "service": short_service_name(service.get("name")) or "your order",
+            "total": _pending.get("total"),
+            "order_id": None, "status": None, "avg": None,
+        }
+    if PARTIAL.get(user_id):
+        return {
+            "situation": "draft", "service": None,
+            "order_id": None, "status": None, "avg": None,
+        }
+    return {
+        "situation": "none", "service": None,
+        "order_id": None, "status": None, "avg": None,
+    }
+
+
+async def media_reply(update, emoji, lang: str, voice: bool = False) -> str:
+    """Answer one media reaction (GIF, sticker, bare emoji) from
+    the user's situation, and return the text sent. Reads order
+    state only — it never clears a draft or a Confirm card.
+    The mood comes from the emoji when there is one; a GIF
+    carries no emoji, so the situation sets the mood — a GIF
+    while an order is delayed or failed is frustration, a GIF
+    after a completed order is celebration. Photos are NOT
+    routed here: they are read by Gemini vision
+    (route_photo_result) and keep working as before."""
+    user = update.effective_user
+    mood = media_mood(emoji)
+    ctx = await media_order_context(user.id)
+    if mood is None:
+        situation = ctx.get("situation")
+        if situation in ("delayed", "failed"):
+            mood = "frustrated"
+        elif situation == "completed":
+            mood = "happy"
+    text = media_reply_text(user.id, mood, ctx, lang)
+    if voice:
+        await reply_message(update.message, text, lang, voice=voice)
+    else:
+        await update.message.reply_text(text)
+    return text
+
+
+async def media_reply_for_text(update, emoji, lang: str, voice: bool = False) -> bool:
+    """A bare non-reaction emoji in handle_order_text: answer it
+    from the user's situation. Always True when called — the
+    caller returns."""
+    await media_reply(update, emoji, lang, voice=voice)
+    return True
+
+
 async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A GIF (owner, 13 Nov 2026): never silent, never
     'I did not understand'. A caption is the user's message and is
-    handled normally; otherwise a short friendly steer back to
-    ordering."""
+    handled normally; otherwise the reply depends on the user's
+    situation (owner, 14 Nov 2026) — a delayed order gets empathy
+    and the real status, a completed order gets a celebration, no
+    order gets a varied friendly steer back to ordering."""
     if _update_seen(update):
         return
     caption = (update.message.caption or "").strip()
     if caption:
         await handle_order_text(update, context, caption)
         return
-    lang = lang_of("", update.effective_user.language_code)
-    await update.message.reply_text(t("gif_reply", lang))
+    user = update.effective_user
+    lang = LAST_LANG.get(user.id) or lang_of("", user.language_code)
+    await media_reply(update, None, lang)
 
 
 async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A sticker (owner, 13 Nov 2026): same as a GIF — a caption is
-    the user's message; otherwise a short friendly steer back."""
+    the user's message; otherwise the reply depends on the
+    sticker's emoji and the user's situation, like a GIF."""
     if _update_seen(update):
         return
     caption = (update.message.caption or "").strip()
     if caption:
         await handle_order_text(update, context, caption)
         return
-    lang = lang_of("", update.effective_user.language_code)
-    await update.message.reply_text(t("sticker_reply", lang))
+    user = update.effective_user
+    lang = LAST_LANG.get(user.id) or lang_of("", user.language_code)
+    sticker = getattr(update.message, "sticker", None)
+    emoji = getattr(sticker, "emoji", None) if sticker else None
+    await media_reply(update, emoji, lang)
 
 
 # ------------------------------------------------------------ photos ------

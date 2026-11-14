@@ -584,7 +584,7 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
              mock.patch("bot.speak_reply") as speak:
             await bot.handle_order_text(update, None, "I want 1000 Instagram followers")
         speak.assert_not_called()
-        self.assertEqual(msg.text_sent, ["Please send the link the order is for."])
+        self.assertEqual(msg.text_sent, ["Please send your Instagram profile link."])
         self.assertEqual(msg.voice_sent, [])
 
     async def test_voice_in_produces_voice_for_plain_reply(self):
@@ -1039,7 +1039,7 @@ class TestMultiTurnOrder(unittest.IsolatedAsyncioTestCase):
             ("1000", intent_of("order", quantity=1000)),
         ])
         self.assertEqual(
-            msg.text_sent[0], "Please send the link the order is for."
+            msg.text_sent[0], "Please send your Instagram profile link."
         )
         self.assertEqual(msg.text_sent[1], "How many? (for example 1000)")
         self.assertIn("Instagram Followers", msg.text_sent[2])
@@ -1080,12 +1080,12 @@ class TestMultiTurnOrder(unittest.IsolatedAsyncioTestCase):
                 "order", platform="tiktok", service_hint="views")),
         ])
         self.assertEqual(
-            msg.text_sent[0], "Please send the link the order is for."
+            msg.text_sent[0], "Please send your Instagram profile link."
         )
         # The Instagram pieces were dropped; the bot asks for the
         # TikTok link instead of completing an Instagram order.
         self.assertEqual(
-            msg.text_sent[1], "Please send the link the order is for."
+            msg.text_sent[1], "Please send the link of the video."
         )
         self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
         self.assertNotIn("link", bot.PARTIAL[1])
@@ -4178,22 +4178,24 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
         return msg
 
     async def test_safety_is_honest(self):
-        # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer): the
-        # ban question gets a YES answer — it can happen, anyone
-        # can buy followers for you without your permission, and
-        # TikTok can shadowban or strike/ban an account over fake
-        # followers, likes or views.
+        # Owner, 14 Nov 2026 (FINAL, platform-general): the ban
+        # question gets a NO answer — no social media platform
+        # bans or strikes an account over fake followers, likes or
+        # views, because anyone can buy them for you without your
+        # permission. (History: 13 Nov NO, 14 Nov 16:49 misread as
+        # YES and deployed, 14 Nov 17:06 corrected back to NO,
+        # 17:07 widened to all platforms.)
         msg = await self._send(
             "Will this get my account banned?",
             intent_of("safety"),
         )
-        self.assertIn("Yes — it can happen",
+        self.assertIn("No — no social media platform bans or strikes",
                       msg.text_sent[0])
         self.assertIn("without your permission",
                       msg.text_sent[0])
-        self.assertIn("shadowban or strike/ban",
+        self.assertIn("can't get your account banned or shadowbanned",
                       msg.text_sent[0])
-        self.assertNotIn("can't be banned", msg.text_sent[0])
+        self.assertNotIn("it can happen", msg.text_sent[0])
 
     async def test_safety_with_platform_offers_slower_service(self):
         msg = await self._send(
@@ -4522,14 +4524,14 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
 
     async def test_question_with_pending_order_names_it(self):
         # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer): the
-        # ban question gets the YES answer, with the pending order
+        # ban question gets the NO answer, with the pending order
         # named in the note (short name).
         bot.PENDING["abc123"] = make_pending()
         msg = await self._send(
             "Will this get my account banned?",
             intent_of("safety"),
         )
-        self.assertIn("Yes — it can happen",
+        self.assertIn("No — no social media platform bans or strikes",
                       msg.text_sent[0])
         self.assertIn("still waiting for Confirm", msg.text_sent[0])
         self.assertIn("Instagram Followers", msg.text_sent[0])
@@ -5413,7 +5415,7 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
             ("Bro how fast can you deliver it", intent_of("unclear")),
         ])
         self.assertEqual(
-            msg.text_sent[0], "Please send the link the order is for."
+            msg.text_sent[0], "Please send your Instagram profile link."
         )
         self.assertIn("Instagram Followers", msg.text_sent[1])
         self.assertIn("12 minutes", msg.text_sent[1])
@@ -5521,7 +5523,7 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertIn("Which one?", msg.text_sent[0])
         self.assertEqual(
-            msg.text_sent[1], "Please send the link the order is for."
+            msg.text_sent[1], "Please send your Instagram profile link."
         )
         self.assertIn("Instagram Followers (#1002)", msg.text_sent[2])
         self.assertIsNotNone(msg.markups[2])
@@ -5537,7 +5539,7 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertIn("Which one?", msg.text_sent[0])
         self.assertEqual(
-            msg.text_sent[1], "Please send the link the order is for."
+            msg.text_sent[1], "Please send your Instagram profile link."
         )
         self.assertIn("Instagram Followers (#1001)", msg.text_sent[2])
 
@@ -5549,7 +5551,7 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
             ("2", intent_of("unclear")),
         ])
         self.assertEqual(
-            msg.text_sent[1], "Please send the link the order is for."
+            msg.text_sent[1], "Please send your Instagram profile link."
         )
         self.assertEqual(bot.PARTIAL[1].get("service_id"), 1001)
 
@@ -5663,7 +5665,7 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
         ], paxyo=TikTokPaxyo())
         self.assertEqual(len(msg.text_sent), 1)
         self.assertEqual(
-            msg.text_sent[0], "Please send the link the order is for."
+            msg.text_sent[0], "Please send the link of the video."
         )
         self.assertEqual(bot.PARTIAL[1].get("service_hint"), "tiktok views")
 
@@ -5677,7 +5679,7 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
         ], paxyo=TikTokPaxyo())
         self.assertEqual(len(msg.text_sent), 2)
         self.assertEqual(
-            msg.text_sent[0], "Please send the link the order is for."
+            msg.text_sent[0], "Please send the link of the video."
         )
         self.assertIn("TikTok Video Views", msg.text_sent[1])
         self.assertIn("(#2001)", msg.text_sent[1])
@@ -5971,7 +5973,7 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
                        service_hint="followers", quantity=500)),
         ], paxyo=TikTokPaxyo())
         self.assertEqual(
-            msg.text_sent[0], "Please send the link the order is for."
+            msg.text_sent[0], "Please send your Instagram profile link."
         )
         pending = next(iter(bot.PENDING.values()))
         self.assertEqual(pending["quantity"], 1000)
@@ -6423,7 +6425,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         msg, _ = await self._on_text(
             "first one", reply_to="Which one?",
         )
-        self.assertIn("Please send the link", msg.text_sent[0])
+        self.assertIn("Please send your Instagram profile link.", msg.text_sent[0])
 
     # (7) orders table --------------------------------------------------
 
@@ -6842,20 +6844,42 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
 
     # (17) ban answer + payment methods -------------------------------------
 
-    async def test_ban_question_answered_yes(self):
-        # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer):
-        # yes, it can happen.
+    async def test_ban_question_answered_no(self):
+        # Owner, 14 Nov 2026 (FINAL, platform-general): no social
+        # media platform bans or strikes an account over fake
+        # followers, likes or views — anyone can buy them for you
+        # without your permission.
         msg, _ = await self._turns([
             ("can my social media account get banned or shadow banned?",
              intent_of("safety")),
         ])
-        self.assertIn("Yes — it can happen",
+        self.assertIn("No — no social media platform bans or strikes",
                       msg.text_sent[0])
         self.assertIn("without your permission",
                       msg.text_sent[0])
-        self.assertIn("shadowban or strike/ban",
+        self.assertIn("can't get your account banned or shadowbanned",
                       msg.text_sent[0])
-        self.assertNotIn("can't be banned", msg.text_sent[0])
+        self.assertNotIn("it can happen", msg.text_sent[0])
+        self.assertNotIn("can shadowban or strike/ban",
+                         msg.text_sent[0])
+
+    async def test_ban_question_names_instagram_or_facebook(self):
+        # The NO answer is platform-general (owner, 14 Nov 2026
+        # 17:07 EAT): naming Instagram or Facebook must not change
+        # it to a TikTok-only or YES answer.
+        for question in (
+            "can my Instagram account get banned for buying followers?",
+            "will Facebook ban me if someone buys likes for my page?",
+        ):
+            msg, _ = await self._turns([
+                (question, intent_of("safety")),
+            ])
+            self.assertIn(
+                "No — no social media platform bans or strikes",
+                msg.text_sent[0],
+            )
+            self.assertNotIn("it can happen", msg.text_sent[0])
+            self.assertNotIn("TikTok", msg.text_sent[0])
 
     async def test_ban_question_amharic(self):
         # The same answer for an Amharic question: the bridge
@@ -6877,19 +6901,22 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
                 ("accountዬ ሊታገድ ይችላል?",
                  intent_of("safety")),
             ])
-        self.assertIn("Yes — it can happen", msg.text_sent[0])
-        self.assertNotIn("can't be banned", msg.text_sent[0])
+        self.assertIn("No — no social media platform bans or strikes", msg.text_sent[0])
+        self.assertNotIn("it can happen", msg.text_sent[0])
         to_am.assert_awaited_once()
 
     def test_ban_template_amharic(self):
         # The deterministic Amharic ban wording (owner, 14 Nov
-        # 2026): yes it can happen — no trace of the old NO line.
-        am = bot.t("ban_yes", "am")
-        self.assertIn("አዎ", am)
+        # 2026): NO, platform-general — no trace of the YES line.
+        am = bot.t("ban_no", "am")
+        self.assertIn("አይ", am)
         self.assertIn("shadow ban", am)
-        self.assertIn("TikTok", am)
-        self.assertNotIn("አይችልም", am)
-        self.assertNotIn("can't be banned", bot.t("ban_yes", "en"))
+        self.assertNotIn("TikTok", am)
+        self.assertNotIn("ሊከሰት ይችላል", am)
+        self.assertNotIn("አዎ", am)
+        self.assertNotIn("it can happen", bot.t("ban_no", "en"))
+        self.assertNotIn("can shadowban or strike/ban",
+                         bot.t("ban_no", "en"))
 
     async def test_payment_answer_lists_all_four_methods(self):
         msg, _ = await self._turns([
@@ -7051,7 +7078,7 @@ class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
                        link="https://instagram.com/p/x", quantity=1000)),
         ], paxyo=fake_paxyo)
         self.assertIn(
-            "Please send the link the order is for.", msg.text_sent[0]
+            "Please send the link of the video.", msg.text_sent[0]
         )
         self.assertEqual(bot.PENDING, {})
 
@@ -7195,10 +7222,10 @@ class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
             ("can my social media account get banned or shadow banned?",
              intent_of("safety")),
         ])
-        self.assertIn("Yes — it can happen",
+        self.assertIn("No — no social media platform bans or strikes",
                       msg.text_sent[0])
         self.assertIn("shadowban", msg.text_sent[0])
-        self.assertNotIn("can't be banned", msg.text_sent[0])
+        self.assertNotIn("it can happen", msg.text_sent[0])
 
 
 
@@ -7313,7 +7340,7 @@ class TestRoundSevenFixes(unittest.IsolatedAsyncioTestCase):
         ], paxyo=TikTokPaxyo())
         self.assertIn("That link is a video", msg.text_sent[0])
         self.assertIn(
-            "Please send the link the order is for.", msg.text_sent[1]
+            "Please send the link of the video.", msg.text_sent[1]
         )
         self.assertEqual(bot.PENDING, {})
 
@@ -7480,7 +7507,7 @@ class TestRoundSevenFixes(unittest.IsolatedAsyncioTestCase):
         ], paxyo=fake_paxyo)
         self.assertIn("That link is a video", msg.text_sent[0])
         self.assertIn(
-            "Please send the link the order is for.", msg.text_sent[1]
+            "Please send the link of the video.", msg.text_sent[1]
         )
         self.assertEqual(bot.PENDING, {})
 
@@ -9589,13 +9616,13 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
 
     async def test_free_chat_does_not_swallow_ban_question(self):
         # "do you think I'll get banned?" is a ban question, not
-        # chat — the owner's YES answer must win.
+        # chat — the owner's NO answer must win.
         msg = await self._send(
             "do you think I'll get banned?",
             intent_of("safety"), ai_reply="CHATTY-MOCK",
         )
         self.assertIn(
-            "Yes — it can happen", msg.text_sent[0]
+            "No — no social media platform bans or strikes", msg.text_sent[0]
         )
         self.assertNotIn("CHATTY-MOCK", msg.text_sent[0])
 
@@ -9709,6 +9736,119 @@ class RealReactionsPaxyo(FakePaxyo):
             "type": "Default", "rate_etb_per_1000": 12.60,
             "min": 10, "max": 100000, "average_time": "15 minutes",
             "active": True, "provider_service_id": 1723,
+        },
+        {
+            # Live bug, 14 Nov 2026 17:01 EAT: "I want only ❤️
+            # reaction" switched off Pray but picked Heart Eyes
+            # #1725 (12.60, 10 minutes live) instead of Heart #6537
+            # — "heart" matched "Heart Eyes" as a substring, and
+            # fastest-first picked the lookalike. The fixture must
+            # model the lookalikes, or the tests cannot see it.
+            "service": 1725,
+            "name": "Telegram Reactions + Free Views | Heart Eyes 😍| [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "5 minutes",
+            "active": True, "provider_service_id": 1725,
+        },
+        {
+            # A second Heart ❤️ service (pricier, slower): the
+            # exact-emoji pool has duplicates, and the pick among
+            # them must be deterministic — cheapest wins.
+            "service": 1718,
+            "name": "Telegram Reactions + Free Views | Heart ❤️| [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 1718,
+        },
+        {
+            # Lookalike: "Heart on fire" carries ❤️‍🔥 (two emoji),
+            # so it is never a ❤️-only service.
+            "service": 6536,
+            "name": "Telegram Reactions + Free Views | Heart on fire ❤️‍🔥| [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "20 minutes",
+            "active": True, "provider_service_id": 6536,
+        },
+        {
+            # Lookalike: "Broken heart" 💔 is a different reaction,
+            # never the ❤️ service.
+            "service": 6539,
+            "name": "Telegram Reactions + Free Views | Broken heart 💔 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "25 minutes",
+            "active": True, "provider_service_id": 6539,
+        },
+        {
+            # A second Heart Eyes 😍 service (pricier): 😍 must
+            # still pick the cheaper #1725, not this one.
+            "service": 1750,
+            "name": "Telegram Reactions + Free Views | Heart Eyes 😍| [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 42.00,
+            "min": 10, "max": 1000000, "average_time": "30 minutes",
+            "active": True, "provider_service_id": 1750,
+        },
+        {
+            # Facebook reactions (owner, 14 Nov 2026): the
+            # exact-emoji rule covers Facebook too. Cheapest
+            # Facebook Heart-only service: #5105, 29.40 ETB/1000.
+            "service": 5105,
+            "name": "Facebook Post Reactions [ ❤️ ] [ Max 100K ] | HQ Accounts | No Refill ⚠️ | Instant Start | Day 50K 🚀",
+            "category": "Facebook Post Reactions [ Best Prices ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 29.40,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 5105,
+        },
+        {
+            # A second Facebook Heart ❤️ service (pricier).
+            "service": 4409,
+            "name": "Facebook Post Reactions [ ❤️ ] [ Max 10K ] | Hidden Accounts | Non Drop | 30 Days ♻️ | Instant Start | Day 10K 🚀",
+            "category": "Facebook Post Reaction [ Hidden Accounts ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 116.34,
+            "min": 50, "max": 10000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 4409,
+        },
+        {
+            # Facebook mix: three emoji, never a ❤️-only service.
+            "service": 4405,
+            "name": "Facebook Post Reactions [ 👍  ❤️  😂 ] [ Max 10K ] | Hidden Accounts | Non Drop | 30 Days ♻️ | Instant Start | Day 10K 🚀",
+            "category": "Facebook Post Reaction [ Hidden Accounts ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 116.34,
+            "min": 50, "max": 10000, "average_time": "20 minutes",
+            "active": True, "provider_service_id": 4405,
+        },
+        {
+            # Cheapest Facebook Thumbs-up-only service.
+            "service": 5923,
+            "name": "Facebook Post Reactions [ 👍 ] [ Max 100K ] | HQ Accounts | No Refill ⚠️ | Instant Start | Day 50K 🚀",
+            "category": "Facebook Post Reactions [ Best Prices ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 29.40,
+            "min": 10, "max": 100000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 5923,
+        },
+        {
+            # A second Facebook Heart ❤️ service (pricier than
+            # #5105, cheaper than #4409).
+            "service": 7314,
+            "name": "Facebook Post Reactions [ ❤️ ] [ Max 10M ] | HQ Accounts | Cancel Enable | No Refill ⚠️ | Instant Start | Day 50K 🚀",
+            "category": "Facebook Post Reactions [ Best Prices ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 37.80,
+            "min": 10, "max": 10000000, "average_time": "20 minutes",
+            "active": True, "provider_service_id": 7314,
+        },
+        {
+            # Facebook 😆 service (owner named 😆 among the
+            # Facebook reaction emoji, 14 Nov 2026).
+            "service": 4417,
+            "name": "Facebook Post Reactions [ 😆 ] [ Max 1M ] | Hidden Accounts | Non Drop | No Refill ⚠️ | Instant Start | Day 100K 🚀 [ Completed in 1 Minute ]",
+            "category": "Facebook Post Reaction [ Hidden Accounts ] [ Completed in 1 Minute ] 🚀",
+            "type": "Default", "rate_etb_per_1000": 110.00,
+            "min": 100, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 4417,
         },
         {
             "service": 6534,
@@ -11286,7 +11426,7 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
             bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
             bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
             bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
-            bot.CANCELLED_DRAFT,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG, bot.MEDIA_REPLY_COUNT,
         ):
             store.clear()
         bot.CHAT_HISTORY.clear()
@@ -11313,7 +11453,7 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
             bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
             bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
             bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
-            bot.CANCELLED_DRAFT,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG, bot.MEDIA_REPLY_COUNT,
         ):
             store.clear()
         bot.CHAT_HISTORY.clear()
@@ -11508,7 +11648,7 @@ class TestLanguageRound(_LanguageRoundBase):
             to_en.await_args.args[0], bot.normalize_text(tigrinya)
         )
         self.assertEqual(to_en.await_args.kwargs.get("source_lang"), "ti")
-        self.assertEqual(to_ti.await_args.args, ("Please send the link the order is for.", "ti"))
+        self.assertEqual(to_ti.await_args.args, ("Please send your TikTok profile link.", "ti"))
         self.assertEqual(msg.text_sent, ["ሊንክ ይላኩ"])
 
     async def test_translate_prompts_name_the_language(self):
@@ -11918,15 +12058,16 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             "",
         )
         # The ban answer is not moralizing: it states the owner's
-        # fact for the ban question (14 Nov 2026: yes, it can
-        # happen) and survives the sanitizer.
+        # fact for the ban question (14 Nov 2026: NO, no platform
+        # bans or strikes over fake followers, likes or views)
+        # and survives the sanitizer.
         self.assertIn(
-            "Yes — it can happen",
-            bot.strip_moralizing(bot.t("ban_yes", "en")),
+            "No — no social media platform bans or strikes",
+            bot.strip_moralizing(bot.t("ban_no", "en")),
         )
         self.assertIn(
-            "shadowban or strike/ban",
-            bot.strip_moralizing(bot.t("ban_yes", "en")),
+            "can't get your account banned or shadowbanned",
+            bot.strip_moralizing(bot.t("ban_no", "en")),
         )
 
     async def test_free_answer_never_moralizes_about_fake_followers(self):
@@ -11943,21 +12084,22 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertNotIn("fake followers", reply)
         self.assertTrue(reply.strip())
 
-    async def test_ban_question_keeps_new_yes_answer(self):
-        # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer):
-        # the ban question gets YES, it can happen — and the
-        # free-answer sanitizer must not strip it.
+    async def test_ban_question_keeps_no_answer(self):
+        # Owner, 14 Nov 2026 (FINAL): the ban question gets NO —
+        # no platform bans or strikes over fake followers, likes
+        # or views — and the free-answer sanitizer must not strip
+        # it.
         msg = await self._turns([
             ("can I get banned for buying followers?",
              intent_of("safety")),
         ])
         self.assertIn(
-            "Yes — it can happen", msg.text_sent[0]
+            "No — no social media platform bans or strikes", msg.text_sent[0]
         )
         self.assertIn(
             "without your permission", msg.text_sent[0]
         )
-        self.assertNotIn("can't be banned", msg.text_sent[0])
+        self.assertNotIn("it can happen", msg.text_sent[0])
 
     # (2) a price question always gets a price --------------------
 
@@ -12292,6 +12434,112 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertIn("don't have a 😮-only service", msg.text_sent[0])
         self.assertEqual(bot.PENDING, {})
 
+    # (5c) exact-emoji mapping + Facebook reactions -----------------
+    # Live bug, 14 Nov 2026 17:01 EAT: "I want only ❤️ reaction"
+    # switched off Pray but picked Heart Eyes #1725 — the word
+    # "heart" matched "Heart Eyes" as a substring, and
+    # fastest-first picked the lookalike. The fix: the emoji in
+    # the service name decides (exact-emoji rule), and within one
+    # exact emoji the cheapest service wins.
+
+    def test_heart_pick_excludes_lookalikes(self):
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="❤️",
+        )
+        self.assertEqual(picks[0]["service"], 6537)
+        picked_ids = {s["service"] for s in picks}
+        self.assertNotIn(1725, picked_ids)  # Heart Eyes 😍
+        self.assertNotIn(1750, picked_ids)  # Heart Eyes 😍 (2nd)
+        self.assertNotIn(6536, picked_ids)  # Heart on fire ❤️‍🔥
+        self.assertNotIn(6539, picked_ids)  # Broken heart 💔
+        self.assertIn(1718, picked_ids)  # 2nd Heart ❤️: exact, allowed
+
+    def test_heart_eyes_pick_is_heart_eyes(self):
+        # 😍 keeps its own mapping: the cheaper Heart Eyes #1725,
+        # not the pricier #1750.
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="😍",
+        )
+        self.assertEqual(picks[0]["service"], 1725)
+        picked_ids = {s["service"] for s in picks}
+        self.assertNotIn(6537, picked_ids)
+        # Both Heart Eyes services are in the pool (exact emoji);
+        # the cheapest, #1725, is first.
+
+    def test_fire_pick_excludes_heart_on_fire(self):
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="🔥",
+        )
+        self.assertEqual(picks[0]["service"], 6540)
+        picked_ids = {s["service"] for s in picks}
+        self.assertNotIn(6536, picked_ids)  # Heart on fire ❤️‍🔥
+
+    def test_facebook_heart_pick(self):
+        # Facebook ❤️ picks the Facebook Heart-only service
+        # #5105 (cheapest), never the mix and never a Telegram
+        # service.
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="facebook",
+            service_hint="facebook reactions", reaction_emoji="❤️",
+        )
+        self.assertEqual(picks[0]["service"], 5105)
+        self.assertEqual(picks[0]["rate_etb_per_1000"], 29.40)
+        picked_ids = {s["service"] for s in picks}
+        self.assertNotIn(4405, picked_ids)  # Facebook mix 👍❤️😂
+        self.assertNotIn(6537, picked_ids)  # Telegram Heart
+        for pick in picks:
+            self.assertIn("facebook", pick["name"].lower())
+
+    def test_facebook_grinning_pick(self):
+        # 😆 is a Facebook reaction emoji too (owner, 14 Nov 2026).
+        picks = bot.pick_services(
+            RealReactionsPaxyo.REACTIONS_SERVICES, platform="facebook",
+            service_hint="facebook reactions", reaction_emoji="😆",
+        )
+        self.assertEqual(picks[0]["service"], 4417)
+
+    async def test_facebook_heart_order_and_correction(self):
+        # A Facebook ❤️ order, then a 👍 correction: the new card
+        # is the Facebook Thumbs-up service #5923, the old card
+        # is deleted, and no Telegram service is ever involved.
+        msg = await self._turns([
+            ("add 100 ❤️ reactions for this Facebook post "
+             "https://www.facebook.com/paxyo/posts/123",
+             intent_of("order", platform="facebook",
+                       service_hint="facebook reactions",
+                       link="https://www.facebook.com/paxyo/posts/123",
+                       quantity=100, reaction_emoji="❤️")),
+            ("I want only 👍 reaction",
+             intent_of("change_order", quantity=100)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 5923)
+        # The short name strips the "[ 👍 ]" part, so the card
+        # only says "Facebook Post Reactions" — the service ID
+        # above is the real check.
+        self.assertIn("Facebook", msg.text_sent[1])
+        self.assertNotIn("Heart", msg.text_sent[1])
+        self.assertEqual(msg.get_bot().deleted, [(1, 1)])
+        self.assertEqual(pending.get("message_id"), 2)
+
+    async def test_facebook_no_exact_service_says_so(self):
+        # Facebook has no dedicated 🙏 reaction service: say so
+        # honestly instead of silently selling the mix.
+        msg = await self._turns([
+            ("add 10 🙏 facebook reactions for this post "
+             "https://www.facebook.com/paxyo/posts/123",
+             intent_of("order", platform="facebook",
+                       service_hint="facebook reactions",
+                       link="https://www.facebook.com/paxyo/posts/123",
+                       quantity=10, reaction_emoji="🙏")),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("don't have a 🙏-only service", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
     async def test_quantity_rejection_names_service_and_limits(self):
         msg = await self._turns([
             ("add 5 🙏 of tg reaction for this post "
@@ -12321,6 +12569,334 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertEqual(pending["service"]["service"], 1723)
         self.assertEqual(pending["quantity"], 10)
         self.assertIn("Pray", msg.text_sent[1])
+
+    # (5d) custom link questions per order type ---------------------
+    # Owner, 14 Nov 2026: the bot asks for the specific thing —
+    # the profile link for followers, the video link for views,
+    # the post link for a Telegram post interaction — never the
+    # bare generic "send the link" when it knows the order type.
+
+    def test_ask_link_followers_names_the_platform(self):
+        self.assertEqual(
+            bot.ask_link_text("tiktok", "followers", "en"),
+            "Please send your TikTok profile link.",
+        )
+        self.assertEqual(
+            bot.ask_link_text("instagram", "instagram followers", "en"),
+            "Please send your Instagram profile link.",
+        )
+
+    def test_ask_link_views_is_the_video_link(self):
+        self.assertEqual(
+            bot.ask_link_text("tiktok", "views", "en"),
+            "Please send the link of the video.",
+        )
+
+    def test_ask_link_telegram_reactions_is_the_post_link(self):
+        self.assertEqual(
+            bot.ask_link_text("telegram", "telegram reactions", "en"),
+            "Please send the link of the Telegram post.",
+        )
+
+    def test_ask_link_likes_and_comments(self):
+        self.assertEqual(
+            bot.ask_link_text("instagram", "likes", "en"),
+            "Please send the link of the post or video you want liked.",
+        )
+        self.assertEqual(
+            bot.ask_link_text("tiktok", "comments", "en"),
+            "Please send the link of the post or video you want commented on.",
+        )
+
+    def test_ask_link_comment_likes_keeps_the_two_thing_question(self):
+        self.assertIn(
+            "two things",
+            bot.ask_link_text("tiktok", "comment likes", "en"),
+        )
+
+    def test_ask_link_unknown_type_stays_generic(self):
+        self.assertEqual(
+            bot.ask_link_text(None, None, "en"),
+            "Please send the link the order is for.",
+        )
+
+    def test_ask_link_amharic_names_the_platform(self):
+        question = bot.ask_link_text("tiktok", "followers", "am")
+        self.assertIn("TikTok", question)
+        self.assertIn("profile", question)
+
+    async def test_followers_order_asks_for_the_profile_link(self):
+        msg = await self._turns([
+            ("I want 1000 TikTok followers",
+             intent_of("order", platform="tiktok",
+                       service_hint="followers", quantity=1000)),
+        ])
+        self.assertEqual(
+            msg.text_sent[0], "Please send your TikTok profile link."
+        )
+
+    async def test_views_order_asks_for_the_video_link(self):
+        msg = await self._turns([
+            ("I want 1000 TikTok views",
+             intent_of("order", platform="tiktok",
+                       service_hint="views", quantity=1000)),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link of the video."
+        )
+
+    # (5e) link recall from order history ---------------------------
+    # Owner, 14 Nov 2026: "please send me the link of the last
+    # order about the Telegram reaction" gets the ACTUAL link of
+    # the most recent matching order — the API's GET /orders list
+    # returns the link — never the history list, never an invented
+    # link.
+
+    def test_is_link_recall_question(self):
+        self.assertTrue(bot.is_link_recall_question(
+            "please send me the link of the last order about the "
+            "Telegram reaction"
+        ))
+        self.assertTrue(bot.is_link_recall_question(
+            "what is the link of my last order?"
+        ))
+        self.assertFalse(bot.is_link_recall_question("send the link"))
+        self.assertFalse(bot.is_link_recall_question(
+            "I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/"
+        ))
+
+    async def test_link_recall_last_telegram_reaction(self):
+        recent = [
+            dict(FakePaxyo.RECENT_ORDER, id=1836, service_id=1723,
+                 service_name="Telegram Reactions + Free Views | Pray 🙏",
+                 link="https://t.me/godofpanelcom/768",
+                 status="completed"),
+            dict(FakePaxyo.RECENT_ORDER, id=1835, service_id=1001,
+                 service_name="Instagram Followers | Fast",
+                 link="https://instagram.com/p/x", status="completed"),
+        ]
+        msg = await self._turns([
+            ("please send me the link of the last order about the "
+             "Telegram reaction",
+             intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=recent))
+        self.assertIn("https://t.me/godofpanelcom/768", msg.text_sent[0])
+        self.assertNotIn("instagram.com", msg.text_sent[0])
+
+    async def test_link_recall_no_type_named_returns_the_last_order(self):
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836,
+            link="https://t.me/godofpanelcom/768",
+        )]
+        msg = await self._turns([
+            ("please send me the link of the last order",
+             intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=recent))
+        self.assertIn("https://t.me/godofpanelcom/768", msg.text_sent[0])
+
+    async def test_link_recall_no_matching_order_is_honest(self):
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836,
+            service_name="Instagram Followers | Fast",
+        )]
+        msg = await self._turns([
+            ("please send me the link of the last order about the "
+             "Telegram reaction",
+             intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=recent))
+        self.assertIn("couldn't find", msg.text_sent[0].lower())
+        self.assertNotIn("t.me", msg.text_sent[0])
+
+    async def test_link_recall_no_orders_at_all_is_honest(self):
+        msg = await self._turns([
+            ("please send me the link of the last order",
+             intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=[]))
+        self.assertIn("couldn't find any order", msg.text_sent[0])
+
+    # (5f) voice language bug — Amharic mis-detected as Arabic -----
+    # Owner, 14 Nov 2026: an Amharic voice note came back in
+    # Arabic. ROOT CAUSE: Whisper auto-detects the language and
+    # its Amharic is weak, so short Amharic clips can be
+    # mis-detected as Arabic; detect_language has no Arabic
+    # branch, so the Arabic text flowed into the order flow and
+    # the AI mirrored it back. The fix: one language-hinted
+    # retry, and an Arabic-script guard that never lets Arabic
+    # reach the AI.
+
+    def test_arabic_script_detection(self):
+        self.assertTrue(bot._has_arabic_script("مرحبا كيف حالك"))
+        self.assertFalse(bot._has_arabic_script("ሰላም"))
+        self.assertFalse(bot._has_arabic_script(
+            "Hello, I want 1000 followers"
+        ))
+        self.assertFalse(bot._has_arabic_script(""))
+
+    async def test_groq_transcribe_sends_language_hint(self):
+        post = mock.AsyncMock(return_value={"text": "ሰላም"})
+        with mock.patch("bot._groq_post", new=post):
+            text = await bot.groq_transcribe(b"audio", language="am")
+        self.assertEqual(text, "ሰላም")
+        self.assertEqual(
+            post.await_args.kwargs["data"]["language"], "am"
+        )
+        self.assertEqual(
+            post.await_args.kwargs["data"]["model"],
+            "whisper-large-v3-turbo",
+        )
+
+    async def test_groq_transcribe_without_hint_sends_no_language(self):
+        post = mock.AsyncMock(return_value={"text": "hello"})
+        with mock.patch("bot._groq_post", new=post):
+            await bot.groq_transcribe(b"audio")
+        self.assertNotIn("language", post.await_args.kwargs["data"])
+
+    async def test_voice_arabic_retry_retranscribes_in_amharic(self):
+        # The owner's last detected language is Amharic; the
+        # first (auto-detected) transcription is Arabic, the
+        # retry is hinted "am" and comes back in Amharic.
+        bot.LAST_LANG[1] = "am"
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        transcribe = mock.AsyncMock(
+            side_effect=["مرحبا كيف حالك", "ሰላም"]
+        )
+        intent = intent_of("off_topic")
+        with mock.patch("bot.ai_transcribe", new=transcribe), \
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ), mock.patch("bot.paxyo", FakePaxyo()), \
+            mock.patch("bot.speak_reply"), mock.patch(
+                "bot.ai_generate",
+                new=mock.AsyncMock(return_value="ሰላም! እንዴት ነህ?"),
+            ):
+            await bot.on_voice(update, None)
+        self.assertEqual(transcribe.await_count, 2)
+        self.assertEqual(
+            transcribe.await_args_list[1].kwargs, {"language": "am"}
+        )
+        self.assertIn("You said:", msg.text_sent[0])
+        self.assertIn("ሰላም", msg.text_sent[0])
+        self.assertNotIn("مرحبا", msg.text_sent[0])
+
+    async def test_voice_arabic_retry_still_arabic_fails_honestly(self):
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        transcribe = mock.AsyncMock(
+            side_effect=["مرحبا", "مرحبا مرة أخرى"]
+        )
+        with mock.patch("bot.ai_transcribe", new=transcribe), \
+            mock.patch("bot.paxyo", FakePaxyo()), \
+            mock.patch("bot.speak_reply"):
+            await bot.on_voice(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("could not understand", msg.text_sent[0].lower())
+        self.assertNotIn("You said:", msg.text_sent[0])
+
+    async def test_arabic_text_gets_an_honest_reply(self):
+        msg = await self._turns([
+            ("مرحبا كيف حالك", intent_of("off_topic")),
+        ])
+        self.assertIn("English or Amharic", msg.text_sent[0])
+        self.assertNotIn("مرحبا", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.PARTIAL, {})
+
+    async def test_last_lang_is_remembered(self):
+        await self._turns([("ሰላም", intent_of("off_topic"))])
+        self.assertEqual(bot.LAST_LANG.get(1), "am")
+
+    # (5g) context-aware media replies ------------------------------
+    # Owner, 14 Nov 2026: the bot responds like a person to emoji,
+    # GIFs, stickers and photos — differently each time, from the
+    # user's situation and memory. A GIF carries no emoji, so its
+    # mood comes from the situation: a GIF while an order is
+    # delayed is frustration, a GIF after a completed order is
+    # celebration. A sticker's emoji carries its mood directly
+    # (a 😡 sticker is frustration even with no order at all).
+    # A media reply never clears a draft or a Confirm card, and
+    # never invents an order. Photos keep working as before
+    # (read by Gemini vision — test_receipt_photo_mid_order_keeps_
+    # the_draft).
+
+    async def test_frustrated_gif_with_delayed_order_names_the_delay(self):
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast", status="pending",
+        )]
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("1836", reply)
+        self.assertIn("pending", reply)
+        self.assertIn("12 minutes", reply)  # real time, never "soon"
+        self.assertNotIn("soon", reply.lower())
+        self.assertIn("sorry", reply.lower())
+
+    async def test_happy_gif_after_completed_order_celebrates(self):
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast", status="completed",
+        )]
+        msg = FakeMessage()
+        msg.caption = ""
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent)):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("🎉", reply)
+        self.assertIn("1836", reply)
+        self.assertIn("done", reply.lower())
+
+    async def test_thanks_emoji_gets_a_warm_short_reply(self):
+        msg = await self._turns([("👋", intent_of("off_topic"))])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("welcome", msg.text_sent[0].lower())
+
+    async def test_frustrated_sticker_with_no_order_invents_none(self):
+        # A 😡 sticker with no order at all: empathy, and no
+        # order is claimed.
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.sticker = mock.Mock(emoji="😡")
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
+            await bot.on_sticker(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("don't see an order", reply)
+        self.assertNotIn("1836", reply)
+
+    async def test_media_reply_never_clears_a_pending_confirm_card(self):
+        msg = await self._turns([
+            ("add 10 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="🙏")),
+            ("😤", intent_of("off_topic")),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 1723)
+        self.assertEqual(pending["quantity"], 10)
+        self.assertIn("Confirm", msg.text_sent[1])
+
+    def test_media_replies_rotate_for_the_same_user(self):
+        ctx = {
+            "situation": "none", "service": None, "order_id": None,
+            "status": None, "avg": None, "total": None,
+        }
+        first = bot.media_reply_text(1, None, ctx, "en")
+        second = bot.media_reply_text(1, None, ctx, "en")
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":
