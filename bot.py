@@ -596,6 +596,18 @@ TEXT = {
         "am": "አልገባኝም — እባክዎ እንደገና ይሞክሩ። ለምሳሌ: “1000 Instagram followers እፈልጋለሁ” ብለው link ይላኩልኝ።",
         "en": "I did not understand — please try again. For example: “I want 1000 Instagram followers” with your link.",
     },
+    # Better fallback (smart-loop round 1, 14 Nov 2026): the bot never
+    # dead-ends on a bare "I did not understand" — the lead stays (so
+    # the user knows it missed), then ONE short question tied to the
+    # missing slot, and on the second miss in a row the main choices.
+    "fallback_lead": {
+        "am": "አልገባኝም — ",
+        "en": "I did not understand — ",
+    },
+    "fallback_choices": {
+        "am": "price፣ balance ወይም order status ማየትም እችላለሁ — የሚፈልጉትን ይንገሩኝ።",
+        "en": "I can also check a price, your balance, or an order status — just tell me which one you need.",
+    },
     "gemini_busy": {
         "am": "አሁን ትንሽ ተጨናንቄያለሁ — እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።",
         "en": "I am a bit busy right now — please try again in a moment.",
@@ -2735,6 +2747,75 @@ class PaxyoClient:
             deposit = data
         return deposit if isinstance(deposit, dict) else None
 
+    # --------------------------------------------- session store ------
+    # Contract (server side, api-bot-sessions.php): bot_sessions
+    # (telegram_id, history JSON, draft JSON, lang, updated_at) and
+    # bot_confusions (telegram_id, user_message, bot_reply, reason,
+    # created_at). All calls carry X-Bot-Secret like the rest of the
+    # client. Every method is 404-tolerant: the endpoints may not be
+    # deployed yet, and the bot keeps working from memory when they
+    # are not. (Smart-loop round 1, 14 Nov 2026.)
+
+    async def save_session(self, telegram_id: int, session: dict):
+        """POST /sessions {telegram_id, history, draft, lang} ->
+        {"ok": true}. Returns None on 404 (endpoint not live yet);
+        any other failure raises, so the caller can log it."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST", "/sessions",
+                    {"telegram_id": telegram_id, **(session or {})},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /sessions returned 404 (endpoint not live yet)")
+                return None
+            raise
+
+    async def load_session(self, telegram_id: int):
+        """GET /sessions?telegram_id= -> {"session": {...}} or
+        {"session": null} when nothing is stored. Returns None when
+        there is no stored session or the endpoint is not live yet
+        (404) — the caller treats both as "start fresh"."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "GET", f"/sessions?telegram_id={telegram_id}"
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /sessions returned 404 (endpoint not live yet)")
+                return None
+            raise
+        if isinstance(data, dict):
+            return data.get("session")
+        return None
+
+    async def log_confusion(self, telegram_id: int, user_message: str,
+                            bot_reply: str, reason: str):
+        """POST /confusions {telegram_id, user_message, bot_reply,
+        reason} -> {"ok": true, "id": N}. Returns None on 404
+        (endpoint not live yet)."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST", "/confusions",
+                    {
+                        "telegram_id": telegram_id,
+                        "user_message": user_message,
+                        "bot_reply": bot_reply,
+                        "reason": reason,
+                    },
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /confusions returned 404 (endpoint not live yet)")
+                return None
+            raise
+
 
 async def _gemini_post(payload: dict) -> dict:
     """One POST to the Gemini API, with retries on rate limits.
@@ -4470,7 +4551,7 @@ async def speak_reply(text: str, lang: str) -> Optional[bytes]:
 
 
 async def reply_message(message, text: str, lang: str, voice: bool = False,
-                        reply_markup=None):
+                        reply_markup=None, is_fallback: bool = False):
     """Send a reply as a voice message when asked and possible, else text.
 
     Voice is only used for plain replies. Anything with an inline
@@ -4490,7 +4571,17 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
     so a caller that shows a Confirm card can remember the card's
     message id for later deletion (a replaced card is dropped, not
     left stacked in the chat).
+
+    Fallback misses (smart-loop round 1, 14 Nov 2026): a reply sent
+    with is_fallback=True counts as a miss for this user; any other
+    reply resets the count — the bot understood that turn.
     """
+    _uid = _CURRENT_USER_ID.get()
+    if _uid is not None:
+        if is_fallback:
+            FALLBACK_MISS[_uid] = FALLBACK_MISS.get(_uid, 0) + 1
+        else:
+            FALLBACK_MISS.pop(_uid, None)
     out_text, out_lang = text, lang
     _target = _BRIDGE_LANG.get()
     if reply_markup is None and _target:
@@ -4685,6 +4776,11 @@ def record_exchange(user_id: int, user_text: str, bot_text: str) -> None:
     if len(CHAT_HISTORY) > MAX_HISTORY_USERS:
         CHAT_HISTORY.pop(next(iter(CHAT_HISTORY)))
     save_chat_history()
+    # Session store (smart-loop round 1, 14 Nov 2026): the durable
+    # copy of this turn's history and draft goes to the API, so a
+    # restart or redeploy does not wipe it. Best-effort and
+    # throttled — see schedule_session_save.
+    schedule_session_save(user_id)
 
 
 def chat_history_lines(user_id: int, max_exchanges: int = 10):
@@ -4712,6 +4808,261 @@ def history_summary_text(user_id: int, lang: str):
         return None
     summary = "; ".join(user_texts[-3:])
     return t("history_summary", lang, summary=summary)
+
+
+# --- session store: survive Render restarts AND redeploys ------------
+# CHAT_HISTORY + PARTIAL live in memory and in a local JSON file, but
+# Render's free disk is ephemeral on redeploy — a redeploy wipes
+# both. The durable copy lives in Paxyo's MySQL, through the Bot API
+# (api-bot-sessions.php): bot_sessions (telegram_id, history, draft,
+# lang) and bot_confusions (the failure log). Every call is
+# best-effort: when the API is unreachable the bot keeps working
+# from memory and logs a warning — a chat is never broken by the
+# store. (Smart-loop round 1, 14 Nov 2026.)
+_SESSION_RESTORED = set()  # telegram_id: a restore was attempted this process
+_LAST_SESSION_SAVE = {}  # telegram_id -> monotonic time of the last save
+_SESSION_SAVE_MIN_SECONDS = 5.0
+CONFUSIONS = []  # in-memory failure log, newest last, bounded
+MAX_CONFUSIONS = 200
+CONFUSION_REASONS = ("not_understood", "garbled", "correction", "abandoned")
+FALLBACK_MISS = {}  # telegram_id -> consecutive fallback (miss) turns
+
+
+def _session_payload(user_id: int) -> dict:
+    """This user's session as the API stores it: the last 10
+    exchanges, the order draft being built (or None), and the
+    language of their last message."""
+    return {
+        "history": [
+            {"user": e.get("user", ""), "bot": e.get("bot", "")}
+            for e in CHAT_HISTORY.get(int(user_id), [])
+        ][-MAX_HISTORY_EXCHANGES:],
+        "draft": dict(PARTIAL.get(int(user_id)) or {}) or None,
+        "lang": LAST_LANG.get(int(user_id)) or "en",
+    }
+
+
+async def _save_session_now(user_id: int) -> None:
+    """One best-effort save to the API. Never raises."""
+    if paxyo is None:
+        return
+    try:
+        await paxyo.save_session(int(user_id), _session_payload(user_id))
+    except Exception as exc:
+        log.warning("session save failed: %s", exc)
+
+
+def schedule_session_save(user_id: int) -> None:
+    """Queue a best-effort session save (throttled to one per 5
+    seconds per user, never raises). Called from record_exchange:
+    every turn that changes the history or the draft saves, and a
+    crash loses at most a few seconds. When there is no running
+    event loop (sync unit tests) it quietly does nothing — the
+    local file is the store there."""
+    import time
+
+    now = time.monotonic()
+    last = _LAST_SESSION_SAVE.get(int(user_id), 0.0)
+    if now - last < _SESSION_SAVE_MIN_SECONDS:
+        return
+    _LAST_SESSION_SAVE[int(user_id)] = now
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_save_session_now(int(user_id)))
+
+
+async def restore_session(user_id: int) -> None:
+    """Load a stored session for a user with nothing in memory (a
+    fresh process after a restart or redeploy). Runs once per user
+    per process; a missing session, a not-yet-deployed endpoint, or
+    a failed API call is a no-op — the user just starts fresh."""
+    user_id = int(user_id)
+    if user_id in _SESSION_RESTORED:
+        return
+    _SESSION_RESTORED.add(user_id)
+    if paxyo is None:
+        return
+    if CHAT_HISTORY.get(user_id) or PARTIAL.get(user_id):
+        return
+    try:
+        data = await paxyo.load_session(user_id)
+    except Exception as exc:
+        log.warning("session load failed: %s", exc)
+        return
+    if not isinstance(data, dict):
+        return
+    history = data.get("history") or []
+    if isinstance(history, list):
+        CHAT_HISTORY[user_id] = [
+            {"user": str(e.get("user", "")), "bot": str(e.get("bot", ""))}
+            for e in history
+            if isinstance(e, dict) and e.get("user") and e.get("bot")
+        ][-MAX_HISTORY_EXCHANGES:]
+    draft = data.get("draft")
+    if isinstance(draft, dict) and draft:
+        PARTIAL[user_id] = {k: v for k, v in draft.items() if v is not None}
+    lang = data.get("lang")
+    if lang in ("en", "am", "ti", "om"):
+        LAST_LANG[user_id] = lang
+
+
+# --- failure log (the confusion tracker) ------------------------------
+# Every chat where the bot got confused is recorded twice: in the
+# in-memory CONFUSIONS list (bounded, newest last) and, best-effort,
+# in the server-side bot_confusions table — that table is what the
+# daily list and the admin "Confused chats" section will read
+# (built after this round). Nothing sensitive is ever stored: phone
+# numbers are masked, balance figures are hidden, and the text is
+# capped at 500 characters like the conversation history.
+
+_PHONE_RE = re.compile(
+    r"\+?251[79]\d{8}|\b0[79]\d{8}\b|\b\d{3}[ -]\d{3}[ -]\d{4}\b|\b\d{9,}\b"
+)
+_BALANCE_RE = re.compile(
+    r"(?i)(balance(?: is now)?\s*:?\s*)[\d,]+(?:\.\d+)?\s*ETB"
+)
+
+
+def _scrub_confusion_text(text: str) -> str:
+    """Strip anything sensitive from a logged message: phone numbers
+    (Ethiopian 09/07/+251 and any 9+ digit run) and balance figures
+    (\"Balance: 1,000.00 ETB\", \"balance is now 10.00 ETB\"). Links,
+    quantities and service names stay: the daily list needs them to
+    see what the user actually asked for."""
+    if not text:
+        return ""
+    scrubbed = _PHONE_RE.sub("[phone]", str(text))
+    scrubbed = _BALANCE_RE.sub(r"\1[hidden]", scrubbed)
+    return scrubbed.strip()[:500]
+
+
+async def _post_confusion(entry: dict) -> None:
+    """One best-effort POST of a logged confusion. Never raises."""
+    if paxyo is None:
+        return
+    try:
+        await paxyo.log_confusion(
+            entry["telegram_id"], entry["user_message"],
+            entry["bot_reply"], entry["reason"],
+        )
+    except Exception as exc:
+        log.warning("confusion log failed: %s", exc)
+
+
+def log_confusion(user_id: int, user_text: str, bot_reply: str,
+                  reason: str) -> None:
+    """Record one confused chat in the failure log. Never raises,
+    never blocks a reply: the in-memory list is written at once and
+    the API post is queued in the background."""
+    if reason not in CONFUSION_REASONS:
+        reason = "not_understood"
+    entry = {
+        "telegram_id": int(user_id),
+        "user_message": _scrub_confusion_text(user_text),
+        "bot_reply": _scrub_confusion_text(bot_reply),
+        "reason": reason,
+    }
+    CONFUSIONS.append(entry)
+    del CONFUSIONS[:-MAX_CONFUSIONS]
+    if paxyo is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_post_confusion(entry))
+
+
+# --- garbled input ------------------------------------------------------
+# Words the bot can read, for telling voice-to-text garbage apart
+# from a real attempt: platforms, metrics, and the words of the
+# intents and everyday chat. A message with none of these, no
+# digits, no link, no @handle and no emoji carries nothing readable.
+_GARBLED_KNOWN_WORDS = frozenset(
+    list(_PLATFORMS) + list(_METRICS) + [
+        "balance", "price", "order", "deposit", "cancel", "status",
+        "history", "link", "pay", "payment", "help", "support",
+        "cheap", "cheapest", "fast", "fastest", "much", "many",
+        "want", "buy", "get", "give", "show", "check", "send",
+        "please", "thanks", "hello", "hi", "yes", "no", "ok",
+        "first", "second", "third", "one", "two", "three", "ten",
+        "hundred", "thousand", "like", "likes", "watch", "hours",
+        "video", "post", "profile", "account", "service", "change",
+        "wrong", "again", "usual", "same", "my", "me", "i", "the",
+        "a", "an", "for", "and", "to", "of", "it", "that", "this",
+        "what", "how", "when", "is", "are", "do", "can", "could",
+        "would", "should", "not", "dont", "don't",
+    ]
+)
+
+
+def _looks_garbled(text: str) -> bool:
+    """True when a message carries nothing the bot can read: no
+    digits, no link, no @handle, no emoji, and no known word at
+    all. Voice-to-text garbage (\"Sent br aleg ahun\", live 14 Nov
+    2026) lands here; a real attempt with a typo (\"tiktok veews\")
+    still has a known word and is not garbled. Text in the
+    Ethiopic script is never garbled — its words are just not in
+    the Latin word list (a failed translation is a language issue,
+    not garbage)."""
+    s = (text or "").strip().lower()
+    if not s:
+        return True
+    if re.search(r"[\u1200-\u137f]", s):
+        return False
+    if re.search(r"\d", s):
+        return False
+    if "://" in s or s.startswith("@") or " @" in s:
+        return False
+    if any(emoji_meanings(s)):
+        return False
+    words = set(re.findall(r"[a-z']+", s))
+    return not (words & _GARBLED_KNOWN_WORDS)
+
+
+# --- better fallback ------------------------------------------------------
+# The bot never dead-ends on a bare "I did not understand": it asks
+# ONE short question tied to the missing slot, and on the second
+# miss in a row it offers the main choices too. The miss count
+# lives in FALLBACK_MISS and resets on any understood reply (see
+# reply_message). Every fallback is logged in the failure log.
+
+def _fallback_slot_question(user_id: int, merged: dict, lang: str) -> str:
+    """The one question the fallback asks, tied to the missing slot:
+    no platform or service yet -> which platform; service known
+    but no link -> the link question for that service; link known
+    but no quantity -> how many. The stored draft fills in what
+    this turn did not say."""
+    draft = PARTIAL.get(int(user_id)) or {}
+    platform = (merged or {}).get("platform") or draft.get("platform")
+    hint = (merged or {}).get("service_hint") or draft.get("service_hint")
+    link = (merged or {}).get("link") or draft.get("link")
+    quantity = (merged or {}).get("quantity")
+    if quantity is None:
+        quantity = draft.get("quantity")
+    if not platform and not hint:
+        return t("ask_platform", lang)
+    if not link:
+        return ask_link_text(platform, hint, lang)
+    if quantity is None:
+        return t("ask_quantity", lang)
+    return t("ask_platform", lang)
+
+
+async def fallback_reply(message, user_id: int, user_text: str, lang: str,
+                         voice: bool = False, merged: dict = None) -> None:
+    """Send the better fallback and log the confusion. The lead
+    (\"I did not understand — \") stays so the user knows the bot
+    missed; the question is what makes it not a dead end."""
+    question = _fallback_slot_question(user_id, merged or {}, lang)
+    text = t("fallback_lead", lang) + question
+    if FALLBACK_MISS.get(int(user_id), 0) >= 1:
+        text = text + "\n" + t("fallback_choices", lang)
+    await reply_message(message, text, lang, voice=voice, is_fallback=True)
+    reason = "garbled" if _looks_garbled(user_text) else "not_understood"
+    log_confusion(user_id, user_text, text, reason)
 
 
 def _record_bot_reply(bot_text: str) -> None:
@@ -8717,25 +9068,21 @@ async def try_reaction_correction(update, text, lang, voice=False):
         reaction_emoji=_new_emoji,
     ) if _services else []
     if not _picks:
-        await reply_message(
-            update.message,
-            t("no_exact_reaction", lang, emoji=_new_emoji),
-            lang, voice=voice,
-        )
+        _reply = t("no_exact_reaction", lang, emoji=_new_emoji)
+        await reply_message(update.message, _reply, lang, voice=voice)
+        log_confusion(user.id, text, _reply, "correction")
         return True
     _service = _picks[0]
     _new_qty = int(_pending["quantity"])
     _error = validate_quantity(_new_qty, _service)
     if _error:
-        await reply_message(
-            update.message,
-            t(
-                "bad_quantity", lang,
-                service=short_service_name(_service.get("name")),
-                min=_service.get("min"), max=_service.get("max"),
-            ),
-            lang, voice=voice,
+        _reply = t(
+            "bad_quantity", lang,
+            service=short_service_name(_service.get("name")),
+            min=_service.get("min"), max=_service.get("max"),
         )
+        await reply_message(update.message, _reply, lang, voice=voice)
+        log_confusion(user.id, text, _reply, "correction")
         return True
     _new_total = estimated_total_etb(
         float(_service.get("rate_etb_per_1000", 0)), _new_qty
@@ -8753,17 +9100,17 @@ async def try_reaction_correction(update, text, lang, voice=False):
     # cards for one order (live bug, 14 Nov 2026: both Pray cards
     # stayed stacked, each with its own Confirm/Cancel).
     await drop_pending_card(update, _pending)
+    _card = confirm_card_text(
+        lang, _service, _new_qty, _new_total, _pending["link"],
+        note=t("change_note", lang, quantity=_new_qty),
+        full_name=_pending.get("full_name", False),
+    )
     _sent = await reply_message(
-        update.message,
-        confirm_card_text(
-            lang, _service, _new_qty, _new_total, _pending["link"],
-            note=t("change_note", lang, quantity=_new_qty),
-            full_name=_pending.get("full_name", False),
-        ),
-        lang,
+        update.message, _card, lang,
         reply_markup=confirm_keyboard(_new_id),
     )
     _remember_card_message(_new_pending, update.message, _sent)
+    log_confusion(user.id, text, _card, "correction")
     return True
 
 
@@ -9200,6 +9547,10 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     _CURRENT_USER_ID.set(user.id)
     _LAST_USER_TEXT.set(text)
     LAST_LANG[user.id] = _detected
+    # Session store (smart-loop round 1, 14 Nov 2026): a fresh
+    # process restores this user's history and order draft from
+    # the API, so a restart or redeploy does not wipe the chat.
+    await restore_session(user.id)
 
     # Arabic-script text (owner, 14 Nov 2026): the bot has no
     # Arabic templates and must never mirror Arabic back. It can
@@ -9746,18 +10097,21 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             PENDING_RECURRING.pop(rec_id, None)
             RECURRING_DRAFT.pop(user.id, None)
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
             return
         dep_id, dep_draft = pending_deposit_for_user(user.id)
         if dep_draft is not None and pending is None and rec_draft is None:
             PENDING_DEPOSIT.pop(dep_id, None)
             DEPOSIT_DRAFT.pop(user.id, None)
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
             return
         batch_id, batch = pending_batch_for_user(user.id)
         if batch is not None and pending is None and rec_draft is None and dep_draft is None:
             PENDING_BATCH.pop(batch_id, None)
             SPLIT_DRAFT.pop(user.id, None)
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
             return
         if pending is not None:
             try:
@@ -9786,6 +10140,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 return
             clear_order_state(user.id, cancelled=pending)
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
             return
         # No pending order: the user may mean a repeating order.
         try:
@@ -9824,6 +10179,8 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             ),
             lang, voice=voice,
         )
+        if had_something:
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
         return
     if intent_type == "recurring":
         await handle_recurring_text(update, text, intent, lang, voice=voice)
@@ -10518,18 +10875,18 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             _pending["total"] = estimated_total_etb(
                 float(service.get("rate_etb_per_1000", 0)), new_qty
             )
+            _card = confirm_card_text(
+                lang, service, new_qty, _pending["total"],
+                _pending["link"],
+                note=t("change_note", lang, quantity=new_qty),
+                full_name=_pending.get("full_name", False),
+            )
             _sent = await reply_message(
-                update.message,
-                confirm_card_text(
-                    lang, service, new_qty, _pending["total"],
-                    _pending["link"],
-                    note=t("change_note", lang, quantity=new_qty),
-                    full_name=_pending.get("full_name", False),
-                ),
-                lang,
+                update.message, _card, lang,
                 reply_markup=confirm_keyboard(_cid),
             )
             _remember_card_message(_pending, update.message, _sent)
+            log_confusion(user.id, text, _card, "correction")
             return
 
     # A different reaction emoji for the order already awaiting
@@ -10557,7 +10914,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if intent.get("gemini_failed"):
             await reply_message(update.message, t("gemini_busy", lang), lang, voice=voice)
         else:
-            await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
+            # Better fallback (smart-loop round 1, 14 Nov 2026):
+            # a slot-specific question instead of a dead end, and
+            # the confusion goes in the failure log.
+            await fallback_reply(
+                update.message, user.id, text, lang, voice=voice,
+                merged=merged,
+            )
         return
     # A named service implies its platform, so the bot asks for the
     # link next instead of the platform.
@@ -11350,6 +11713,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # scratch instead of auto-showing the cancelled card.
             clear_order_state(user.id, cancelled=pending)
             await query.edit_message_text(t("cancelled", lang))
+            log_confusion(user.id, "Cancel", t("cancelled", lang), "abandoned")
             return
         # Button tap: place the order and replace the Confirm card with
         # the full order summary IN TEXT — the same summary a voice

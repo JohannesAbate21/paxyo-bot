@@ -396,7 +396,8 @@ class FakePaxyo:
 
     def __init__(self, balance=1000.0, recent=None, schedules=None, due=None,
                  deposit_none=False, deposit_error=None,
-                 deposits=None, deposits_none=False, status="pending"):
+                 deposits=None, deposits_none=False, status="pending",
+                 session=None):
         self._balance = balance
         self._status = status
         self.orders_created = []
@@ -414,6 +415,12 @@ class FakePaxyo:
         self._deposits = list(deposits) if deposits is not None else []
         self._deposits_none = deposits_none
         self.deposit_status_checked = []
+        # Session store (smart-loop round 1): a seeded session for
+        # load_session, and a record of every save / confusion log.
+        self._session = session
+        self.session_loads = []
+        self.sessions_saved = []
+        self.confusions_logged = []
 
     async def services(self):
         return SAMPLE_SERVICES
@@ -511,6 +518,26 @@ class FakePaxyo:
             if str(dep.get("id")) == str(deposit_id):
                 return dict(dep)
         return None
+
+    # Session store + failure log (smart-loop round 1, 14 Nov 2026):
+    # mirror POST/GET /sessions and POST /confusions.
+    async def save_session(self, telegram_id, session):
+        self.sessions_saved.append((telegram_id, session))
+        return {"ok": True}
+
+    async def load_session(self, telegram_id):
+        self.session_loads.append(telegram_id)
+        return self._session
+
+    async def log_confusion(self, telegram_id, user_message, bot_reply,
+                            reason):
+        self.confusions_logged.append({
+            "telegram_id": telegram_id,
+            "user_message": user_message,
+            "bot_reply": bot_reply,
+            "reason": reason,
+        })
+        return {"ok": True, "id": len(self.confusions_logged)}
 
 
 class FakeQuery:
@@ -6981,6 +7008,458 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertIn("paxyo.et", msg.text_sent[0])
 
+
+
+class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
+    """Shared set-up for the smart-loop round 1 tests: the same
+    store clearing as the round-5 tests, plus the new module-level
+    stores (fallback misses, confusions, session-restore marks),
+    and a temp chat-history file so tests never touch the repo's
+    chat_history.json fixture."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.LAST_LANG, bot.FALLBACK_MISS, bot.CONFUSIONS,
+            bot._SESSION_RESTORED, bot._LAST_SESSION_SAVE,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.LAST_LANG, bot.FALLBACK_MISS, bot.CONFUSIONS,
+            bot._SESSION_RESTORED, bot._LAST_SESSION_SAVE,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _turns(self, turns, paxyo=None):
+        """Send several messages in sequence, sharing one FakeMessage
+        so text_sent accumulates; returns (msg, fake_paxyo). The
+        background tasks (session saves, confusion posts) are
+        flushed before returning, while bot.paxyo is still patched
+        — in production paxyo is always set, so a save queued by a
+        turn must be observable right after it."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+            await self._flush()
+        return msg, fake_paxyo
+
+    async def _flush(self):
+        """Let background tasks (session saves, confusion posts)
+        run: each needs at most a couple of loop iterations."""
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    async def _build_pending_views(self, paxyo=None):
+        """A Confirm card for 1000 TikTok views on the test link."""
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views https://vt.tiktok.com/ZSpQWTSmH/",
+             intent_of("order", platform="tiktok", service_hint=None,
+                       link="https://vt.tiktok.com/ZSpQWTSmH/",
+                       quantity=1000)),
+        ], paxyo=paxyo or TikTokPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        return msg
+
+
+class TestSessionStore(_SmartLoopBase):
+    """Smart-loop round 1: the session store. History (last 10
+    turns) + the order draft + language survive a Render restart
+    AND a redeploy, because the durable copy lives in Paxyo's
+    MySQL through the Bot API — never only on Render's disk."""
+
+    async def test_save_load_round_trip(self):
+        bot.CHAT_HISTORY[1] = [
+            {"user": "I want views", "bot": "Which platform?"},
+            {"user": "tiktok", "bot": "Send the link."},
+        ]
+        bot.PARTIAL[1] = {
+            "platform": "tiktok", "service_hint": "tiktok views",
+            "quantity": 1000,
+        }
+        bot.LAST_LANG[1] = "am"
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake):
+            await bot._save_session_now(1)
+        self.assertEqual(len(fake.sessions_saved), 1)
+        telegram_id, payload = fake.sessions_saved[0]
+        self.assertEqual(telegram_id, 1)
+        self.assertEqual(len(payload["history"]), 2)
+        self.assertEqual(payload["draft"]["platform"], "tiktok")
+        self.assertEqual(payload["draft"]["quantity"], 1000)
+        self.assertEqual(payload["lang"], "am")
+        # Load it back into a fresh process.
+        bot.CHAT_HISTORY.clear()
+        bot.PARTIAL.clear()
+        bot.LAST_LANG.clear()
+        bot._SESSION_RESTORED.clear()
+        fake2 = FakePaxyo(session=payload)
+        with mock.patch("bot.paxyo", fake2):
+            await bot.restore_session(1)
+        self.assertEqual(len(bot.CHAT_HISTORY[1]), 2)
+        self.assertEqual(bot.CHAT_HISTORY[1][0]["user"], "I want views")
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+        self.assertEqual(bot.PARTIAL[1]["quantity"], 1000)
+        self.assertEqual(bot.LAST_LANG[1], "am")
+
+    async def test_session_survives_simulated_restart(self):
+        # Turn 1 builds a draft (no link yet) and a history entry.
+        msg1, fake1 = await self._turns([
+            ("I want 1000 instagram followers",
+             intent_of("order", platform="instagram",
+                       service_hint="followers")),
+        ])
+        self.assertIn("profile link", msg1.text_sent[0])
+        self.assertEqual(len(fake1.sessions_saved), 1)
+        _, payload = fake1.sessions_saved[0]
+        self.assertEqual(payload["draft"]["platform"], "instagram")
+        self.assertEqual(payload["draft"]["service_hint"], "followers")
+        self.assertEqual(len(payload["history"]), 1)
+        # Simulate a restart: all in-memory state is gone.
+        bot.CHAT_HISTORY.clear()
+        bot.PARTIAL.clear()
+        bot.LAST_LANG.clear()
+        bot._SESSION_RESTORED.clear()
+        self.assertEqual(bot.chat_history_lines(1), [])
+        # Turn 2, in the "new process", sends only the link: the
+        # restored draft already has quantity 1000, platform and
+        # service hint, so the link completes the order and the bot
+        # goes straight to the confirm card — that is the proof the
+        # session survived (without the restore it would have asked
+        # "Which platform?").
+        fake2 = FakePaxyo(session=payload)
+        msg, _ = await self._turns([
+            ("https://instagram.com/p/x",
+             intent_of("order", link="https://instagram.com/p/x")),
+        ], paxyo=fake2)
+        self.assertEqual(fake2.session_loads, [1])
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn("1000", msg.text_sent[0])
+        self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        # PENDING is keyed by confirm id, not user id.
+        pending = [e for e in bot.PENDING.values()
+                   if e["user_id"] == 1]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["link"], "https://instagram.com/p/x")
+        self.assertEqual(pending[0]["quantity"], 1000)
+        # The history came back too: the first turn is remembered
+        # (stored in normalised form, as the bot saw it).
+        self.assertIn(
+            "i want 1000 instagram followers",
+            " ".join(bot.chat_history_lines(1)),
+        )
+
+    async def test_restore_with_no_stored_session_is_noop(self):
+        msg, fake = await self._turns([
+            ("I want 1000 instagram followers https://instagram.com/p/x",
+             intent_of("order", platform="instagram",
+                       service_hint="followers",
+                       link="https://instagram.com/p/x", quantity=1000)),
+        ])
+        self.assertEqual(fake.session_loads, [1])
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+
+    async def test_restore_with_empty_draft_leaves_no_draft(self):
+        payload = {"history": [], "draft": None, "lang": "en"}
+        fake = FakePaxyo(session=payload)
+        with mock.patch("bot.paxyo", fake):
+            await bot.restore_session(1)
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(bot.CHAT_HISTORY.get(1, []), [])
+
+    async def test_api_failure_never_breaks_a_chat(self):
+        # The API is down for every session/confusion call: the chat
+        # must still work, and the failure log still records the
+        # confusion in memory.
+        fake = FakePaxyo()
+        fake.save_session = mock.AsyncMock(
+            side_effect=Exception("api down")
+        )
+        fake.load_session = mock.AsyncMock(
+            side_effect=Exception("api down")
+        )
+        fake.log_confusion = mock.AsyncMock(
+            side_effect=Exception("api down")
+        )
+        msg, _ = await self._turns([
+            ("What is this thing?", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertIn("did not understand", msg.text_sent[0])
+        self.assertIn("Which platform?", msg.text_sent[0])
+        self.assertEqual(len(bot.CONFUSIONS), 1)
+        self.assertEqual(bot.CONFUSIONS[0]["reason"], "not_understood")
+
+    async def test_session_save_throttled(self):
+        bot.CHAT_HISTORY[1] = [{"user": "hi", "bot": "hello"}]
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake):
+            bot.schedule_session_save(1)
+            bot.schedule_session_save(1)
+            await self._flush()
+        self.assertEqual(len(fake.sessions_saved), 1)
+        bot._LAST_SESSION_SAVE[1] = 0.0
+        with mock.patch("bot.paxyo", fake):
+            bot.schedule_session_save(1)
+            await self._flush()
+        self.assertEqual(len(fake.sessions_saved), 2)
+
+    def test_save_is_quiet_without_a_loop(self):
+        # Sync contexts (plain unit tests calling record_exchange)
+        # have no running loop: the save is skipped, never raised.
+        bot.record_exchange(1, "hello", "hi there")
+        self.assertEqual(len(bot.CHAT_HISTORY[1]), 1)
+
+
+class TestFailureLog(_SmartLoopBase):
+    """Smart-loop round 1: the failure log (confusion tracker). The
+    daily list and the admin section read the server-side table;
+    these tests prove each flag fires — and does not fire on a
+    normal successful order."""
+
+    async def test_not_understood_logged(self):
+        msg, fake = await self._turns([
+            ("What is this thing?", intent_of("unclear")),
+        ])
+        self.assertIn("did not understand", msg.text_sent[0])
+        self.assertEqual(len(bot.CONFUSIONS), 1)
+        entry = bot.CONFUSIONS[0]
+        self.assertEqual(entry["telegram_id"], 1)
+        self.assertEqual(entry["reason"], "not_understood")
+        # The log stores the message as the bot saw it (normalised).
+        self.assertEqual(entry["user_message"], "what is this thing?")
+        self.assertIn("Which platform?", entry["bot_reply"])
+        self.assertEqual(len(fake.confusions_logged), 1)
+        self.assertEqual(
+            fake.confusions_logged[0]["reason"], "not_understood"
+        )
+
+    async def test_garbled_logged(self):
+        # William's live example, 14 Nov 2026: voice-to-text garbage
+        # the bot could not read at all.
+        msg, _ = await self._turns([
+            ("Sent br aleg ahun", intent_of("unclear")),
+        ])
+        self.assertIn("did not understand", msg.text_sent[0])
+        self.assertEqual(len(bot.CONFUSIONS), 1)
+        self.assertEqual(bot.CONFUSIONS[0]["reason"], "garbled")
+        self.assertEqual(
+            bot.CONFUSIONS[0]["user_message"], "sent br aleg ahun"
+        )
+
+    async def test_first_one_is_not_garbled(self):
+        # A real phrase that just has no answer ("First one" with no
+        # budget options shown) is not-understood, not garbage.
+        await self._turns([("First one", intent_of("unclear"))])
+        self.assertEqual(len(bot.CONFUSIONS), 1)
+        self.assertEqual(bot.CONFUSIONS[0]["reason"], "not_understood")
+
+    async def test_correction_logged(self):
+        msg = await self._turns([
+            ("For this please add 10 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="🙏")),
+            ("I want only ❤️ reaction", intent_of("order")),
+        ], paxyo=RealReactionsPaxyo())
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 6537)
+        self.assertEqual(len(bot.CONFUSIONS), 1)
+        entry = bot.CONFUSIONS[0]
+        self.assertEqual(entry["reason"], "correction")
+        self.assertEqual(entry["user_message"], "i want only ❤️ reaction")
+        self.assertIn("Heart", entry["bot_reply"])
+
+    async def test_quantity_change_logged(self):
+        await self._build_pending_views()
+        bot.CONFUSIONS.clear()
+        msg, _ = await self._turns([
+            ("could I just get 200 views instead for now?",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views", quantity=200)),
+        ], paxyo=TikTokPaxyo())
+        self.assertIn("Quantity updated: 200.", msg.text_sent[0])
+        self.assertEqual(len(bot.CONFUSIONS), 1)
+        self.assertEqual(bot.CONFUSIONS[0]["reason"], "correction")
+
+    async def test_abandoned_logged_on_cancel_with_draft(self):
+        msg, _ = await self._turns([
+            ("I want 1000 instagram followers",
+             intent_of("order", platform="instagram",
+                       service_hint="followers")),
+            ("Cancel", intent_of("cancel")),
+        ])
+        self.assertEqual(msg.text_sent[1], "Order cancelled.")
+        self.assertEqual(len(bot.CONFUSIONS), 1)
+        entry = bot.CONFUSIONS[0]
+        self.assertEqual(entry["reason"], "abandoned")
+        self.assertEqual(entry["user_message"], "cancel")
+
+    async def test_cancel_with_nothing_pending_not_logged(self):
+        msg, _ = await self._turns([("Cancel", intent_of("cancel"))])
+        self.assertEqual(msg.text_sent[0], "Nothing to cancel.")
+        self.assertEqual(bot.CONFUSIONS, [])
+
+    async def test_no_log_on_successful_order(self):
+        msg, _ = await self._turns([
+            ("I want 1000 Instagram followers https://instagram.com/p/x",
+             intent_of("order", platform="instagram",
+                       service_hint="followers",
+                       link="https://instagram.com/p/x", quantity=1000)),
+        ])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+        self.assertEqual(bot.CONFUSIONS, [])
+
+    async def test_gemini_busy_not_logged_as_confusion(self):
+        # A provider outage is not user confusion: the busy line is
+        # the answer, and nothing goes in the failure log.
+        intent = {**intent_of("unclear"), "gemini_failed": True}
+        msg, _ = await self._turns([("asdf qwer", intent)])
+        self.assertIn("busy right now", msg.text_sent[0])
+        self.assertEqual(bot.CONFUSIONS, [])
+
+    def test_phone_numbers_and_balances_scrubbed(self):
+        self.assertEqual(
+            bot._scrub_confusion_text("call me on 0993960702 please"),
+            "call me on [phone] please",
+        )
+        self.assertEqual(
+            bot._scrub_confusion_text("my number is +251993960702"),
+            "my number is [phone]",
+        )
+        self.assertEqual(
+            bot._scrub_confusion_text("Balance: 1,000.00 ETB"),
+            "Balance: [hidden]",
+        )
+        self.assertEqual(
+            bot._scrub_confusion_text(
+                "Yes — your 10.00 ETB deposit went through. "
+                "Your balance is now 10.00 ETB."
+            ),
+            "Yes — your 10.00 ETB deposit went through. "
+            "Your balance is now [hidden].",
+        )
+        # Links, quantities and service names stay — the daily list
+        # needs them to see what the user actually asked for.
+        self.assertEqual(
+            bot._scrub_confusion_text(
+                "I want 1000 followers https://instagram.com/p/x"
+            ),
+            "I want 1000 followers https://instagram.com/p/x",
+        )
+
+    def test_looks_garbled(self):
+        for text in ("Sent br aleg ahun", "asdf qwer", "blorp", ""):
+            self.assertTrue(bot._looks_garbled(text), text)
+        for text in (
+            "First one", "I want 1000 followers", "hello",
+            "https://t.me/x", "👍", "ሰላም", "tiktok veews",
+            "What is my balance?", "10",
+        ):
+            self.assertFalse(bot._looks_garbled(text), text)
+
+
+class TestBetterFallback(_SmartLoopBase):
+    """Smart-loop round 1: the better fallback. Never a bare \"I did
+    not understand\" — one short question tied to the missing slot,
+    and the main choices on the second miss in a row."""
+
+    async def test_first_miss_asks_platform(self):
+        msg, _ = await self._turns([("asdf qwer", intent_of("unclear"))])
+        self.assertIn("did not understand", msg.text_sent[0])
+        self.assertIn("Which platform?", msg.text_sent[0])
+        self.assertNotIn("check a price", msg.text_sent[0])
+
+    async def test_second_miss_offers_choices(self):
+        msg, _ = await self._turns([
+            ("asdf qwer", intent_of("unclear")),
+            ("blorp blorp", intent_of("unclear")),
+        ])
+        self.assertNotIn("check a price", msg.text_sent[0])
+        self.assertIn("did not understand", msg.text_sent[1])
+        self.assertIn(
+            "check a price, your balance, or an order status",
+            msg.text_sent[1],
+        )
+
+    async def test_miss_counter_resets_after_understood_turn(self):
+        msg, _ = await self._turns([
+            ("asdf qwer", intent_of("unclear")),
+            ("How much is my balance", intent_of("balance")),
+            ("blorp blorp", intent_of("unclear")),
+        ])
+        self.assertNotIn("check a price", msg.text_sent[0])
+        self.assertIn("Balance: 1,000.00 ETB", msg.text_sent[1])
+        # The balance answer reset the count, so this miss is a
+        # first miss again — no choices line.
+        self.assertNotIn("check a price", msg.text_sent[2])
+
+    def test_fallback_slot_questions(self):
+        self.assertIn(
+            "Which platform?",
+            bot._fallback_slot_question(1, {}, "en"),
+        )
+        bot.PARTIAL[1] = {
+            "platform": "instagram", "service_hint": "followers",
+        }
+        self.assertIn(
+            "Instagram profile link",
+            bot._fallback_slot_question(1, {}, "en"),
+        )
+        bot.PARTIAL[1] = {
+            "platform": "instagram", "service_hint": "followers",
+            "link": "https://instagram.com/p/x",
+        }
+        self.assertIn(
+            "How many?",
+            bot._fallback_slot_question(1, {}, "en"),
+        )
+        # Values from this turn win over the stored draft.
+        self.assertIn(
+            "How many?",
+            bot._fallback_slot_question(1, {
+                "platform": "tiktok",
+                "service_hint": "tiktok views",
+                "link": "https://vt.tiktok.com/x",
+            }, "en"),
+        )
 
 
 class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):

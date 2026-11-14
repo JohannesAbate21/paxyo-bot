@@ -699,3 +699,52 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   Chapa direct charge is NOT enabled on Paxyo's Chapa account yet —
   ask Chapa to enable it, or use the checkout-link fallback.
 - M-Pesa deposit-by-chat does NOT work yet — needs a new payment path.
+
+## Smart loop: session store, failure log, better fallback
+- **Session store — a restart must not wipe the conversation.** Chat
+  history (last 10 turns), the half-built order draft and the user's
+  language live in Paxyo's MySQL (`bot_sessions` table, one row per
+  Telegram user), reached through the Bot API (`POST`/`GET`
+  `/api/bot/sessions`, file `api-bot-sessions.php` on the server) —
+  NOT on Render's disk, which is wiped on every restart and redeploy.
+  The bot loads a session on the first message of a process
+  (`restore_session`, once per user per process) and saves after
+  every turn (`record_exchange` → `schedule_session_save`, throttled
+  to one save per 5 seconds per user). If the API store is
+  unreachable the bot keeps working from memory, logs a warning and
+  never crashes a chat — a save that fails loses at most a few
+  seconds of history. The local `chat_history.json` file is still
+  written (it is the fallback the offline tests use); the API is
+  the durable home.
+- **Failure log — every confused chat is flagged and stored.**
+  `bot_confusions` table, also via the Bot API (`POST`
+  `/api/bot/confusions`, `GET` for the daily list and the admin
+  section, which are built in a later round). Four reasons:
+  `not_understood` (the bot answered "I did not understand"),
+  `garbled` (the message carried nothing readable — no digits,
+  link, @handle, emoji or known word; Ethiopian script is never
+  garbled), `correction` (the user corrected it — a reaction
+  re-pick, or a quantity change on a pending order), `abandoned`
+  (the user cancelled while a draft or a Confirm card was in
+  flight). NOT logged: a normal successful order; "Nothing to
+  cancel." (nothing was dropped); a provider outage (`gemini_busy`
+  — the provider failing is not the bot being confused). The log
+  stores the user's message (as the bot saw it, normalised),
+  the bot's reply, the reason and a timestamp — NEVER balances,
+  phone numbers, API keys, passwords or payment details (scrubbed
+  before logging, 500-character cap). The daily list William asked
+  for and the admin "Confused chats" section both read this table.
+- **Better fallback — never dead-end on "I did not understand".**
+  When the bot does not understand, it keeps the "I did not
+  understand — " lead and asks ONE short question about the slot
+  that is missing (which platform? which service? the link? how
+  many?), based on what it DID understand from the message and
+  the draft. On the second miss in a row it offers the main
+  choices instead (check a price, your balance, or an order
+  status — or Cancel). The miss counter resets on any understood
+  reply. The exact-emoji rule, the bare-reaction flow, Cancel
+  behaviour and media replies are untouched by the fallback.
+- **Learning lands between deploys, not mid-chat.** The log is the
+  raw material: real confused phrases become prompt examples in
+  the next deploy, after being checked first, so a user cannot
+  teach the bot wrong things by typing them.
