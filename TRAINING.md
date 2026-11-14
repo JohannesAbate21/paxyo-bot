@@ -434,6 +434,54 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   ("Please send the link..."). The draft and any Confirm card stay
   untouched; the order continues after the answer. Keep a quantity
   the user already gave — never ask "how many" again for it.
+- QUANTITIES IN WORD FORM WORK LIKE DIGITS (owner, 14 Nov 2026):
+  "one thousand" is 1000, "five hundred" is 500, "a hundred" /
+  "hundred" is 100, "hundreds" is 100 (vague — the Confirm card
+  shows it, so the user can correct it), "one thousand five
+  hundred" is 1500, "two hundred fifty" is 250. Parsed everywhere
+  a quantity is read: order starts, quantity answers ("one
+  thousand" after "How many?"), corrections, change-quantity,
+  and the quantity-before-the-metric check ("hundred views").
+  Digits still win when both are present; 1k/2.5k work as before.
+  English only — there is NO Amharic number-word handling in the
+  code (no መቶ/ሺህ parsing); Amharic orders go through the
+  translate bridge, which turns "አንድ ሺህ" into "one thousand"
+  before the quantity is read. A bare "a" is never a number ("a
+  video" is not 1), and words under 10 or not a multiple of 10
+  are never quantities. Do NOT read a quantity from just any
+  number in the message ("my balance is 100") — only the
+  quantity-before-the-metric, bare-quantity-answer, and local
+  intent paths read numbers from the words; the merge never does
+  a blanket quantity scan.
+- FILLER "LIKE" IS NOT THE METRIC (owner, 14 Nov 2026): "I want,
+  like, 100 views" means VIEWS — "like" is filler when a quantity
+  follows within the next few words. "like 100 likes" is still
+  likes (the real metric follows the quantity), and "hundreds
+  like for this" is likes (no quantity after "like"). The URL's
+  own words never count ("t", "me", "com" are stripped before the
+  metric scan), so "like https://t.me/... hundred views" is views.
+- THE PLATFORM COMES FROM THE LINK (owner, 14 Nov 2026): a pasted
+  link decides the platform — t.me → Telegram, facebook.com →
+  Facebook, instagram.com → Instagram, tiktok.com → TikTok,
+  youtube.com → YouTube — over the AI's guess, over the stored
+  draft, and over any platform named in forwarded or attached
+  content. The service kind still comes from the user's words
+  ("views" → post views, "likes" → likes, "followers" →
+  followers). The ONE exception: a platform the user typed
+  themselves in the message ("YouTube subscribers" + a TikTok
+  link) stays a mismatch and the bot asks for the correction —
+  the link never silently overrides a platform the user named.
+  A bare link with no other context now keeps its platform from
+  the link and asks "How many?" — it never asks "Which
+  platform?" again.
+- A T.ME LINK IS NOT ONLY A POST (owner, 14 Nov 2026): a channel
+  link (t.me/channelname, no post id) IS Telegram. If the order
+  needs a post (views, likes, comments, shares, reactions), a
+  channel link cannot be ordered on — the bot says the link is a
+  channel and asks for the specific post link
+  (t.me/channelname/123), keeping the platform, metric and
+  quantity in the draft, so the post link alone completes the
+  order. Followers/members/subscribers take a channel link as-is.
 
 ## Personality
 - Talk like a normal person, not a menu. Be smart like ChatGPT for Paxyo.

@@ -1061,6 +1061,13 @@ TEXT = {
         "am": "ይህ link profile ነው — {metric} በቪዲዮ ላይ ይሄዳል፣ ስለዚህ የቪዲዮውን link ይላኩልኝ።",
         "en": "That link is a profile — {metric} go on a video, so please send the video link instead.",
     },
+    # A t.me channel link is Telegram, but it is not a post
+    # (owner, 14 Nov 2026): views/likes/reactions need the link of
+    # the specific post.
+    "channel_link_needs_post": {
+        "am": "ይህ link ቻናል ነው — {metric} የተወሰነ የልጥፍ link ያስፈልገዋል (t.me/channelname/123 የሚመስል)። እባክዎ የልጥፉን link ይላኩልኝ።",
+        "en": "That link is a channel — for {metric} I need the link of the specific post (it looks like t.me/channelname/123). Please send the post link.",
+    },
     "link_warning": {
         "am": "ማስጠንቅቂያ: private accounts እና በቅርብ የሚጠፉ stories አንዳንድ ጊዜ ይሳናሉ — link ትክክል መሆኑን እርግጠኛ ነዎት?",
         "en": "Heads up: private accounts and stories that expire soon sometimes fail — are you sure this link is right?",
@@ -3816,14 +3823,7 @@ def local_intent(text: str) -> dict:
         intent["service_hint"] = " ".join(
             p for p in (intent["platform"], metric) if p
         )
-    for m in re.finditer(r"\d[\d,]*", s):
-        try:
-            value = int(m.group(0).replace(",", ""))
-        except ValueError:
-            continue
-        if 10 <= value <= 1000000 and value % 10 == 0:
-            intent["quantity"] = value
-            break
+    intent["quantity"] = quantity_from_text(s)
     intent["service_id"] = extract_service_id(text)
     # A budget amount is the currency-aware one when there is one:
     # "10k for 500 birr" budgets 500, not 10000. Otherwise the first
@@ -4652,6 +4652,14 @@ def bare_quantity(text: str):
             return None
         if 10 <= value <= 1000000 and value % 10 == 0:
             return value
+    # Word form ("one thousand please", "hundred"): the remaining
+    # words must be exactly one number-word phrase.
+    if words and all(
+        w in _NUMBER_WORDS or w in ("a", "an", "and") for w in words
+    ):
+        value = _number_phrase_value(words)
+        if value is not None and 10 <= value <= 1000000 and value % 10 == 0:
+            return value
     return None
 
 
@@ -4823,10 +4831,125 @@ def is_usual_request(text: str) -> bool:
     return any(p in s for p in _USUAL_PHRASES)
 
 
+# English number words (owner, 14 Nov 2026 — "one thousand" and
+# "five hundred" must work like 1000 and 500). There is no Amharic
+# number-word handling anywhere in the code, so this is English
+# only: Amharic orders still go through the translate bridge, which
+# turns "አንድ ሺህ" into "one thousand" before this runs.
+_NUMBER_WORD_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19,
+}
+_NUMBER_WORD_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_NUMBER_WORD_SCALES = {
+    "hundred": 100, "hundreds": 100,
+    "thousand": 1000, "thousands": 1000,
+    "million": 1000000, "millions": 1000000,
+}
+_NUMBER_WORDS = (
+    set(_NUMBER_WORD_ONES) | set(_NUMBER_WORD_TENS)
+    | set(_NUMBER_WORD_SCALES)
+)
+
+
+def _number_phrase_value(phrase):
+    """Value of one number-word phrase (tokens, in order), or None
+    when it is not a number at all. "a"/"an" counts as 1 ("a
+    hundred" is 100); "and" is skipped ("one hundred and fifty"
+    is 150); a vague plural scale reads as the scale itself
+    ("hundreds" is 100)."""
+    current = 0
+    result = 0
+    seen = False
+    for w in phrase:
+        if w in ("a", "an"):
+            current += 1
+            seen = True
+        elif w in _NUMBER_WORD_ONES:
+            current += _NUMBER_WORD_ONES[w]
+            seen = True
+        elif w in _NUMBER_WORD_TENS:
+            current += _NUMBER_WORD_TENS[w]
+            seen = True
+        elif w in ("hundred", "hundreds"):
+            current = (current or 1) * 100
+            seen = True
+        elif w in ("thousand", "thousands", "million", "millions"):
+            result += (current or 1) * _NUMBER_WORD_SCALES[w]
+            current = 0
+            seen = True
+        # "and" is skipped.
+    if not seen:
+        return None
+    return result + current
+
+
+def _number_word_values(text: str):
+    """Values of every English number-word phrase in the text, in
+    order ("one thousand five hundred" -> 1500, "a hundred" -> 100,
+    "hundreds" -> 100, "two hundred fifty" -> 250). A phrase is a
+    maximal run of number words, "a"/"an" as 1 next to a number
+    word, and "and" between number words. No quantity filter: "one"
+    yields 1 — callers decide what counts."""
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    values = []
+    i = 0
+    while i < len(words):
+        # A phrase starts at a number word, or at "a"/"an" followed
+        # by one ("a hundred", "a thousand"); a bare "a" ("a video")
+        # is not a number.
+        if words[i] in _NUMBER_WORDS or (
+            words[i] in ("a", "an")
+            and i + 1 < len(words)
+            and words[i + 1] in _NUMBER_WORDS
+        ):
+            j = i
+            phrase = []
+            while j < len(words):
+                w = words[j]
+                if w in _NUMBER_WORDS or w in ("a", "an"):
+                    phrase.append(w)
+                    j += 1
+                elif (
+                    w == "and" and phrase
+                    and j + 1 < len(words)
+                    and words[j + 1] in _NUMBER_WORDS
+                ):
+                    phrase.append(w)
+                    j += 1
+                else:
+                    break
+            value = _number_phrase_value(phrase)
+            if value is not None:
+                values.append(value)
+            i = j
+        else:
+            i += 1
+    return values
+
+
+def parse_number_words(text: str):
+    """First English number-word phrase in the text that is a valid
+    quantity (a multiple of 10, 10..1,000,000), or None. "hundreds"
+    (vague plural) reads as 100 — the Confirm card shows it, so the
+    user can correct it."""
+    for value in _number_word_values(text):
+        if 10 <= value <= 1000000 and value % 10 == 0:
+            return value
+    return None
+
+
 def quantity_from_text(text: str):
     """First number in the message that is a valid quantity (a
     multiple of 10, 10..1,000,000), or None. The text is already
-    normalised, so '1k' reads as 1000."""
+    normalised, so '1k' reads as 1000; number words ('one
+    thousand', 'five hundred', 'hundreds') read as quantities too."""
     for m in re.finditer(r"\d[\d,]*", text or ""):
         try:
             value = int(m.group(0).replace(",", ""))
@@ -4834,7 +4957,7 @@ def quantity_from_text(text: str):
             continue
         if 10 <= value <= 1000000 and value % 10 == 0:
             return value
-    return None
+    return parse_number_words(text)
 
 
 def quantity_before_metric(text: str):
@@ -4861,6 +4984,32 @@ def quantity_before_metric(text: str):
         except ValueError:
             continue
         if 10 <= value <= 1000000 and value % 10 == 0:
+            return value
+    # Word-form quantities right before the metric ("hundred views",
+    # "one thousand tiktok views"): a number-word phrase, then up
+    # to two filler words, then the metric — the same shape as the
+    # digit pattern above.
+    tokens = re.findall(r"[a-z]+|[\u1200-\u137c]+", s.lower())
+    for idx, tok in enumerate(tokens):
+        if _canonical_metric(tok) is None and tok not in _AMHARIC_METRICS:
+            continue
+        j = idx - 1
+        fillers = 0
+        while j >= 0 and tokens[j] not in _NUMBER_WORDS and tokens[j] not in ("a", "an", "and"):
+            fillers += 1
+            if fillers > 2:
+                break
+            j -= 1
+        if fillers > 2 or j < 0:
+            continue
+        phrase = []
+        k = j
+        while k >= 0 and (tokens[k] in _NUMBER_WORDS or tokens[k] in ("a", "an", "and")):
+            phrase.append(tokens[k])
+            k -= 1
+        phrase.reverse()
+        value = _number_phrase_value(phrase) if phrase else None
+        if value is not None and 10 <= value <= 1000000 and value % 10 == 0:
             return value
     return None
 
@@ -4935,6 +5084,15 @@ def metric_content_kind(service_hint: str):
     return None
 
 
+def _needs_post_link(service_hint: str) -> bool:
+    """True when the metric needs a single post, not a channel or
+    profile: views, likes, comments, shares, reactions."""
+    hint = (service_hint or "").lower()
+    if "reaction" in hint:
+        return True
+    return metric_content_kind(hint) == "video"
+
+
 def _same_link(a: str, b: str) -> bool:
     """Same link up to scheme, www, query string and a trailing
     slash — the AI sometimes normalises the link it returns."""
@@ -4973,7 +5131,8 @@ def _quantity_grounded_in_text(text: str, quantity) -> bool:
                 return True
         except ValueError:
             continue
-    return False
+    # Word form too ("hundred views" grounds quantity 100).
+    return wanted in _number_word_values(text)
 
 
 def is_price_question(text: str) -> bool:
@@ -5804,7 +5963,13 @@ def kind_from_text(text: str):
     so "tiktok comment" and "tiktok comments" are the same kind.
     Amharic metric words count the same way ("እይታዎች" is views).
     """
-    words = re.findall(r"[a-z]+", (text or "").lower())
+    # URLs are stripped first: their words ("t", "me", "com") are
+    # not the user's words, and a link must never push the metric
+    # scan past the quantity ("like https://t.me/... hundred
+    # views"). Digits stay in the scan so the filler-"like" check
+    # below can see a quantity written right after "like".
+    s = re.sub(r"https?://\S+|t\.me/\S+", " ", text or "")
+    words = re.findall(r"[a-z]+|\d[\d,]*", s.lower())
     word_set = set(words)
     am_words = re.findall(r"[\u1200-\u137c]+", text or "")
     am_metrics = [
@@ -5814,7 +5979,18 @@ def kind_from_text(text: str):
         return "comment likes"
     if "comments" in am_metrics and "likes" in am_metrics:
         return "comment likes"
-    for w in words:
+    for idx, w in enumerate(words):
+        if w in ("like", "likes"):
+            # Filler "like" ("I want, like, 100 views", live 14 Nov
+            # 2026): skip it when a quantity follows within the next
+            # few words — the real metric comes after the quantity.
+            # A real likes request ("likes for my video") has no
+            # quantity after "likes", so it is kept.
+            rest = words[idx + 1:idx + 4]
+            if any(
+                re.fullmatch(r"\d[\d,]*", t) for t in rest
+            ) or any(t in _NUMBER_WORDS for t in rest):
+                continue
         metric = _canonical_metric(w)
         if metric is not None:
             return metric
@@ -5909,19 +6085,36 @@ def detect_platform_metric(text):
     norm = normalize_text(text or "")
     words = set(re.findall(r"[a-z]+", norm.lower()))
     platform = None
-    for word, plat in _PLATFORM_WORDS.items():
-        if word in words:
-            platform = plat
+    # The link decides first (owner, 14 Nov 2026): a pasted t.me
+    # link is Telegram even when the words name nothing — or name
+    # something else (a forwarded notice about TikTok).
+    for token in re.findall(r"https?://\S+|t\.me/\S+", norm):
+        platform = platform_from_link(token)
+        if platform:
             break
     if platform is None:
-        for token in re.findall(r"https?://\S+|t\.me/\S+", norm):
-            platform = platform_from_link(token)
-            if platform:
+        for word, plat in _PLATFORM_WORDS.items():
+            if word in words:
+                platform = plat
                 break
     if platform is None and "x.com" in norm.lower():
         platform = "x"
     metric = kind_from_text(norm)
     return platform, metric
+
+
+def _explicit_platform_word(text: str):
+    """Platform word the user typed themselves (not inside a URL):
+    "tiktok" in "I want tiktok views" counts; "facebook" inside
+    "https://www.facebook.com/..." does not. Used so the link can
+    win over the AI's guess without silencing a real mismatch the
+    user typed ("YouTube subscribers" + a TikTok link)."""
+    s = re.sub(r"https?://\S+|t\.me/\S+", " ", text or "")
+    words = set(re.findall(r"[a-z]+", s.lower()))
+    for word, plat in _PLATFORM_WORDS.items():
+        if word in words:
+            return plat
+    return None
 
 
 def services_for_prompt(services, platform=None, metric=None,
@@ -9789,6 +9982,25 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         if handle is not None and handle.lower() != "@paxyo_bot":
             merged["link"] = handle
+    # The platform comes from the LINK (owner, 14 Nov 2026): a
+    # pasted t.me link is Telegram, facebook.com is Facebook, and
+    # so on — whatever the AI guessed, whatever the stored draft
+    # said, and whatever a forwarded/attached message says. The one
+    # exception is a platform the user typed themselves in this
+    # message ("YouTube subscribers" + a TikTok link): that stays a
+    # mismatch and the guard below asks for the correction.
+    if merged.get("link"):
+        _link_platform = platform_from_link(merged["link"])
+        if _link_platform is not None:
+            _explicit = _explicit_platform_word(text)
+            if _explicit is None or _explicit == _link_platform:
+                merged["platform"] = _link_platform
+                if merged.get("service_hint"):
+                    merged["service_hint"] = " ".join(
+                        _link_platform
+                        if w in _PLATFORMS and w != _link_platform else w
+                        for w in merged["service_hint"].split()
+                    )
     # Cancelled-order guard (round 6): right after a cancel, the
     # AI sometimes returns the cancelled order's link/quantity from
     # conversation history even though the user typed nothing of the
@@ -9885,6 +10097,32 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 lang, voice=voice,
             )
             return
+
+    # A Telegram channel link is Telegram, but it is not a post
+    # (owner, 14 Nov 2026: "t.me is not only telegram post, it
+    # could also be telegram channel"). When the order needs a post
+    # (views, likes, comments, shares, reactions), a channel link
+    # cannot be ordered on — ask for the specific post link instead
+    # of showing a card for the channel. Followers/members/
+    # subscribers take a channel link as-is.
+    if (
+        merged.get("link")
+        and platform_from_link(merged["link"]) == "telegram"
+        and link_content_kind(merged["link"]) == "profile"
+        and _needs_post_link(merged.get("service_hint"))
+    ):
+        _metric = kind_from_text(merged.get("service_hint") or "") or "services"
+        _dropped = dict(merged)
+        _dropped.pop("link", None)
+        PARTIAL[user.id] = {
+            k: v for k, v in _dropped.items() if v is not None
+        }
+        await reply_message(
+            update.message,
+            t("channel_link_needs_post", lang, metric=_metric),
+            lang, voice=voice,
+        )
+        return
 
     # A question about an order awaiting Confirm ("how fast can you
     # deliver it?") is answered from the pending service — the order

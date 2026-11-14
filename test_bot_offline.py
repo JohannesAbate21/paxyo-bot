@@ -1059,18 +1059,23 @@ class TestMultiTurnOrder(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.PARTIAL[1]["quantity"], 2000)
         self.assertEqual(bot.PENDING, {})
 
-    async def test_bare_link_with_no_context_asks_platform(self):
+    async def test_bare_link_with_no_context_keeps_platform_from_link(self):
+        # The platform comes from the LINK (owner, 14 Nov 2026): a
+        # bare instagram.com link is Instagram, so the bot no
+        # longer asks "Which platform?" — it asks for the quantity
+        # instead. (Was: test_bare_link_with_no_context_asks_platform.)
         msg, _ = await self._turns([
             ("https://instagram.com/p/x", intent_of(
                 "order", link="https://instagram.com/p/x")),
         ])
         self.assertEqual(
             msg.text_sent,
-            ["Which platform? (Instagram, TikTok, Telegram, YouTube...)"],
+            ["How many? (for example 1000)"],
         )
         self.assertEqual(
             bot.PARTIAL[1]["link"], "https://instagram.com/p/x"
         )
+        self.assertEqual(bot.PARTIAL[1]["platform"], "instagram")
 
     async def test_new_platform_starts_a_new_order(self):
         msg, _ = await self._turns([
@@ -13580,6 +13585,509 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
         )
         self.assertEqual(msg.text_sent[0], "Haha, nice one! 😂")
         self.assertNotIn("Confirm", msg.text_sent[0])
+
+
+class LinkPlatformPaxyo(FakePaxyo):
+    """One service per (platform, metric) pair, modelled on the real
+    12 Nov 2026 catalogue rows (provider rate x420 ETB): Telegram
+    Post Views #6139 (0.42), Facebook Post Likes #5001 (29.40),
+    TikTok Video Views #1665 (18.90), Instagram Followers #1001
+    (42.00), YouTube Video Views #7001 (42.00), Telegram Channel
+    Members #2001 (42.00). The pick is unambiguous by design, so a
+    wrong platform or metric shows up as the wrong service id."""
+
+    LINK_SERVICES = [
+        {
+            "service": 6139, "name": "Telegram Post Views",
+            "category": "Telegram Post Views", "type": "Default",
+            "rate_etb_per_1000": 0.42, "min": 10, "max": 100000,
+            "average_time": "16 minutes", "active": True,
+            "provider_service_id": 6139,
+        },
+        {
+            "service": 5001, "name": "Facebook Post Likes",
+            "category": "Facebook Post Likes", "type": "Default",
+            "rate_etb_per_1000": 29.40, "min": 10, "max": 10000,
+            "average_time": "30 minutes", "active": True,
+            "provider_service_id": 5001,
+        },
+        {
+            "service": 1665, "name": "TikTok Video Views",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 18.90, "min": 10, "max": 10000,
+            "average_time": "4 minutes", "active": True,
+            "provider_service_id": 1665,
+        },
+        {
+            "service": 1001, "name": "Instagram Followers | Fast",
+            "category": "Instagram Followers", "type": "Default",
+            "rate_etb_per_1000": 42.0, "min": 10, "max": 10000,
+            "average_time": "12 minutes", "active": True,
+            "provider_service_id": 1001,
+        },
+        {
+            "service": 7001, "name": "YouTube Video Views",
+            "category": "YouTube Video Views", "type": "Default",
+            "rate_etb_per_1000": 42.0, "min": 10, "max": 10000,
+            "average_time": "30 minutes", "active": True,
+            "provider_service_id": 7001,
+        },
+        {
+            "service": 2001, "name": "Telegram Channel Members",
+            "category": "Telegram Channel Members", "type": "Default",
+            "rate_etb_per_1000": 42.0, "min": 10, "max": 10000,
+            "average_time": "60 minutes", "active": True,
+            "provider_service_id": 2001,
+        },
+    ]
+
+    async def services(self):
+        return list(self.LINK_SERVICES)
+
+
+class TestWordQuantitiesAndLinkPlatform(_LanguageRoundBase):
+    """Word-form quantities + platform-from-link, 14 Nov 2026
+    (owner, 18:52–18:55 EAT). (1) "I want like
+    https://t.me/godofpanelcom/768 hundred views for this" and
+    "I want like 100 views for this https://t.me/godofpanelcom/768"
+    both got "I could not find a service for that platform" — the
+    bot read "like" as the metric and read no quantity from
+    "hundred". (2) The platform must come from the shared link:
+    t.me -> Telegram, facebook.com -> Facebook, instagram.com ->
+    Instagram, tiktok.com -> TikTok, youtube.com -> YouTube, over
+    any platform hint in the words or in forwarded content. (3) A
+    t.me link is not only a post — a channel link is Telegram too,
+    but views/likes/reactions need the specific post link."""
+
+    async def _turns(self, turns, paxyo=None, ai_reply=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        ai = mock.AsyncMock(
+            return_value=ai_reply if ai_reply is not None else ""
+        )
+        with mock.patch("bot.paxyo", paxyo or LinkPlatformPaxyo()), \
+                mock.patch("bot.speak_reply"), \
+                mock.patch("bot.ai_generate", new=ai):
+            for text, intent in turns:
+                with mock.patch(
+                    "bot.extract_intent",
+                    new=mock.AsyncMock(return_value=intent),
+                ):
+                    await bot.handle_order_text(update, None, text)
+        return msg
+
+    def _assert_card(self, msg, service_id, quantity, link=None):
+        self.assertIn("Please confirm:", msg.text_sent[-1])
+        self.assertIn(f"(#{service_id})", msg.text_sent[-1])
+        self.assertIn(f"🔢 {quantity}", msg.text_sent[-1])
+        if link is not None:
+            self.assertIn(link, msg.text_sent[-1])
+        self.assertNotIn(
+            "could not find a service", msg.text_sent[-1]
+        )
+
+    # Fault 1: number words ----------------------------------------
+
+    def test_parse_number_words(self):
+        self.assertEqual(bot.parse_number_words("ten"), 10)
+        self.assertEqual(bot.parse_number_words("twenty"), 20)
+        self.assertEqual(bot.parse_number_words("fifty"), 50)
+        self.assertEqual(bot.parse_number_words("a hundred"), 100)
+        self.assertEqual(bot.parse_number_words("one hundred"), 100)
+        self.assertEqual(bot.parse_number_words("hundred"), 100)
+        # Vague plural reads as the scale itself — the Confirm card
+        # shows 100, so the user can correct it.
+        self.assertEqual(bot.parse_number_words("hundreds"), 100)
+        self.assertEqual(bot.parse_number_words("a thousand"), 1000)
+        self.assertEqual(bot.parse_number_words("one thousand"), 1000)
+        self.assertEqual(bot.parse_number_words("five hundred"), 500)
+        self.assertEqual(bot.parse_number_words("two thousand"), 2000)
+        self.assertEqual(
+            bot.parse_number_words("one thousand five hundred"), 1500
+        )
+        self.assertEqual(
+            bot.parse_number_words("two hundred fifty"), 250
+        )
+        self.assertEqual(
+            bot.parse_number_words("one hundred and fifty"), 150
+        )
+        self.assertEqual(
+            bot.parse_number_words("one thousand and fifty"), 1050
+        )
+        # Not quantities: under 10, not a multiple of 10, over the
+        # 1,000,000 cap, or no number at all. A bare "a" is not a
+        # number ("a video" is not 1).
+        self.assertIsNone(bot.parse_number_words("one"))
+        self.assertIsNone(bot.parse_number_words("five"))
+        self.assertIsNone(bot.parse_number_words("twenty one"))
+        self.assertIsNone(bot.parse_number_words("three million"))
+        self.assertIsNone(bot.parse_number_words("hello"))
+        self.assertIsNone(bot.parse_number_words("a video"))
+        self.assertIsNone(bot.parse_number_words(""))
+
+    def test_quantity_from_text_word_form(self):
+        self.assertEqual(
+            bot.quantity_from_text(
+                bot.normalize_text("I want five hundred views")
+            ),
+            500,
+        )
+        self.assertEqual(
+            bot.quantity_from_text(bot.normalize_text("hundred views")),
+            100,
+        )
+        self.assertEqual(
+            bot.quantity_from_text(
+                bot.normalize_text("one thousand five hundred views")
+            ),
+            1500,
+        )
+        # Digits still win when both are present; 1k/2.5k keep
+        # working exactly as before.
+        self.assertEqual(
+            bot.quantity_from_text(
+                bot.normalize_text("100 views and five hundred likes")
+            ),
+            100,
+        )
+        self.assertEqual(
+            bot.quantity_from_text(bot.normalize_text("1k views")), 1000
+        )
+        self.assertEqual(
+            bot.quantity_from_text(bot.normalize_text("2.5k views")),
+            2500,
+        )
+        self.assertEqual(
+            bot.quantity_from_text(bot.normalize_text("200 views")), 200
+        )
+
+    def test_quantity_before_metric_word_form(self):
+        self.assertEqual(
+            bot.quantity_before_metric("hundred views"), 100
+        )
+        self.assertEqual(
+            bot.quantity_before_metric("one thousand tiktok views"),
+            1000,
+        )
+        self.assertEqual(
+            bot.quantity_before_metric("two hundred fifty views"), 250
+        )
+        self.assertEqual(
+            bot.quantity_before_metric("hundred tiktok views"), 100
+        )
+        # Regression: a stray number elsewhere is never the
+        # quantity; digits right before the metric still work.
+        self.assertIsNone(bot.quantity_before_metric("my balance is 100"))
+        self.assertEqual(
+            bot.quantity_before_metric("200 TikTok views"), 200
+        )
+        self.assertIsNone(bot.quantity_before_metric("I want views"))
+
+    def test_bare_quantity_word_form(self):
+        self.assertEqual(bot.bare_quantity("one thousand please"), 1000)
+        self.assertEqual(bot.bare_quantity("hundred"), 100)
+        self.assertEqual(bot.bare_quantity("five hundred"), 500)
+        self.assertEqual(
+            bot.bare_quantity("one thousand five hundred"), 1500
+        )
+        self.assertEqual(bot.bare_quantity("2000"), 2000)
+        self.assertIsNone(bot.bare_quantity("hello"))
+        self.assertIsNone(bot.bare_quantity("one"))
+        self.assertIsNone(bot.bare_quantity("a video"))
+
+    def test_quantity_grounded_in_text_word_form(self):
+        self.assertTrue(
+            bot._quantity_grounded_in_text("hundred views", 100)
+        )
+        self.assertTrue(
+            bot._quantity_grounded_in_text("one thousand views", 1000)
+        )
+        self.assertTrue(
+            bot._quantity_grounded_in_text("100 views", 100)
+        )
+        self.assertFalse(
+            bot._quantity_grounded_in_text("200 views", 100)
+        )
+
+    # Fault 1 + 2: filler "like" ------------------------------------
+
+    def test_kind_from_text_filler_like(self):
+        self.assertEqual(
+            bot.kind_from_text("I want like 100 views"), "views"
+        )
+        self.assertEqual(
+            bot.kind_from_text(
+                "I want like https://t.me/godofpanelcom/768 hundred "
+                "views for this can you do this"
+            ),
+            "views",
+        )
+        self.assertEqual(
+            bot.kind_from_text("like 100 likes"), "likes"
+        )
+        # No quantity after "like": a real likes request.
+        self.assertEqual(
+            bot.kind_from_text("please hundreds like for this"), "likes"
+        )
+        self.assertEqual(
+            bot.kind_from_text("likes for my video"), "likes"
+        )
+        # Regressions: comment likes and plain words keep working.
+        self.assertEqual(
+            bot.kind_from_text("like my comment"), "comment likes"
+        )
+        self.assertEqual(
+            bot.kind_from_text("I want 1000 tiktok views"), "views"
+        )
+
+    # Fault 2: platform from the link -------------------------------
+
+    def test_detect_platform_metric_link_first(self):
+        self.assertEqual(
+            bot.detect_platform_metric(
+                "I want like 100 views for this "
+                "https://t.me/godofpanelcom/768"
+            ),
+            ("telegram", "views"),
+        )
+        self.assertEqual(
+            bot.detect_platform_metric(
+                "please hundreds like for this "
+                "https://www.facebook.com/facebook/posts/1"
+            ),
+            ("facebook", "likes"),
+        )
+        # No link: the words still decide, exactly as before.
+        self.assertEqual(
+            bot.detect_platform_metric("I want 1000 tiktok followers"),
+            ("tiktok", "followers"),
+        )
+        self.assertEqual(bot.detect_platform_metric("hello"), (None, None))
+
+    def test_explicit_platform_word(self):
+        self.assertEqual(
+            bot._explicit_platform_word(
+                "Send YouTube subscribers to this link: "
+                "https://tiktok.com/@x/video/1"
+            ),
+            "youtube",
+        )
+        # A platform word inside a URL does not count.
+        self.assertIsNone(
+            bot._explicit_platform_word(
+                "I want 100 views https://t.me/godofpanelcom/768"
+            )
+        )
+        self.assertIsNone(
+            bot._explicit_platform_word(
+                "https://www.facebook.com/facebook/posts/1"
+            )
+        )
+
+    async def test_telegram_post_link_views_wrong_ai_platform(self):
+        # Live failure (MSG2): the AI said tiktok, the link says
+        # Telegram — the link wins, and the card is Telegram views.
+        msg = await self._turns([(
+            "I want like 100 views for this "
+            "https://t.me/godofpanelcom/768",
+            intent_of(
+                "order", platform="tiktok", service_hint="tiktok views",
+                quantity=100, link="https://t.me/godofpanelcom/768",
+            ),
+        )])
+        self._assert_card(
+            msg, 6139, 100, "https://t.me/godofpanelcom/768"
+        )
+
+    async def test_telegram_post_link_word_quantity_wrong_ai_hint(self):
+        # Live failure (MSG1): the AI said "telegram likes" (from
+        # the filler "like") and returned no quantity — the words
+        # say views, "hundred" is 100, the link says Telegram.
+        msg = await self._turns([(
+            "I want like https://t.me/godofpanelcom/768 hundred views "
+            "for this can you do this",
+            intent_of(
+                "order", platform="telegram",
+                service_hint="telegram likes",
+                link="https://t.me/godofpanelcom/768",
+            ),
+        )])
+        self._assert_card(
+            msg, 6139, 100, "https://t.me/godofpanelcom/768"
+        )
+
+    async def test_facebook_post_link_hundreds_like(self):
+        # Live failure: a Facebook post link + "hundreds like" —
+        # Facebook likes, quantity 100, even though the AI returned
+        # no platform and no quantity.
+        msg = await self._turns([(
+            "please hundreds like for this "
+            "https://www.facebook.com/facebook/posts/10111111111111111",
+            intent_of(
+                "order", service_hint="likes",
+                link="https://www.facebook.com/facebook/posts/"
+                     "10111111111111111",
+            ),
+        )])
+        self._assert_card(
+            msg, 5001, 100,
+            "https://www.facebook.com/facebook/posts/10111111111111111",
+        )
+
+    async def test_tiktok_link_wins_over_wrong_ai_platform(self):
+        msg = await self._turns([(
+            "I want 100 views for this "
+            "https://tiktok.com/@x/video/123",
+            intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", quantity=100,
+                link="https://tiktok.com/@x/video/123",
+            ),
+        )])
+        self._assert_card(
+            msg, 1665, 100, "https://tiktok.com/@x/video/123"
+        )
+
+    async def test_instagram_link_word_quantity(self):
+        msg = await self._turns([(
+            "one thousand followers for this "
+            "https://instagram.com/p/abc",
+            intent_of(
+                "order", platform="tiktok",
+                service_hint="tiktok followers",
+                link="https://instagram.com/p/abc",
+            ),
+        )])
+        self._assert_card(
+            msg, 1001, 1000, "https://instagram.com/p/abc"
+        )
+
+    async def test_youtube_link_wins_over_wrong_ai_platform(self):
+        msg = await self._turns([(
+            "100 views for this "
+            "https://youtube.com/watch?v=abc123",
+            intent_of(
+                "order", platform="tiktok", service_hint="tiktok views",
+                quantity=100,
+                link="https://youtube.com/watch?v=abc123",
+            ),
+        )])
+        self._assert_card(
+            msg, 7001, 100, "https://youtube.com/watch?v=abc123"
+        )
+
+    async def test_word_quantity_answer_completes_order(self):
+        # "one thousand" as the answer to "How many?" completes
+        # the order — quantities in word form work in answers too.
+        msg = await self._turns([
+            ("I want Telegram views", intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views")),
+            ("https://t.me/godofpanelcom/768", intent_of(
+                "order", link="https://t.me/godofpanelcom/768")),
+            ("one thousand", intent_of("unclear")),
+        ])
+        self.assertEqual(
+            msg.text_sent[0],
+            "Please send the link of the Telegram post.",
+        )
+        self.assertEqual(
+            msg.text_sent[1], "How many? (for example 1000)"
+        )
+        self._assert_card(
+            msg, 6139, 1000, "https://t.me/godofpanelcom/768"
+        )
+
+    async def test_platform_mismatch_still_flagged(self):
+        # Regression: a platform the user typed themselves
+        # ("YouTube subscribers") + a TikTok link is still a
+        # mismatch — the link does not silently override it.
+        msg = await self._turns([(
+            "Send YouTube subscribers to this link: "
+            "https://tiktok.com/@x/video/1",
+            intent_of(
+                "order", platform="youtube",
+                service_hint="subscribers",
+                link="https://tiktok.com/@x/video/1", quantity=1000,
+            ),
+        )])
+        self.assertIn(
+            "That link is tiktok, but you asked for youtube",
+            msg.text_sent[0],
+        )
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_no_link_message_still_uses_words(self):
+        # Regression: with no link at all, the words still decide
+        # the platform — the bot asks for the link.
+        msg = await self._turns([(
+            "I want 100 TikTok views",
+            intent_of(
+                "order", platform="tiktok", service_hint="tiktok views",
+                quantity=100,
+            ),
+        )])
+        self.assertEqual(
+            msg.text_sent, ["Please send the link of the video."]
+        )
+
+    # Fault 3: t.me channel link ------------------------------------
+
+    async def test_channel_link_views_asks_for_post_link(self):
+        # A t.me channel link IS Telegram — never "could not find a
+        # service" — but views need a post, so the bot asks for the
+        # specific post link and keeps the rest of the order.
+        msg = await self._turns([(
+            "I want 100 views for this https://t.me/godofpanelcom",
+            intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", quantity=100,
+                link="https://t.me/godofpanelcom",
+            ),
+        )])
+        self.assertIn("That link is a channel", msg.text_sent[0])
+        self.assertIn("post link", msg.text_sent[0])
+        self.assertNotIn("could not find a service", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "telegram")
+        self.assertEqual(
+            bot.PARTIAL[1].get("service_hint"), "telegram views"
+        )
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 100)
+        self.assertNotIn("link", bot.PARTIAL[1])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_channel_link_then_post_link_completes_order(self):
+        # The post link the bot asked for completes the order kept
+        # in the draft — no need to repeat the quantity.
+        msg = await self._turns([
+            ("I want 100 views for this https://t.me/godofpanelcom",
+             intent_of(
+                 "order", platform="telegram",
+                 service_hint="telegram views", quantity=100,
+                 link="https://t.me/godofpanelcom",
+             )),
+            ("https://t.me/godofpanelcom/768", intent_of(
+                "order", link="https://t.me/godofpanelcom/768")),
+        ])
+        self.assertIn("That link is a channel", msg.text_sent[0])
+        self._assert_card(
+            msg, 6139, 100, "https://t.me/godofpanelcom/768"
+        )
+
+    async def test_channel_link_members_proceeds(self):
+        # Members go to the channel itself — a channel link is the
+        # right link, so the card appears at once.
+        msg = await self._turns([(
+            "I want 100 members for this https://t.me/godofpanelcom",
+            intent_of(
+                "order", platform="telegram",
+                service_hint="telegram members", quantity=100,
+                link="https://t.me/godofpanelcom",
+            ),
+        )])
+        self._assert_card(
+            msg, 2001, 100, "https://t.me/godofpanelcom"
+        )
 
 
 if __name__ == "__main__":
