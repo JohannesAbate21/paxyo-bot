@@ -782,3 +782,51 @@ William: a normal AI says what it understood first.
 
 498 tests: 472 existing + 26 new, all passing, no existing test
 changed.
+
+## Round 8.1 (14 Nov 2026 — the round-8 retest fixes)
+
+Live retest of round 8 (09:29–09:37 EAT) found four gaps:
+
+- **The restatement keeps the quantity.** A price question ("how
+  much 1k") now stores what it asked about in the draft
+  (`_remember_price_question` in `price_answer_text`), and the
+  restatement looks back at the same metric in chat history
+  (`_recent_quantity`, normalised so "1k" reads as 1000) — so
+  "Do you understand what I said first" restates "👍 reactions
+  for your Telegram channel post, 1,000" and never asks "how many"
+  again. Three round-8 tests were updated to the new replies (a
+  bare 👍 and a 👍 order message now get the acknowledgement
+  first, not the stock link line).
+- **A bare emoji is acknowledged as the reaction choice.**
+  A message that IS just the emoji ("👍") in a reactions order
+  gets "Got it — 👍 reactions. Send the link to the post..."
+  first, then the link ask; with no order context it gets a
+  natural reply naming the reaction ("Got it — 👍 thumbs-up
+  reactions!...") and the draft is still started, so the next
+  link completes a reactions order. A bare emoji while a
+  NON-reactions order is being built is just an acknowledgement —
+  it never hijacks that order: the emoji-only kind no longer
+  wipes or rewrites the draft (`_text_has_words` guard in
+  `handle_order_text`).
+- **Feelings are acknowledged before tips.** Free-chat replies
+  acknowledge the human part first (`_feeling_ack`: laugh +
+  tired together get "Haha — get some rest when you can! 🙂"),
+  then the AI's answer and the soft steer — so "haha nice, I'm
+  tired today but I need views for my new video" gets the rest
+  wish before the views tips, in the AI path and in the local
+  fallback (`local_chat_reply`).
+- **Telegram reactions are matched deterministically.**
+  `pick_services` now takes `reaction_emoji` and, for a
+  reactions request, only single-post reactions services in the
+  emoji's family (`_reactions_pool`): 👍 → Thumbs up / Like,
+  ❤️ → Heart, 🔥 → Fire, no emoji → the Positive mix — picked
+  by the existing fastest-average-time rule. A "Bot Start"
+  service and an "Auto … 10 Future Posts" service are never
+  offered for a single-post order, so the same 👍 wording no
+  longer quotes 81.90 one time and 336.00 the next: it quotes
+  the thumbs-up service (e.g. #6541, 5.46 ETB per 1000).
+  Reactions short names keep the type ("Telegram Reactions +
+  Free Views — Thumbs up 👍") so the Confirm card says which
+  reaction is being bought.
+
+511 tests: 498 existing + 13 new, all passing.

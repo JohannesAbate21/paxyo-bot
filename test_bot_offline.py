@@ -8114,7 +8114,11 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
                       service_hint="telegram reactions", quantity=1000),
             paxyo=ReactionsPaxyo(),
         )
-        self.assertIn(
+        # Round 8.1 (14 Nov 2026): the emoji is the reaction
+        # choice, so it is acknowledged first, then the link asked
+        # for — never the stock link line on its own.
+        self.assertIn("Got it — 👍 reactions", msg1.text_sent[0])
+        self.assertNotIn(
             "Please send the link the order is for.", msg1.text_sent[0]
         )
         msg2 = await self._send(
@@ -8267,26 +8271,32 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
                       service_hint="telegram reactions", quantity=1000),
             paxyo=ReactionsPaxyo(),
         )
-        self.assertIn(
-            "Please send the link the order is for.", msg1.text_sent[0]
-        )
+        # Round 8.1 (14 Nov 2026): the emoji is acknowledged
+        # first, then the link asked for.
+        self.assertIn("Got it — 👍 reactions", msg1.text_sent[0])
         msg2 = await self._send(
             "👍", intent_of("unclear"), paxyo=ReactionsPaxyo()
         )
-        self.assertIn(
-            "Please send the link the order is for.", msg2.text_sent[0]
-        )
+        self.assertIn("Got it — 👍 reactions", msg2.text_sent[0])
+        self.assertIn("link", msg2.text_sent[0].lower())
         self.assertNotIn("I did not understand", msg2.text_sent[0])
         self.assertEqual(
             bot.PARTIAL[1].get("service_hint"), "telegram reactions"
         )
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "👍")
 
     async def test_bare_thumbs_up_without_context_asks_for_link(self):
         # No order context: a bare 👍 is still understood as the
         # thumbs-up reaction, and the bot asks for the link (the
-        # link itself reveals the platform).
+        # link itself reveals the platform) — round 8.1 (14 Nov
+        # 2026): as a natural reply naming the reaction, never
+        # the stock link request on its own.
         msg = await self._send("👍", intent_of("unclear"))
         self.assertIn(
+            "Got it — 👍 thumbs-up reactions!", msg.text_sent[0]
+        )
+        self.assertIn("link", msg.text_sent[0].lower())
+        self.assertNotIn(
             "Please send the link the order is for.", msg.text_sent[0]
         )
         self.assertNotIn("I did not understand", msg.text_sent[0])
@@ -8422,6 +8432,405 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
             await bot.start(first, None)
             await bot.start(second, None)
         self.assertEqual(len(msg.text_sent), 2)
+
+
+class RealReactionsPaxyo(FakePaxyo):
+    """FakePaxyo plus Telegram reactions services modelled on the
+    real 12 Nov 2026 catalogue rows (provider rate x420 ETB):
+    #6541 Thumbs up 5.46, #1717 Like 12.60, #2026 Like 16.46,
+    #6537 Heart 5.46, #6540 Fire 5.46, #6534 Positive mix 5.46 —
+    and the two services that must NEVER be picked for a
+    reactions order: #216 Bot Start 81.90 (fastest of all, 1
+    minute) and #1758 Auto 10 Future Posts 336.00 (also 1
+    minute)."""
+
+    REACTIONS_SERVICES = [
+        {
+            "service": 6541,
+            "name": "Telegram Reactions + Free Views | Thumbs up 👍 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions [ Best Price 💫 ] ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "5 minutes",
+            "active": True, "provider_service_id": 6541,
+        },
+        {
+            "service": 1717,
+            "name": "Telegram Reactions + Free Views | Like 👍| [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions [ S2 ]",
+            "type": "Default", "rate_etb_per_1000": 12.60,
+            "min": 10, "max": 100000, "average_time": "15 minutes",
+            "active": True, "provider_service_id": 1717,
+        },
+        {
+            "service": 2026,
+            "name": "Telegram Reactions + Free Views | Like 👍| [ Max 100K ] | Day 100K",
+            "category": "Telegram Reactions [ S1 ]",
+            "type": "Default", "rate_etb_per_1000": 16.46,
+            "min": 10, "max": 200000, "average_time": "30 minutes",
+            "active": True, "provider_service_id": 2026,
+        },
+        {
+            "service": 6537,
+            "name": "Telegram Reactions + Free Views | Heart ❤️| [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "10 minutes",
+            "active": True, "provider_service_id": 6537,
+        },
+        {
+            "service": 6540,
+            "name": "Telegram Reactions + Free Views | Fire 🔥 | [ Max 1M ] | Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "20 minutes",
+            "active": True, "provider_service_id": 6540,
+        },
+        {
+            "service": 6534,
+            "name": "Telegram Reactions + Free Views  [ Max 1M ] Positive - 👍🤩🎉🔥❤️🥰👏🏻🥳😍❤️‍🔥💯| Day 100K",
+            "category": "Telegram Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 1000000, "average_time": "25 minutes",
+            "active": True, "provider_service_id": 6534,
+        },
+        {
+            "service": 216,
+            "name": "Telegram Bot Start [ Max 50K ]",
+            "category": "Telegram Post Views | Reactions | Bot Start ᴺᴱᵂ",
+            "type": "Default", "rate_etb_per_1000": 81.90,
+            "min": 100, "max": 40000, "average_time": "1 minute",
+            "active": True, "provider_service_id": 216,
+        },
+        {
+            "service": 1758,
+            "name": "Auto - Telegram Reactions + Free Views | Positive - 👍 ❤️ 🔥 🎉 😁| [ Max 2M ] | 10 Future Posts",
+            "category": "Telegram Auto Recations",
+            "type": "Default", "rate_etb_per_1000": 336.00,
+            "min": 20, "max": 2000000, "average_time": "1 minute",
+            "active": True, "provider_service_id": 1758,
+        },
+    ]
+
+    async def services(self):
+        return SAMPLE_SERVICES + self.REACTIONS_SERVICES
+
+
+class TestRoundEightOneFixes(unittest.IsolatedAsyncioTestCase):
+    """The 14 Nov 2026 round-8.1 fixes, from the live retest of
+    round 8: the restatement forgot the 1,000 from the price
+    question, a bare 👍 got only the stock link line, free chat
+    ignored "haha nice, I'm tired today", and the same 👍 wording
+    quoted two different wrong services (Bot Start 81.90, then
+    Auto 336.00) instead of a thumbs-up service."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _send(self, text, intent, paxyo=None, ai_reply=_UNSET):
+        from contextlib import ExitStack
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        patches = [
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ),
+            mock.patch("bot.paxyo", paxyo or FakePaxyo()),
+            mock.patch("bot.speak_reply"),
+        ]
+        if ai_reply is not _UNSET:
+            patches.append(mock.patch(
+                "bot.ai_generate",
+                new=mock.AsyncMock(return_value=ai_reply),
+            ))
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _order_views_no_link(self):
+        return await self._send(
+            "I want tiktok views",
+            intent_of("order", platform="tiktok", service_hint="views"),
+            paxyo=TikTokPaxyo(),
+        )
+
+    def _reactions_services(self):
+        return RealReactionsPaxyo.REACTIONS_SERVICES
+
+    # (1) retain the quantity in the restatement -----------------------
+
+    async def test_screenshot_flow_price_then_understand_keeps_quantity(self):
+        # The exact live flow (14 Nov 2026, 09:29-09:37 EAT):
+        # step 1 is a PRICE question naming 1k, step 2 repeats
+        # the reaction request, step 3 asks "do you understand".
+        # The restatement must keep the 1,000 and never ask "how
+        # many" again.
+        msg1 = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=RealReactionsPaxyo(),
+        )
+        self.assertIn("5.46", msg1.text_sent[0])
+        self.assertIn("1,000", msg1.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 1000)
+        msg2 = await self._send(
+            "I want 👍 this reaction",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions"),
+            paxyo=RealReactionsPaxyo(),
+        )
+        self.assertIn("Got it — 👍 reactions", msg2.text_sent[0])
+        # The draft quantity survived step 2 (its intent named
+        # no quantity of its own).
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 1000)
+        msg3 = await self._send(
+            "Do you understand what I said first",
+            intent_of("unclear"),
+            paxyo=RealReactionsPaxyo(),
+        )
+        reply = msg3.text_sent[0]
+        self.assertIn("Yeah, I got it", reply)
+        self.assertIn("👍 reactions", reply)
+        self.assertIn("Telegram channel post", reply)
+        self.assertIn("1,000", reply)
+        self.assertNotIn("how many", reply.lower())
+        self.assertNotIn(
+            "Please send the link the order is for.", reply
+        )
+
+    def test_recent_quantity_looks_back_same_metric_only(self):
+        # The quantity may live in an earlier chat message than
+        # the one being restated — it is found when the metric
+        # matches, and a quantity given for another metric is
+        # never carried over.
+        bot.CHAT_HISTORY[1] = [
+            {"user": "I want 👍 reaction for my telegram channel post how much 1k", "bot": "x"},
+            {"user": "I want 👍 this reaction", "bot": "y"},
+        ]
+        bot._CHAT_HISTORY_LOADED = True
+        self.assertEqual(
+            bot._recent_quantity(1, "reactions"), 1000
+        )
+        summary = bot._order_context_summary(1)
+        self.assertEqual(summary["quantity"], 1000)
+        self.assertEqual(summary["missing"], ["link"])
+        bot.CHAT_HISTORY[1] = [
+            {"user": "I want 5000 followers", "bot": "x"},
+            {"user": "I want 👍 this reaction", "bot": "y"},
+        ]
+        self.assertIsNone(bot._recent_quantity(1, "reactions"))
+
+    # (2) bare-emoji acknowledgement ------------------------------------
+
+    async def test_bare_heart_and_fire_acknowledged_in_order_context(self):
+        for emoji, service_hint in (("❤️", "telegram reactions"), ("🔥", "telegram reactions")):
+            with self.subTest(emoji=emoji):
+                await self._send(
+                    f"I want {emoji} reactions",
+                    intent_of("order", platform="telegram",
+                              service_hint=service_hint),
+                    paxyo=RealReactionsPaxyo(),
+                )
+                msg = await self._send(
+                    emoji, intent_of("unclear"),
+                    paxyo=RealReactionsPaxyo(),
+                )
+                self.assertIn(f"Got it — {emoji} reactions", msg.text_sent[0])
+                self.assertIn("link", msg.text_sent[0].lower())
+                self.assertEqual(
+                    bot.PARTIAL[1].get("reaction_emoji"), emoji
+                )
+                bot.PARTIAL.clear()
+
+    async def test_bare_emoji_fresh_context_gets_natural_reply(self):
+        msg = await self._send("🔥", intent_of("unclear"))
+        self.assertIn("Got it — 🔥 fire reactions!", msg.text_sent[0])
+        self.assertIn("link", msg.text_sent[0].lower())
+        self.assertNotIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+        # The draft is still started, so the next link completes
+        # a reactions order.
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "reactions")
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "🔥")
+
+    async def test_bare_emoji_during_views_order_does_not_hijack(self):
+        # A bare 👍 while ordering TikTok views is just an
+        # acknowledgement — the views draft survives untouched
+        # and the bot never steers it into reactions.
+        await self._order_views_no_link()
+        msg = await self._send(
+            "👍", intent_of("unclear"), paxyo=TikTokPaxyo()
+        )
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "views")
+        self.assertNotIn("reaction", msg.text_sent[0].lower())
+        self.assertNotIn("I did not understand", msg.text_sent[0])
+
+    async def test_full_order_message_with_emoji_still_creates_card(self):
+        # A full order message that merely CONTAINS the emoji
+        # goes through the order flow as usual (it is not a bare
+        # emoji) — the Confirm card appears.
+        msg = await self._send(
+            "I want 👍 reactions for https://t.me/paxyo251/180 1000",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions",
+                      link="https://t.me/paxyo251/180", quantity=1000),
+            paxyo=RealReactionsPaxyo(),
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIsNotNone(msg.markups[0])
+
+    # (3) acknowledge feelings in free chat -----------------------------
+
+    def test_feeling_ack(self):
+        self.assertIn(
+            "get some rest",
+            bot._feeling_ack("haha nice, I'm tired today", "en"),
+        )
+        self.assertIn(
+            "Haha", bot._feeling_ack("haha nice", "en")
+        )
+        self.assertIn(
+            "rest", bot._feeling_ack("I'm tired today", "en")
+        )
+        self.assertEqual(
+            bot._feeling_ack("I want tiktok views", "en"), ""
+        )
+
+    async def test_free_chat_laugh_and_tired_acknowledged_before_tips(self):
+        # The live retest line (14 Nov 2026): the bot gave video
+        # tips and ignored "haha nice, I'm tired today" entirely.
+        await self._order_views_no_link()
+        msg = await self._send(
+            "haha nice, I'm tired today but I need views for my new video",
+            intent_of("unclear"), paxyo=TikTokPaxyo(),
+            ai_reply="Here are a few tips: post consistently, use trending sounds, and reply to comments.",
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("get some rest", reply)
+        self.assertIn("Here are a few tips", reply)
+        self.assertLess(
+            reply.index("get some rest"), reply.index("Here are")
+        )
+        self.assertIn("send the link when you're ready", reply)
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "views")
+
+    async def test_free_chat_fallback_acknowledges_laugh_and_tired(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "haha nice, I'm tired today but I need views for my new video",
+            intent_of("unclear"), paxyo=TikTokPaxyo(), ai_reply=None,
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("Haha", reply)
+        self.assertIn("get some rest", reply)
+        self.assertIn("send the link when you're ready", reply)
+
+    # (4) deterministic Telegram reactions matching ---------------------
+
+    def test_pick_thumbs_up_never_bot_start_or_auto(self):
+        picks = bot.pick_services(
+            self._reactions_services(), platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="👍",
+        )
+        self.assertEqual(picks[0]["service"], 6541)
+        self.assertEqual(picks[0]["rate_etb_per_1000"], 5.46)
+        picked_ids = {s["service"] for s in picks}
+        self.assertNotIn(216, picked_ids)
+        self.assertNotIn(1758, picked_ids)
+        for pick in picks:
+            self.assertIn("reaction", pick["name"].lower())
+
+    def test_pick_heart_fire_and_positive_mix(self):
+        picks = bot.pick_services(
+            self._reactions_services(), platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="❤️",
+        )
+        self.assertEqual(picks[0]["service"], 6537)
+        picks = bot.pick_services(
+            self._reactions_services(), platform="telegram",
+            service_hint="telegram reactions", reaction_emoji="🔥",
+        )
+        self.assertEqual(picks[0]["service"], 6540)
+        # No specific emoji: the Positive mix.
+        picks = bot.pick_services(
+            self._reactions_services(), platform="telegram",
+            service_hint="telegram reactions",
+        )
+        self.assertEqual(picks[0]["service"], 6534)
+
+    def test_short_name_keeps_reaction_type(self):
+        short = bot.short_service_name(
+            "Telegram Reactions + Free Views | Thumbs up 👍 | [ Max 1M ] | Day 100K"
+        )
+        self.assertIn("Thumbs up 👍", short)
+        self.assertNotIn("Max 1M", short)
+        # A non-reactions service still strips the pipe part.
+        self.assertEqual(
+            bot.short_service_name("Instagram Followers | Fast"),
+            "Instagram Followers",
+        )
+
+    async def test_thumbs_up_price_question_quotes_thumbs_up_service(self):
+        # The live bug (14 Nov 2026): the same 👍 wording quoted
+        # 336.00 (Auto, 10 future posts) at 09:03 and 81.90 (Bot
+        # Start) at 09:29 — both wrong. The right quote is the
+        # thumbs-up service, 5.46 ETB per 1000.
+        msg = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=RealReactionsPaxyo(),
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("Thumbs up 👍", reply)
+        self.assertIn("5.46", reply)
+        self.assertIn("1,000", reply)
+        self.assertNotIn("81.90", reply)
+        self.assertNotIn("336.00", reply)
+        self.assertNotIn("Bot Start", reply)
+        self.assertNotIn("Auto", reply)
 
 
 if __name__ == "__main__":

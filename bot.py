@@ -1364,6 +1364,26 @@ TEXT = {
         "am": "ምን ማዘዝ ይፈልጋሉ? ይንገሩኝ።",
         "en": "Want to order something? Just tell me what you need.",
     },
+    # A bare reaction emoji (round 8.1, 14 Nov 2026): a bare 👍 in a
+    # reactions order is the reaction choice, not a new order — it
+    # is acknowledged first, then the link is asked for. With no
+    # order at all it gets a natural reply, never the stock link
+    # line on its own.
+    "emoji_ack_order": {
+        "am": "ገብቶኛል — {emoji} reactions። Link ይላኩ።",
+        "en": "Got it — {emoji} reactions. Send the link to the post and I'll get it going.",
+    },
+    "emoji_ack_fresh": {
+        "am": "ገብቶኛል — {emoji} {meaning} reactions! Link ሲልኩኝ እጀምራለሁ።",
+        "en": "Got it — {emoji} {meaning} reactions! Send me the link to the post when you're ready.",
+    },
+    # Laugh + tired together (round 8.1, 14 Nov 2026): "haha nice,
+    # I'm tired today" needs both parts acknowledged, not just the
+    # laugh and not just the tiredness.
+    "chat_laugh_tired": {
+        "am": "😄 Haha — እረፍት ያግኙ! 🙂",
+        "en": "Haha — get some rest when you can! 🙂",
+    },
     "orders_history_title": {
         "am": "Ordersዎ:",
         "en": "Your orders:",
@@ -1705,17 +1725,30 @@ def short_service_name(name):
     core name only — bracketed tags ("[ Max 100M ]") and pipe-separated
     descriptors ("| No Drop Since 30 Days | ...") are stripped. The
     full long name is shown only when the user entered a service ID.
-    Supply-chain words are stripped first, like clean_service_name."""
+    Supply-chain words are stripped first, like clean_service_name.
+    Reactions services are the one exception (round 8.1, 14 Nov
+    2026): the type lives after the pipe ("Thumbs up 👍", "Like 👍",
+    "Heart ❤️") and the first segment alone ("Telegram Reactions +
+    Free Views") does not say which reaction the user is buying —
+    so that segment is kept, and the name stays short."""
     s = clean_service_name(name)
     if not s:
         return ""
     s = re.sub(r"\[[^\]]*\]", "", s)
-    s = s.split("|")[0]
-    s = re.sub(r"\s+", " ", s).strip(" -–—")
+    parts = [p.strip(" -–—") for p in s.split("|")]
+    parts = [p for p in parts if p]
+    short = parts[0] if parts else ""
+    if "reaction" in short.lower():
+        for part in parts[1:]:
+            if any(ch in part for ch in EMOJI_MEANINGS):
+                short = f"{short} — {part}"
+                break
+    s = re.sub(r"\s+", " ", short).strip(" -–—")
     return s or "service"
 
 
-def pick_services(services, platform=None, service_hint=None, limit=3):
+def pick_services(services, platform=None, service_hint=None, limit=3,
+                  reaction_emoji=None):
     """Rank services for a platform, fastest average time first.
 
     Excludes blacklisted and inactive services. Services with no average
@@ -1733,6 +1766,11 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
     Likes" (its name also says "likes") and a video-likes request
     never gets a comment-likes service. A name with no kind word at
     all still matches — the platform check above already ran.
+    Reactions requests are special (round 8.1, 14 Nov 2026): only
+    single-post reactions services, in the emoji's family — see
+    _reactions_pool. `reaction_emoji` is the emoji the user sent
+    (👍, ❤️, 🔥); when it is None the request is a generic
+    reactions request and gets the Positive mix.
     """
     wanted = (platform or "").strip().lower()
     hint = (service_hint or "").strip().lower()
@@ -1768,9 +1806,16 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
             hay = name + " " + category
             if not all(_hint_word_matches(w, hay) for w in words):
                 continue
-        if hint_kinds and not _name_kinds(name).issubset(hint_kinds):
+        if hint_kinds and not _kinds_compatible(_name_kinds(name), hint_kinds):
             continue
         candidates.append(s)
+    # Reactions (round 8.1, 14 Nov 2026): only single-post
+    # reactions services, in the emoji's family — never a Bot Start
+    # service and never an "Auto … 10 Future Posts" service for a
+    # single post. The emoji may also ride in the hint itself.
+    if _is_reactions_hint(hint, hint_kinds):
+        emoji = reaction_emoji or _reaction_emoji_in_hint(hint)
+        candidates = _reactions_pool(candidates, emoji)
     if cheapest:
         candidates.sort(
             key=lambda s: (
@@ -1786,6 +1831,89 @@ def pick_services(services, platform=None, service_hint=None, limit=3):
             )
         )
     return candidates[:limit]
+
+
+def _kinds_compatible(name_kinds, hint_kinds):
+    """True when a service's kinds fit the hint's kinds. The one
+    exception (round 8.1, 14 Nov 2026): Telegram reactions services
+    are all named "... Reactions + Free Views" — the "views" there
+    is a free bonus, not the metric being bought — so for a
+    reactions request, "views" in the name never disqualifies."""
+    if name_kinds.issubset(hint_kinds):
+        return True
+    if "reactions" in hint_kinds and name_kinds <= {"reactions", "views"}:
+        return True
+    return False
+
+
+# Reaction-type words in a service name, per emoji (round 8.1,
+# 14 Nov 2026). The emoji character itself is never a family word:
+# a "Positive" mix also carries 👍 in its name, so matching on the
+# emoji alone would pick the mix for a thumbs-up order.
+REACTION_FAMILY_WORDS = {
+    "👍": ("thumbs up", "like"),
+    "❤️": ("heart",),
+    "❤": ("heart",),
+    "🔥": ("fire",),
+    "😂": ("tears of joy", "laugh"),
+    "🤣": ("laugh",),
+    "😮": ("wow",),
+    "😢": ("crying",),
+}
+
+
+def _is_reactions_hint(hint, hint_kinds):
+    """True when the request is for reactions ("telegram
+    reactions", "reactions")."""
+    return "reactions" in (hint_kinds or set()) or any(
+        w in ("reaction", "reactions") for w in (hint or "").split()
+    )
+
+
+def _reaction_emoji_in_hint(hint):
+    """The reaction emoji in a hint string, or None."""
+    for emoji in REACTION_EMOJI:
+        if emoji in (hint or ""):
+            return emoji
+    return None
+
+
+def _reactions_pool(candidates, emoji):
+    """Single-post reactions services only, in the emoji's family.
+
+    The NAME must say "reaction" — a category match alone pulls
+    in Bot Start post views ("Telegram Post Views | Reactions |
+    Bot Start"). Nothing named "bot start", and no "Auto … 10
+    Future Posts" service: that reacts to ten future posts, not
+    the one post the user is ordering for. Within the pool the
+    emoji picks the family (👍 -> thumbs up / like, ❤️ -> heart,
+    🔥 -> fire); a generic request gets the Positive mix. When
+    the family has no service, the whole single-post pool is used
+    instead of returning nothing."""
+    pool = []
+    for s in candidates:
+        name = str(s.get("name") or "").lower()
+        if "reaction" not in name:
+            continue
+        if "bot start" in name:
+            continue
+        if name.startswith("auto") or "future post" in name:
+            continue
+        pool.append(s)
+    if not pool:
+        return []
+    if emoji is not None:
+        family = REACTION_FAMILY_WORDS.get(emoji)
+    else:
+        family = ("positive",)
+    if family:
+        matched = [
+            s for s in pool
+            if any(w in str(s.get("name") or "").lower() for w in family)
+        ]
+        if matched:
+            return matched
+    return pool
 
 
 def find_service_by_id(services, service_id):
@@ -4012,7 +4140,10 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
     except Exception as exc:
         log.warning("price lookup failed: %s", exc)
         return None
-    picks = pick_services(services, platform=platform, service_hint=hint, limit=100)
+    picks = pick_services(
+        services, platform=platform, service_hint=hint, limit=100,
+        reaction_emoji=reaction_emoji(text),
+    )
     if not picks:
         return None
     service = picks[0]
@@ -4024,12 +4155,44 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
         except (TypeError, ValueError):
             qty = None
         if qty:
+            _remember_price_question(user_id, platform, hint, qty, text)
             return t(
                 "price_total", lang, service=name, quantity=f"{qty:,}",
                 rate=format_money(rate),
                 total=format_money(estimated_total_etb(rate, qty)),
             )
     return t("price_per_1000", lang, service=name, rate=format_money(rate))
+
+
+def _remember_price_question(user_id: int, platform, hint, qty, text):
+    """Remember what a price question asked about, in the draft
+    (round 8.1, 14 Nov 2026): "how much 1k" names the quantity
+    for the order being built, so the next turn — and the "do you
+    understand" restatement — must not ask "how many" again. Only
+    when no Confirm card is pending and the draft has no link (a
+    price question never hijacks an order already being built). A
+    different metric replaces a link-less draft, the same as a new
+    order does (round 7)."""
+    _cid, pending = pending_for_user(user_id)
+    if pending is not None:
+        return
+    stored = PARTIAL.get(user_id) or {}
+    if stored.get("link"):
+        return
+    stored_metric = _primary_metric(kind_from_text(stored.get("service_hint") or ""))
+    new_metric = _primary_metric(kind_from_text(hint or ""))
+    if not stored or stored_metric is None or stored_metric == new_metric:
+        merged = {k: v for k, v in stored.items() if v is not None}
+        merged.update({
+            "platform": platform, "service_hint": hint, "quantity": qty,
+            "reaction_emoji": reaction_emoji(text) or stored.get("reaction_emoji"),
+        })
+        PARTIAL[user_id] = {k: v for k, v in merged.items() if v is not None}
+    else:
+        PARTIAL[user_id] = {
+            "platform": platform, "service_hint": hint, "quantity": qty,
+            "reaction_emoji": reaction_emoji(text),
+        }
 
 
 def is_ban_question(text: str) -> bool:
@@ -4088,7 +4251,10 @@ async def speed_answer_text(user_id: int, text: str, intent: dict, lang: str):
     except Exception as exc:
         log.warning("speed lookup failed: %s", exc)
         return t("speed_unknown", lang)
-    picks = pick_services(services, platform=platform, service_hint=hint, limit=100)
+    picks = pick_services(
+        services, platform=platform, service_hint=hint, limit=100,
+        reaction_emoji=reaction_emoji(text),
+    )
     if not picks:
         return t("speed_unknown", lang)
     service = picks[0]
@@ -4185,6 +4351,7 @@ async def place_order_now(message, user_id: int, merged: dict, lang: str,
         picks = pick_services(
             services, platform=merged.get("platform"),
             service_hint=merged.get("service_hint"),
+            reaction_emoji=merged.get("reaction_emoji"),
         )
         if not picks:
             return False
@@ -4792,6 +4959,32 @@ def _describe_hint(hint: str, platform: str, user_id: int, text=None) -> str:
     return ""
 
 
+def _recent_quantity(user_id: int, kind):
+    """The quantity the user gave for this metric in their last 3
+    chat messages (round 8.1, 14 Nov 2026): "I want 👍 reaction
+    for my telegram channel post how much 1k" names 1,000, so a
+    later "do you understand what I said first" must restate the
+    1,000 and never ask "how many" again. The metric must match —
+    a quantity given for followers does not carry into a views
+    order. A quantity in a message naming a different metric is
+    ignored, and the search stops at the newest matching one."""
+    load_chat_history()
+    entries = CHAT_HISTORY.get(int(user_id), [])
+    user_texts = [e.get("user", "") for e in entries if e.get("user")]
+    wanted = _primary_metric(kind)
+    for text in reversed(user_texts[-3:]):
+        text_kind = kind_from_text(text)
+        if wanted is not None and text_kind is not None:
+            if _primary_metric(text_kind) != wanted:
+                continue
+        # The text is normalised first: quantity_from_text reads
+        # "1k" only after normalisation expands it to 1000.
+        qty = quantity_from_text(normalize_text(text))
+        if qty:
+            return qty
+    return None
+
+
 def _order_context_summary(user_id: int):
     """What the user is talking about: the pending Confirm card
     first, then the draft being built, then the last thing they
@@ -4828,16 +5021,27 @@ def _order_context_summary(user_id: int):
     user_texts = [e.get("user", "") for e in entries if e.get("user")]
     for text in reversed(user_texts[-3:]):
         kind = kind_from_text(text)
-        qty = quantity_from_text(text)
+        qty = quantity_from_text(normalize_text(text))
         words = set(re.findall(r"[a-z]+", (text or "").lower()))
         platform = next((p for p in _PLATFORMS if p in words), None)
         if kind or platform or qty:
             desc = _describe_hint(kind or "", platform or "", user_id, text)
             links = extract_links(text)
+            # The quantity may live in an earlier message than the
+            # one being restated (the price question named 1,000;
+            # "do you understand" names none) — look back at the
+            # same metric instead of asking "how many" again.
+            if not qty:
+                qty = _recent_quantity(user_id, kind)
+            missing = []
+            if not links:
+                missing.append("link")
+            if not qty:
+                missing.append("quantity")
             return {
                 "desc": desc, "quantity": qty,
                 "link": links[0] if links else None,
-                "missing": ["link"] if not links else [],
+                "missing": missing,
                 "pending": False,
             }
     return None
@@ -4899,18 +5103,39 @@ def explain_asking_text(user_id: int, lang: str) -> str:
     return t("understand_none", lang)
 
 
+def _feeling_ack(text: str, lang: str) -> str:
+    """The human part of a message, acknowledged FIRST (round 8.1,
+    14 Nov 2026): "haha nice, I'm tired today but I need views"
+    is laughter AND tiredness, and the bot must not ignore either
+    and jump straight to tips. Laugh + tired together get the
+    combined line; either one alone gets its own line; nothing
+    felt returns ""."""
+    s = " ".join((text or "").strip().lower().split())
+    laugh = any(w in s for w in ("haha", "lol", "lmao", "hehe")) \
+        or any(e in s for e in ("😂", "🤣"))
+    tired = "tired" in s or "bored" in s
+    if laugh and tired:
+        return t("chat_laugh_tired", lang)
+    if laugh:
+        return t("chat_laugh", lang)
+    if tired:
+        return t("chat_tired", lang)
+    return ""
+
+
 def local_chat_reply(text: str, lang: str) -> str:
     """Warm acknowledgement when the AI is down: keyed by what the
     user said. Never a price, never an order prompt — the caller
-    appends the soft continuation."""
+    appends the soft continuation. The human part comes first
+    (round 8.1, 14 Nov 2026): laugh and tiredness are
+    acknowledged before anything else, so a tired user never gets
+    only tips."""
+    ack = _feeling_ack(text, lang)
+    if ack:
+        return ack
     s = " ".join((text or "").strip().lower().split())
-    if any(w in s for w in ("haha", "lol", "lmao", "hehe")) \
-            or any(e in s for e in ("😂", "🤣")):
-        return t("chat_laugh", lang)
     if "thank" in s or "thx" in s:
         return t("chat_thanks", lang)
-    if "tired" in s or "bored" in s:
-        return t("chat_tired", lang)
     if "happy" in s or "feel good" in s:
         return t("chat_happy", lang)
     if any(p in s for p in (
@@ -5000,6 +5225,14 @@ async def conversation_reply(update, text: str, lang: str, voice: bool = False) 
         general = await answer_general_question(text, lang)
         if general is None:
             general = local_chat_reply(text, lang)
+        else:
+            # The AI answered the content but never acknowledges
+            # the human part (round 8.1, 14 Nov 2026: "haha nice,
+            # I'm tired today" got only video tips) — the feeling
+            # goes first, before the tips or the steering.
+            ack = _feeling_ack(text, lang)
+            if ack and ack not in general:
+                general = ack + " " + general
         await reply_message(
             update.message,
             general + "\n" + chat_continue_note(user_id, lang),
@@ -5575,12 +5808,28 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         picks = pick_services(
             services, platform=merged.get("platform"),
             service_hint=merged.get("service_hint"),
+            reaction_emoji=reaction_emoji(text),
         )
         if not picks:
             await reply_message(update.message, t("no_service", lang), lang, voice=voice)
             return
         service = picks[0]
     error = validate_quantity(merged.get("quantity"), service)
+    if error:
+        await reply_message(
+            update.message,
+            t(
+                "bad_quantity",
+                lang,
+                min=service.get("min"),
+                max=service.get("max"),
+            ),
+            lang,
+            voice=voice,
+        )
+        return
+    # Complete plan: pick the service and show the summary with Confirm.
+    RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
     if error:
         await reply_message(
             update.message,
@@ -5772,7 +6021,8 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 service = found
     if service is None:
         picks = pick_services(
-            services, platform=merged.get("platform"), service_hint=merged.get("service_hint")
+            services, platform=merged.get("platform"), service_hint=merged.get("service_hint"),
+            reaction_emoji=merged.get("reaction_emoji"),
         )
         if not picks:
             await reply_message(message, t("no_service", lang), lang, voice=voice)
@@ -6828,6 +7078,67 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if await conversation_reply(update, text, lang, voice=voice):
         return
 
+    # A bare reaction emoji (round 8.1, 14 Nov 2026): "👍" is a
+    # reply, not a new order — it is the reaction the user wants.
+    # Only a message that IS just the emoji takes this branch: a
+    # full order message that merely contains one ("I want 👍
+    # reactions for … 1000") goes through the order flow as usual.
+    # In a reactions order context (a reactions draft is being
+    # built, or a reactions Confirm card is pending) it is
+    # acknowledged as that choice first, then the link is asked
+    # for, and it is stored in the draft so the picker matches
+    # the family. With no order context at all it gets a natural
+    # reply, never the stock link request on its own — and the
+    # draft is still started (service_hint "reactions"), so the
+    # link the user sends next completes a reactions order. A bare
+    # emoji while a NON-reactions order is being built is just an
+    # acknowledgement — it falls through to the normal flow, it
+    # never hijacks that order into reactions. (It runs before
+    # reply_or_bare_intent so the emoji is never misread as a
+    # service search.)
+    emoji = reaction_emoji(text)
+    _bare_emoji = (
+        emoji is not None
+        and (text or "").strip().replace("\ufe0f", "")
+        == emoji.replace("\ufe0f", "")
+    )
+    if _bare_emoji:
+        _cid, _pending = pending_for_user(user.id)
+        _stored = PARTIAL.get(user.id) or {}
+        _is_reactions_pending = _pending is not None and "reaction" in (
+            short_service_name((_pending.get("service") or {}).get("name"))
+            + " "
+            + str((_pending.get("service") or {}).get("category") or "")
+        ).lower()
+        _is_reactions_draft = "reaction" in (
+            _stored.get("service_hint") or ""
+        ).lower()
+        if _is_reactions_pending or _is_reactions_draft:
+            if _is_reactions_draft:
+                _stored["reaction_emoji"] = emoji
+                PARTIAL[user.id] = {
+                    k: v for k, v in _stored.items() if v is not None
+                }
+            await reply_message(
+                update.message,
+                t("emoji_ack_order", lang, emoji=emoji),
+                lang, voice=voice,
+            )
+            return
+        if _pending is None and not _stored:
+            PARTIAL[user.id] = {
+                "service_hint": "reactions", "reaction_emoji": emoji,
+            }
+            await reply_message(
+                update.message,
+                t(
+                    "emoji_ack_fresh", lang, emoji=emoji,
+                    meaning=EMOJI_MEANINGS.get(emoji, ""),
+                ),
+                lang, voice=voice,
+            )
+            return
+
     # Bare-quantity answers and replies to the bot's questions are
     # read before the classifier, so "1000 please" after "How many?"
     # (or "1000" replied TO that message) completes the order
@@ -7385,7 +7696,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         stored = {}
     merged = {}
     for key in ("platform", "service_hint", "link", "quantity", "service_id",
-                "named_by_id"):
+                "named_by_id", "reaction_emoji"):
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
 
@@ -7398,7 +7709,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # of the same metric ("likes for my comment" is still likes)
     # does not reset.
     metric_changed = False
-    _new_kind = kind_from_text(text) or kind_from_text(
+    # A bare emoji carries no words (round 8.1, 14 Nov 2026): its
+    # emoji-only kind ("👍" -> "reactions") must not wipe a draft
+    # being built for another metric, or rewrite that draft's
+    # kind. The emoji fallback in kind_from_text only counts when
+    # the message also has words naming a kind — or when the AI's
+    # hint names one.
+    _text_has_words = any(ch.isalpha() for ch in (text or ""))
+    _new_kind = (kind_from_text(text) if _text_has_words else None) or kind_from_text(
         intent.get("service_hint") or ""
     )
     _stored_kind = kind_from_text(stored.get("service_hint") or "")
@@ -7412,7 +7730,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         stored = {}
         metric_changed = True
         for key in ("platform", "service_hint", "link", "quantity",
-                    "service_id", "named_by_id"):
+                    "service_id", "named_by_id", "reaction_emoji"):
             merged[key] = intent.get(key)
 
     # A bare number right before the metric ("200 TikTok views") is
@@ -7446,8 +7764,9 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # comment-likes request, and the fastest pick would then be a
     # video-likes service. When the message itself names a kind the
     # hint does not carry, the message wins — the hint is rewritten
-    # to the kind the user actually asked for.
-    kind = kind_from_text(text)
+    # to the kind the user actually asked for. A bare emoji names
+    # no kind in words (round 8.1), so it never rewrites the hint.
+    kind = kind_from_text(text) if _text_has_words else None
     if kind is not None:
         kind_words = {
             _canonical_metric(w) for w in kind.split()
@@ -7461,6 +7780,18 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             merged["service_hint"] = (
                 f"{platform} {kind}" if platform else kind
             )
+
+    # The reaction emoji being ordered rides in the draft (round
+    # 8.1, 14 Nov 2026): the service picker matches the exact
+    # family (👍 -> thumbs up / like) instead of guessing. It comes
+    # from this message first, else from the stored draft, and is
+    # dropped when the order stops being about reactions.
+    if "reaction" in (merged.get("service_hint") or "").lower():
+        merged["reaction_emoji"] = (
+            reaction_emoji(text) or stored.get("reaction_emoji")
+        )
+    else:
+        merged["reaction_emoji"] = None
 
     # A service the user named: Gemini's service_id first, the local
     # ID regex as fallback ("service 6139", "#6139", a bare "6139").
@@ -7727,6 +8058,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             picks = pick_services(
                 services, platform=stored.get("platform"),
                 service_hint=stored.get("service_hint"),
+                reaction_emoji=stored.get("reaction_emoji"),
             ) if services else []
             if picks:
                 service = picks[0]
@@ -7750,7 +8082,18 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 return
     if not merged.get("link"):
         PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
-        await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
+        # The emoji was the reaction choice (round 8.1, 14 Nov
+        # 2026): acknowledge it first, then ask for the link —
+        # never the stock link line on its own.
+        _emoji = merged.get("reaction_emoji")
+        if _emoji and "reaction" in (merged.get("service_hint") or "").lower():
+            await reply_message(
+                update.message,
+                t("emoji_ack_order", lang, emoji=_emoji),
+                lang, voice=voice,
+            )
+        else:
+            await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
         return
     if not merged.get("quantity"):
         PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
