@@ -4,7 +4,7 @@ This file is the bot's memory of everything its owner taught it. If the bot
 ever has to be rebuilt from scratch, read this file first: it holds every
 rule, fact and behaviour the owner set, so the rebuild learns fast.
 Source of truth for behaviour is `bot.py`; this file is the human-readable
-record of *why* it behaves that way. Last updated: 14 Nov 2026 (next batch: reseller/contact + never-drop).
+record of *why* it behaves that way. Last updated: 14 Nov 2026 (paused services: CapCut Pro, Canva Pro, SMS OTP).
 
 ## Who Paxyo is
 - Paxyo is an Ethiopian service for ordering followers, likes, views,
@@ -84,6 +84,16 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (next batch: rese
   Telegram followers/members...) — for those the terms stand
   (results not guaranteed permanent, drops may occur; refunds to
   Paxyo balance only). Never volunteer the claim unprompted.
+- PAUSED SERVICES (owner, 14 Nov 2026): cheap premium
+  subscriptions (CapCut Pro, Canva Pro, Netflix/Spotify premium,
+  ...) and SMS OTP verification are PAUSED. When a user ASKS for
+  any of them, say that one is paused right now and we will let
+  them know when it's ready. No date, no price, never "available",
+  never offer a social-media service instead. Never volunteer or
+  advertise them — greetings and help never mention them. A
+  message naming a social-media metric ("premium followers",
+  "Spotify followers") is an ORDER, not a paused ask; "Telegram
+  Premium" is a real Bot Start service, not a paused one.
 - TERMS: answer from `paxyo-terms.md` (the real Paxyo Terms &
   Conditions). If the terms don't cover a question, say so and offer
   support. Full terms live on paxyo.et.

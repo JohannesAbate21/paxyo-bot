@@ -300,6 +300,12 @@ Rules:
     contact the owner or admin, or asks who runs Paxyo ("I need
     support", "let me talk to a human", "how do I contact you",
     "who is the owner", "who runs Paxyo").
+  - "paused_services": the user asks for a premium subscription
+    (CapCut Pro, Canva Pro, Netflix, Spotify or similar) or for SMS
+    OTP verification / an OTP number. Those services are paused:
+    say so and that we will let them know when they are ready.
+    Never promise a date or a price, never say they are available,
+    and never offer a social-media service instead.
   - "usual": the user wants their usual order again ("give me the
     usual", "the usual please", "same as usual", "same thing as
     yesterday"). Fill quantity_multiplier when they want it scaled
@@ -869,6 +875,22 @@ TEXT = {
     "never_drop": {
         "am": "{service} በጭራሽ አይቀነሱም — ከደረሱ በኋላ ይቆያሉ።",
         "en": "{service} never drop — once they are delivered, they stay.",
+    },
+    # Premium subscriptions (CapCut Pro, Canva Pro, Netflix/Spotify
+    # premium, ...) and the SMS OTP verification service are PAUSED
+    # (owner, 14 Nov 2026). Asked for any of them, the bot says so
+    # in one short line — no date, no price, never "available", and
+    # never a social-media service offered instead. Only ever given
+    # when asked; never volunteered in greetings, help or order
+    # flows.
+    "paused_services": {
+        "am": (
+            "ይህ service በአሁኑ ጊዜ ቆሟል — ሲዘጋጅ እናሳውቅዎታለን።"
+        ),
+        "en": (
+            "That one is paused right now — we will let you know "
+            "when it's ready."
+        ),
     },
     # Messy real-world inputs (owner edge-case spec, 13 Nov 2026):
     # short answers for goal/budget/trust/adversarial questions, and
@@ -3190,6 +3212,12 @@ def local_intent(text: str) -> dict:
         intent["intent"] = "reseller"
     elif is_contact_request(text):
         intent["intent"] = "contact"
+    elif is_paused_services_request(text):
+        # Paused services, 14 Nov 2026: before the order fallback —
+        # "I want CapCut Pro" has no platform/metric, but "I want
+        # premium followers" must still fall through to order (the
+        # guard already excludes metric words).
+        intent["intent"] = "paused_services"
     elif (
         links
         or intent["quantity"] is not None
@@ -3221,7 +3249,7 @@ async def extract_intent(text: str, user_id: int = None) -> dict:
     "split": ...}. intent is one of order, recurring, schedules,
     stop_schedule, balance, orders, deposit, deposit_status, help,
     how_to_order, miniapp, social, greeting, paxyo_info,
-    source_question, reseller, contact, usual, goal, budget, batch,
+    source_question, reseller, contact, paused_services, usual, goal, budget, batch,
     change_order, refill, split_payment, max_for_balance, discount,
     safety, refund_policy, geo_target, free_sample, price_pushback,
     content_help, support_issue, cancel, off_topic, unclear — or
@@ -5720,6 +5748,49 @@ def is_contact_request(text: str) -> bool:
     return any(p in s for p in _CONTACT_REQUEST_PATTERNS)
 
 
+# Premium subscriptions (CapCut Pro, Canva Pro, ...) and the SMS OTP
+# verification service are PAUSED (owner, 14 Nov 2026). The guard
+# matches the brand names and the OTP-service phrasing — but never a
+# message that names a social-media metric: "premium followers",
+# "Spotify followers" and "Telegram Premium members" are real orders
+# (the catalogue has 293 "premium" services and Spotify
+# followers/likes), and "Telegram Premium" on its own is a Bot Start
+# service. CapCut/Canva/Netflix/OTP have no services in the
+# catalogue, so the bare brand names are safe. The metric check is
+# word-based on plurals only: "I would like CapCut Pro" must still
+# match (the verb "like" is not the metric "likes").
+_PAUSED_SERVICES_PATTERNS = (
+    "capcut", "canva", "netflix",
+    "spotify premium", "youtube premium",
+    "premium subscription", "premium subscriptions",
+    "cheap premium", "buy premium", "get premium", "want premium",
+    "need premium", "sell premium", "do you sell premium",
+    "do you have premium",
+    "sms otp", "otp verification", "otp number", "otp code",
+    "otp service", "sms verification",
+    "buy otp", "need otp", "want otp", "get otp", "otp for",
+    "otp to verify",
+)
+_PAUSED_METRIC_WORDS = (
+    "followers", "likes", "views", "comments", "subscribers",
+    "reactions", "members", "shares", "saves",
+)
+
+
+def is_paused_services_request(text: str) -> bool:
+    """True when the user asks for a paused service — a premium
+    subscription or SMS OTP verification. False for anything that
+    names a social-media metric (that is an order) or Telegram
+    Premium (a real Bot Start service)."""
+    s = " ".join((normalize_text(text or "")).strip().lower().split())
+    if "telegram premium" in s:
+        return False
+    words = set(re.findall(r"[a-z]+", s))
+    if words & set(_PAUSED_METRIC_WORDS):
+        return False
+    return any(p in s for p in _PAUSED_SERVICES_PATTERNS)
+
+
 # Which services never drop (owner, 14 Nov 2026): ONLY Telegram
 # reactions, Telegram views and Facebook reactions. Every other
 # service keeps the terms language — results not guaranteed
@@ -7174,7 +7245,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     - Gemini first classifies the message (order, recurring, schedules,
       stop_schedule, balance, orders, deposit, deposit_status,
       how_to_order, miniapp, social, help, greeting,
-      paxyo_info, source_question, reseller, contact, usual, goal,
+      paxyo_info, source_question, reseller, contact, paused_services, usual, goal,
       budget, batch, change_order, refill, split_payment,
       max_for_balance, discount, safety, refund_policy, geo_target,
       free_sample, price_pushback, content_help, support_issue,
@@ -7281,6 +7352,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if intent is None and is_contact_request(text):
         await reply_message(
             update.message, t("contact_owner", lang), lang, voice=voice
+        )
+        return
+
+    # Premium subscriptions and SMS OTP verification are paused
+    # (owner, 14 Nov 2026): answer at once, without calling Gemini,
+    # and before free-chat handling — "do you sell CapCut Pro" must
+    # not become a generic chat reply or an order. One short line,
+    # no date, no price, never a social-media service instead.
+    if intent is None and is_paused_services_request(text):
+        await reply_message(
+            update.message, t("paused_services", lang), lang, voice=voice
         )
         return
 
@@ -7836,6 +7918,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reply_message(
             update.message,
             with_pending_note(user.id, lang, t("contact_owner", lang)),
+            lang, voice=voice,
+        )
+        return
+    if intent_type == "paused_services":
+        # Premium subscriptions and SMS OTP verification are paused
+        # (owner, 14 Nov 2026): one short line, repeated as-is if
+        # they ask again. No date, no price, never a social-media
+        # service offered instead.
+        await reply_message(
+            update.message,
+            with_pending_note(user.id, lang, t("paused_services", lang)),
             lang, voice=voice,
         )
         return

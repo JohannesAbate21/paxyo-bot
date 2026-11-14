@@ -9261,5 +9261,229 @@ class TestNextBatchContactResellerNeverDrop(unittest.IsolatedAsyncioTestCase):
         self.assertIn("refill", msg.text_sent[0].lower())
 
 
+class TestPausedServices(unittest.IsolatedAsyncioTestCase):
+    """Paused services (owner, 14 Nov 2026): cheap premium
+    subscriptions (CapCut Pro, Canva Pro, ...) and SMS OTP
+    verification are paused. Asked for any of them, the bot says so
+    in one short line — no date, no price, never "available", never
+    a social-media service instead, and never volunteered."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _send(self, text, intent, paxyo=None, ai_reply=_UNSET):
+        from contextlib import ExitStack
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        patches = [
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ),
+            mock.patch("bot.paxyo", paxyo or FakePaxyo()),
+            mock.patch("bot.speak_reply"),
+        ]
+        if ai_reply is not _UNSET:
+            patches.append(mock.patch(
+                "bot.ai_generate",
+                new=mock.AsyncMock(return_value=ai_reply),
+            ))
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _send_local(self, text, paxyo=None):
+        # intent=None: the local guard must answer without Gemini —
+        # extract_intent raises if it is ever called.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("extract_intent must not be called")
+            ),
+        ), mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    def test_prompt_has_paused_services_intent(self):
+        self.assertIn('"paused_services"', bot.SYSTEM_PROMPT)
+        self.assertIn("CapCut Pro", bot.SYSTEM_PROMPT)
+        self.assertIn("Canva Pro", bot.SYSTEM_PROMPT)
+        self.assertIn("OTP", bot.SYSTEM_PROMPT)
+
+    async def test_capcut_pro_local(self):
+        msg = await self._send_local("I want CapCut Pro")
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_canva_pro_local(self):
+        msg = await self._send_local("do you sell Canva Pro")
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_generic_premium_subscriptions_local(self):
+        msg = await self._send_local(
+            "do you sell cheap premium subscriptions"
+        )
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_netflix_premium_local(self):
+        msg = await self._send_local("can I get Netflix premium")
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_spotify_premium_local(self):
+        msg = await self._send_local("can I get Spotify premium")
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_sms_otp_local(self):
+        msg = await self._send_local("I need SMS OTP verification")
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_otp_number_local(self):
+        msg = await self._send_local("OTP number for verification")
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_would_like_capcut_local(self):
+        # The verb "like" is not the metric "likes": the guard
+        # must still fire.
+        msg = await self._send_local("I would like CapCut Pro")
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_paused_services_intent_routed(self):
+        msg = await self._send(
+            "I want CapCut Pro", intent_of("paused_services")
+        )
+        self.assertEqual(msg.text_sent, [bot.t("paused_services", "en")])
+
+    async def test_paused_repeated_is_same_short_line(self):
+        first = await self._send(
+            "I want CapCut Pro", intent_of("paused_services")
+        )
+        second = await self._send(
+            "do you sell Canva Pro", intent_of("paused_services")
+        )
+        self.assertEqual(first.text_sent, [bot.t("paused_services", "en")])
+        self.assertEqual(second.text_sent, [bot.t("paused_services", "en")])
+
+    def test_paused_answer_has_no_date_or_price(self):
+        reply = bot.t("paused_services", "en")
+        self.assertIn("paused", reply.lower())
+        self.assertIn("when it's ready", reply.lower())
+        self.assertNotIn("available", reply.lower())
+        # No date, no price, no number at all.
+        self.assertFalse(any(ch.isdigit() for ch in reply), reply)
+
+    def test_amharic_template(self):
+        reply = bot.t("paused_services", "am")
+        self.assertTrue(reply)
+        self.assertNotEqual(reply, bot.t("paused_services", "en"))
+        self.assertIn("ቆሟል", reply)
+        self.assertFalse(any(ch.isdigit() for ch in reply), reply)
+
+    def test_is_paused_services_request_negatives(self):
+        for text in (
+            "I want 1k TikTok views",
+            "how much are 1000 views",
+            "I want to resell",
+            "I need support",
+            "do you sell followers?",
+            "I want premium followers",
+            "I want Spotify followers",
+            "I want Telegram Premium members",
+            "I want Telegram Premium",
+            "I want premium views for my video",
+        ):
+            self.assertFalse(bot.is_paused_services_request(text), text)
+
+    def test_local_intent_routes_paused_not_order(self):
+        self.assertEqual(
+            bot.local_intent("I want CapCut Pro")["intent"],
+            "paused_services",
+        )
+        self.assertEqual(
+            bot.local_intent("I want 1k TikTok views")["intent"], "order"
+        )
+        # A metric word makes it an order, not a paused ask.
+        self.assertEqual(
+            bot.local_intent("I want premium followers")["intent"],
+            "order",
+        )
+
+    async def test_order_message_never_gets_paused_answer(self):
+        msg = await self._send(
+            "I want 1k TikTok views", intent_of("order"),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertNotIn("paused", msg.text_sent[0].lower())
+
+    async def test_price_question_never_gets_paused_answer(self):
+        msg = await self._send(
+            "how much are 1000 TikTok views", intent_of("paxyo_info"),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertNotIn("paused", msg.text_sent[0].lower())
+        self.assertIn("ETB", msg.text_sent[0])
+
+    async def test_reseller_and_contact_keep_their_answers(self):
+        reseller = await self._send_local("I want to resell")
+        self.assertEqual(
+            reseller.text_sent, [bot.t("reseller_contact", "en")]
+        )
+        contact = await self._send_local("I need support")
+        self.assertEqual(
+            contact.text_sent, [bot.t("contact_owner", "en")]
+        )
+
+    def test_greeting_and_help_never_mention_paused_services(self):
+        for key in ("greeting", "help"):
+            for lang in ("en", "am"):
+                text = bot.t(key, lang).lower()
+                self.assertNotIn("paused", text, key)
+                self.assertNotIn("capcut", text, key)
+                self.assertNotIn("canva", text, key)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -873,3 +873,35 @@ Owner instructions, built after round 8.1 settled:
   vanish too).
 
 546 tests: 511 existing + 35 new, all passing.
+
+## Paused services (14 Nov 2026 — CapCut Pro, Canva Pro, SMS OTP)
+
+Owner instruction: Paxyo used to offer cheap premium
+subscriptions (CapCut Pro, Canva Pro, ...) and an SMS OTP
+verification service — both are PAUSED now. When a user asks for
+any of them ("I want CapCut Pro", "do you sell Canva Pro",
+"cheap premium subscriptions", "can I get Netflix/Spotify
+premium", "I need SMS OTP verification", "OTP number for
+verification"), the bot answers in one short line: that one is
+paused right now, we will let you know when it's ready. No date,
+no price, never "available", and never a social-media service
+offered instead. Asking again just repeats the same line.
+
+New `paused_services` intent in the classifier prompt,
+`is_paused_services_request` local guard (runs before the
+classifier, like the reseller/contact guards) and a `local_intent`
+branch before the order fallback. The guard is deliberately
+narrow: it matches the brand names (capcut, canva, netflix,
+"spotify premium", "youtube premium", "premium subscription(s)")
+and OTP-service phrasing — but never a message that names a
+social-media metric ("premium followers", "Spotify followers",
+"premium views" are real orders) and never "Telegram Premium"
+(a real Bot Start service; the catalogue has 293 "premium"
+services, mostly Telegram Premium members, plus Spotify
+followers/likes — CapCut/Canva/Netflix/OTP have none). The metric
+check is word-based on plurals only, so "I would like CapCut Pro"
+still matches (the verb "like" is not the metric "likes"). The
+paused answer is never volunteered: greetings and help never
+mention these services.
+
+565 tests: 546 existing + 19 new, all passing.
