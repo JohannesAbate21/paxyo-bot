@@ -54,6 +54,20 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   NEW Confirm card — never the old card unchanged — and the old
   card is dropped so its buttons cannot place the old service.
   The link and quantity come from the pending order.
+- WHY THE CORRECTION ONCE FAILED LIVE (14 Nov 2026, check 5b):
+  the first fix's helper worked, but it was unreachable live: the
+  AI classifier carries the pending order's quantity (10) forward
+  from conversation history, so "I want only ❤️ reaction" arrived
+  as a change_order WITH quantity=10, and the quantity-change path
+  re-issued the same Pray card with "Quantity updated: 10" before
+  the correction was ever checked. RULE: a quantity counts as a
+  quantity change ONLY when the user typed it in THIS message
+  (grounded in the text) — an AI-carried quantity is never a
+  change. The correction is checked through that rule in both the
+  change_order handler and the inline quantity-change branch.
+  The old card message is also DELETED now (its id is stored on
+  the pending order when the card is sent), not just popped from
+  state — before this fix both cards stayed stacked in the chat.
 - A QUANTITY REJECTION NAMES THE SERVICE (owner, 14 Nov 2026):
   "For [service name], quantity must be between X and Y, and a
   multiple of 10." — so a changing limit always makes sense to the
@@ -136,8 +150,13 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   and add: the sooner we place the order, the sooner it will be completed
   — let's order now. Never the vague "shown before you confirm" line.
 - WEBSITE: when asked about the website, always mention paxyo.et.
-- BANNED / SHADOWBANNED: answer NO — anybody can buy followers for you,
-  so your account can't be banned or shadowbanned for it without your permission.
+- BANNED / SHADOWBANNED: answer YES, it can happen — anybody can
+  buy followers, likes or views for your account without your
+  permission, and TikTok can shadowban or strike/ban an account
+  over fake followers, likes or views. (Owner, 14 Nov 2026 —
+  REVERSING the 13 Nov NO answer "you can't be banned without
+  your permission", which the 16:42 live retest had just
+  confirmed; that check is now outdated.)
 - CONTACT: when a customer asks for support, to talk to a human, or
   to contact the owner/admin, answer: contact William at t.me/paxyo.
   Same one line if they ask again. (Owner, 14 Nov 2026 — this
@@ -172,9 +191,12 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   a user against buying them, NEVER says "avoid buying fake
   followers" or anything like it. The system prompt forbids it, and
   any such line the AI writes anyway is stripped from the reply
-  before it is sent. The ban question keeps its established answer
-  only: "No — anybody can buy followers for you, so you can't be
-  banned without your permission."
+  before it is sent. The ban question is NOT a lecture — it gets
+  the owner's stated fact only: "Yes — it can happen. Anyone can
+  buy followers, likes or views for your account without your
+  permission, and TikTok can shadowban or strike/ban an account
+  over fake followers, likes or views." (14 Nov 2026, reversing
+  the 13 Nov NO answer.)
 - PRICE ALWAYS (owner, 14 Nov 2026): a price question NEVER gets a
   free AI reply without a price. Price detection runs before the
   free-answer paths; if a service can be named, the deterministic

@@ -352,9 +352,10 @@ PAXYO_KNOWLEDGE = """Facts about Paxyo:
   example TikTok views usually start within 1 minute. Never say the
   time is only shown before confirming: give the real time and nudge
   the user to order now.
-- Banned or shadowbanned? No — anybody can buy followers for you, so
-  your account can't be banned or shadowbanned for it without your
-  permission.
+- Banned or shadowbanned? Yes, it can happen — anybody can buy
+  followers, likes or views for your account without your
+  permission, and TikTok can shadowban or strike/ban an account
+  over fake followers, likes or views.
 - Terms: refunds go back to Paxyo balance only, never to a bank
   account or mobile money; Paxyo balance can't be withdrawn as cash;
   orders can't be cancelled or changed once processing has started;
@@ -1258,12 +1259,14 @@ TEXT = {
             "order it."
         ),
     },
-    # Ban / shadowban (owner, 13 Nov 2026): the answer is NO, with his
-    # reasoning. This replaces the old "no zero-risk guarantee" line
-    # for this specific question.
-    "ban_no": {
-        "am": "አይ — ማንም ሰው ለእርስዎ followers መግዛት ይችላል፣ ስለዚህ ያለእርስዎ ፈቃድ accountዎ ሊታገድ ወይም shadow ban ሊደረግበት አይችልም።",
-        "en": "No — anybody can buy followers for you, so your account can't be banned or shadowbanned for it without your permission.",
+    # Ban / shadowban (owner, 14 Nov 2026, REVERSING the 13 Nov NO
+    # answer): the answer is YES, it can happen — anyone can buy
+    # followers for you without your permission and get you banned
+    # or shadowbanned; TikTok treats fake followers, likes and
+    # views as grounds for a shadowban, a strike, or a ban.
+    "ban_yes": {
+        "am": "አዎ — ሊከሰት ይችላል። ማንም ሰው ያለእርስዎ ፈቃድ ለaccountዎ followers፣ likes ወይም views መግዛት ይችላል፤ TikTok ደግሞ በሐሰተኛ followers፣ likes ወይም views ምክንያት accountዎን shadow ban ማድረግ፣ strike መስጠት ወይም ማገድ ይችላል።",
+        "en": "Yes — it can happen. Anyone can buy followers, likes or views for your account without your permission, and TikTok can shadowban or strike/ban an account over fake followers, likes or views.",
     },
     # How to get the link of a Telegram post (owner, 14 Nov 2026):
     # a DETERMINISTIC answer — the AI kept getting it wrong
@@ -4005,6 +4008,11 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
     translation sends the English reply as-is. The English original
     is what goes into the conversation history, so the AI keeps
     reading English there.
+
+    Returns the sent message (or None when the send produced none),
+    so a caller that shows a Confirm card can remember the card's
+    message id for later deletion (a replaced card is dropped, not
+    left stacked in the chat).
     """
     out_text, out_lang = text, lang
     _target = _BRIDGE_LANG.get()
@@ -4019,15 +4027,16 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
         ogg = await speak_reply(out_text, out_lang)
         if ogg:
             try:
-                await message.reply_voice(
+                sent = await message.reply_voice(
                     voice=InputFile(io.BytesIO(ogg), filename="reply.ogg")
                 )
                 _record_bot_reply(text)
-                return
+                return sent
             except Exception as exc:
                 log.warning("reply_voice failed, falling back to text: %s", exc)
-    await message.reply_text(out_text, reply_markup=reply_markup)
+    sent = await message.reply_text(out_text, reply_markup=reply_markup)
     _record_bot_reply(text)
+    return sent
 
 
 # ------------------------------------------------------------ bot state ----
@@ -4245,7 +4254,9 @@ OFF_TOPIC_COUNT = {}  # telegram_id -> consecutive off-topic turns
 # free answers sometimes do exactly that ("avoid buying fake
 # followers"), so the rule is in every free-answer prompt AND in a
 # sanitizer that strips any such sentence if the AI still writes
-# one. The ban answer keeps the owner's established NO line.
+# one. The ban answer keeps the owner's YES line (14 Nov 2026,
+# reversing the 13 Nov NO line) — it states the fact for the ban
+# question specifically and is not a lecture.
 _MORALIZING_RES = (
     re.compile(
         r"avoid\s+(buying\s+)?(fake\s+)?(followers|likes|views|members|reactions)",
@@ -7150,7 +7161,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
     PARTIAL.pop(user_id, None)  # the order now lives in PENDING
     BUDGET_OPTIONS.pop(user_id, None)  # a budget choice is spent now
     DEPOSIT_DRAFT.pop(user_id, None)  # a half-built deposit is stale now
-    PENDING[confirm_id] = {
+    _pending_entry = {
         "user_id": user_id,
         "service": service,
         "link": merged["link"],
@@ -7158,14 +7169,16 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         "total": total,
         "full_name": show_full_name,
     }
+    PENDING[confirm_id] = _pending_entry
     # Confirm card: always text — a voice message cannot carry buttons.
-    await reply_message(
+    _sent = await reply_message(
         message,
         confirm_card_text(lang, service, quantity, total, merged["link"],
                           note=note, full_name=show_full_name),
         lang,
         reply_markup=confirm_keyboard(confirm_id),
     )
+    _remember_card_message(_pending_entry, message, _sent)
     return True
 
 
@@ -7714,6 +7727,45 @@ def _is_quantity_change(text, merged, pending):
     return True
 
 
+def _remember_card_message(pending, user_message, sent):
+    """Remember which Telegram message carries a Confirm card, on
+    the PENDING entry itself: the chat id from the user's message
+    and the message id from the sent card. A later replacement
+    (a reaction correction, a quantity change) deletes that message
+    instead of leaving a stale card stacked in the chat. Missing
+    ids are simply not stored — deletion is best effort."""
+    if not isinstance(pending, dict):
+        return
+    chat_id = getattr(user_message, "chat_id", None)
+    message_id = getattr(sent, "message_id", None)
+    if chat_id is not None:
+        pending["chat_id"] = chat_id
+    if message_id is not None:
+        pending["message_id"] = message_id
+
+
+async def drop_pending_card(update, pending):
+    """Delete the Confirm card message of a pending order, best
+    effort. Called when the card is replaced (a reaction
+    correction) so its buttons cannot place the old service. The
+    PENDING entry is popped by the caller either way; a failed
+    delete (message too old, no rights, no stored id) is logged,
+    never fatal — the old buttons are dead once the entry is
+    gone."""
+    message_id = (pending or {}).get("message_id")
+    chat_id = (pending or {}).get("chat_id")
+    if not message_id or not chat_id:
+        return
+    try:
+        bot = update.message.get_bot()
+    except Exception:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        log.warning("dropping old card failed: %s", exc)
+
+
 async def try_reaction_correction(update, text, lang, voice=False):
     """A different reaction emoji for the order already awaiting
     Confirm ("I want only 🙏 reaction") re-picks the service for
@@ -7781,13 +7833,18 @@ async def try_reaction_correction(update, text, lang, voice=False):
     )
     _new_id = uuid.uuid4().hex[:12]
     PENDING.pop(_cid, None)
-    PENDING[_new_id] = {
+    _new_pending = {
         "user_id": user.id, "service": _service,
         "link": _pending["link"], "quantity": _new_qty,
         "total": _new_total,
         "full_name": _pending.get("full_name", False),
     }
-    await reply_message(
+    PENDING[_new_id] = _new_pending
+    # The old card goes first, so the chat never shows two live
+    # cards for one order (live bug, 14 Nov 2026: both Pray cards
+    # stayed stacked, each with its own Confirm/Cancel).
+    await drop_pending_card(update, _pending)
+    _sent = await reply_message(
         update.message,
         confirm_card_text(
             lang, _service, _new_qty, _new_total, _pending["link"],
@@ -7797,6 +7854,7 @@ async def try_reaction_correction(update, text, lang, voice=False):
         lang,
         reply_markup=confirm_keyboard(_new_id),
     )
+    _remember_card_message(_new_pending, update.message, _sent)
     return True
 
 
@@ -7812,6 +7870,17 @@ async def handle_change_order(update, text, intent, lang, voice=False):
     try:
         new_qty = int(new_qty) if new_qty is not None else None
     except (TypeError, ValueError):
+        new_qty = None
+    if new_qty is not None and not _quantity_grounded_in_text(text, new_qty):
+        # The classifier carries the pending order's quantity
+        # forward from conversation history (live bug, 14 Nov
+        # 2026: "I want only ❤️ reaction" arrived as a
+        # change_order with quantity=10, and the quantity path
+        # re-issued the same Pray card instead of the emoji
+        # correction running). A quantity the user did not type
+        # in this message is not a quantity change — drop it, so
+        # the number extraction below and the correction check
+        # see only what this message actually said.
         new_qty = None
     if new_qty is None:
         # "change the quantity from 5,000 to 2,000": the last number
@@ -7849,7 +7918,7 @@ async def handle_change_order(update, text, intent, lang, voice=False):
         pending["total"] = estimated_total_etb(
             float(service.get("rate_etb_per_1000", 0)), new_qty
         )
-        await reply_message(
+        _sent = await reply_message(
             update.message,
             confirm_card_text(
                 lang, service, new_qty, pending["total"], pending["link"],
@@ -7859,6 +7928,7 @@ async def handle_change_order(update, text, intent, lang, voice=False):
             lang,
             reply_markup=confirm_keyboard(confirm_id),
         )
+        _remember_card_message(pending, update.message, _sent)
         return
     partial = PARTIAL.get(user.id)
     if partial:
@@ -8567,7 +8637,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await reply_message(update.message, price, lang, voice=voice)
             return
     if is_ban_question(text):
-        await reply_message(update.message, with_pending_note(user.id, lang, t("ban_no", lang)), lang, voice=voice)
+        await reply_message(update.message, with_pending_note(user.id, lang, t("ban_yes", lang)), lang, voice=voice)
         return
     _never_drop = never_drop_kind(
         text, intent.get("platform"), intent.get("service_hint")
@@ -9303,11 +9373,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # service are already known, so the bot never asks for the link
     # again (13 Nov 2026 — it did ask, and the user had to paste the
     # link a second time). A different platform or kind is a new
-    # order, not a change, and still asks for its link.
+    # order, not a change, and still asks for its link. The quantity
+    # must be typed in THIS message (live bug, 14 Nov 2026: the AI
+    # carried the pending quantity forward from history, so an emoji
+    # switch arrived with quantity=10 and re-issued the same card
+    # here instead of reaching the correction below).
     if not merged.get("link") and merged.get("quantity"):
         _cid, _pending = pending_for_user(user.id)
-        if _pending is not None and _is_quantity_change(
-            text, merged, _pending
+        if (
+            _pending is not None
+            and _is_quantity_change(text, merged, _pending)
+            and _quantity_grounded_in_text(text, merged["quantity"])
         ):
             service = _pending["service"]
             new_qty = int(merged["quantity"])
@@ -9327,7 +9403,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             _pending["total"] = estimated_total_etb(
                 float(service.get("rate_etb_per_1000", 0)), new_qty
             )
-            await reply_message(
+            _sent = await reply_message(
                 update.message,
                 confirm_card_text(
                     lang, service, new_qty, _pending["total"],
@@ -9338,6 +9414,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 lang,
                 reply_markup=confirm_keyboard(_cid),
             )
+            _remember_card_message(_pending, update.message, _sent)
             return
 
     # A different reaction emoji for the order already awaiting

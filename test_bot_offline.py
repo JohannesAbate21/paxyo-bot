@@ -219,6 +219,24 @@ class TestPrompt(unittest.TestCase):
         self.assertIn("platform", prompt)
 
 
+class FakeMessageBot:
+    """Stand-in for telegram.Bot as seen from a message, recording
+    deleted messages."""
+
+    def __init__(self):
+        self.deleted = []
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted.append((chat_id, message_id))
+
+
+class FakeSentMessage:
+    """Stand-in for a sent telegram.Message (only its id matters)."""
+
+    def __init__(self, message_id):
+        self.message_id = message_id
+
+
 class FakeMessage:
     """Stand-in for a telegram.Message, recording what was sent."""
 
@@ -227,13 +245,23 @@ class FakeMessage:
         self.text_sent = []
         self.voice_sent = []
         self.markups = []
+        self.chat_id = 1
+        self.bot = FakeMessageBot()
+        self._next_message_id = 0
+
+    def get_bot(self):
+        return self.bot
 
     async def reply_text(self, text, reply_markup=None):
         self.text_sent.append(text)
         self.markups.append(reply_markup)
+        self._next_message_id += 1
+        return FakeSentMessage(self._next_message_id)
 
     async def reply_voice(self, voice):
         self.voice_sent.append(voice)
+        self._next_message_id += 1
+        return FakeSentMessage(self._next_message_id)
 
 
 class TestVoiceStyle(unittest.TestCase):
@@ -4150,17 +4178,22 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
         return msg
 
     async def test_safety_is_honest(self):
-        # Owner, 13 Nov 2026: the ban question gets a NO answer with
-        # the owner's reasoning, replacing the zero-risk line for
-        # this specific question.
+        # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer): the
+        # ban question gets a YES answer — it can happen, anyone
+        # can buy followers for you without your permission, and
+        # TikTok can shadowban or strike/ban an account over fake
+        # followers, likes or views.
         msg = await self._send(
             "Will this get my account banned?",
             intent_of("safety"),
         )
-        self.assertIn("No — anybody can buy followers for you",
+        self.assertIn("Yes — it can happen",
                       msg.text_sent[0])
-        self.assertIn("can't be banned or shadowbanned for it without your permission",
+        self.assertIn("without your permission",
                       msg.text_sent[0])
+        self.assertIn("shadowban or strike/ban",
+                      msg.text_sent[0])
+        self.assertNotIn("can't be banned", msg.text_sent[0])
 
     async def test_safety_with_platform_offers_slower_service(self):
         msg = await self._send(
@@ -4488,14 +4521,15 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
         return msg
 
     async def test_question_with_pending_order_names_it(self):
-        # Owner, 13 Nov 2026: the ban question gets the NO answer,
-        # with the pending order named in the note (short name).
+        # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer): the
+        # ban question gets the YES answer, with the pending order
+        # named in the note (short name).
         bot.PENDING["abc123"] = make_pending()
         msg = await self._send(
             "Will this get my account banned?",
             intent_of("safety"),
         )
-        self.assertIn("No — anybody can buy followers for you",
+        self.assertIn("Yes — it can happen",
                       msg.text_sent[0])
         self.assertIn("still waiting for Confirm", msg.text_sent[0])
         self.assertIn("Instagram Followers", msg.text_sent[0])
@@ -6808,15 +6842,54 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
 
     # (17) ban answer + payment methods -------------------------------------
 
-    async def test_ban_question_answered_no(self):
+    async def test_ban_question_answered_yes(self):
+        # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer):
+        # yes, it can happen.
         msg, _ = await self._turns([
             ("can my social media account get banned or shadow banned?",
              intent_of("safety")),
         ])
-        self.assertIn("No — anybody can buy followers for you",
+        self.assertIn("Yes — it can happen",
                       msg.text_sent[0])
-        self.assertIn("can't be banned or shadowbanned for it without your permission",
+        self.assertIn("without your permission",
                       msg.text_sent[0])
+        self.assertIn("shadowban or strike/ban",
+                      msg.text_sent[0])
+        self.assertNotIn("can't be banned", msg.text_sent[0])
+
+    async def test_ban_question_amharic(self):
+        # The same answer for an Amharic question: the bridge
+        # translates the question to English (so the ban detector
+        # fires) and the reply goes back through the Amharic
+        # bridge. The identity mock stands in for the translator;
+        # the Amharic wording itself is pinned by
+        # test_ban_template_amharic below.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                return_value="can my account get banned?"
+            ),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(side_effect=lambda text: text),
+        ) as to_am:
+            msg, _ = await self._turns([
+                ("accountዬ ሊታገድ ይችላል?",
+                 intent_of("safety")),
+            ])
+        self.assertIn("Yes — it can happen", msg.text_sent[0])
+        self.assertNotIn("can't be banned", msg.text_sent[0])
+        to_am.assert_awaited_once()
+
+    def test_ban_template_amharic(self):
+        # The deterministic Amharic ban wording (owner, 14 Nov
+        # 2026): yes it can happen — no trace of the old NO line.
+        am = bot.t("ban_yes", "am")
+        self.assertIn("አዎ", am)
+        self.assertIn("shadow ban", am)
+        self.assertIn("TikTok", am)
+        self.assertNotIn("አይችልም", am)
+        self.assertNotIn("can't be banned", bot.t("ban_yes", "en"))
 
     async def test_payment_answer_lists_all_four_methods(self):
         msg, _ = await self._turns([
@@ -7122,9 +7195,10 @@ class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
             ("can my social media account get banned or shadow banned?",
              intent_of("safety")),
         ])
-        self.assertIn("No — anybody can buy followers for you",
+        self.assertIn("Yes — it can happen",
                       msg.text_sent[0])
-        self.assertIn("shadowbanned", msg.text_sent[0])
+        self.assertIn("shadowban", msg.text_sent[0])
+        self.assertNotIn("can't be banned", msg.text_sent[0])
 
 
 
@@ -9515,13 +9589,13 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
 
     async def test_free_chat_does_not_swallow_ban_question(self):
         # "do you think I'll get banned?" is a ban question, not
-        # chat — the owner's NO answer must win.
+        # chat — the owner's YES answer must win.
         msg = await self._send(
             "do you think I'll get banned?",
             intent_of("safety"), ai_reply="CHATTY-MOCK",
         )
         self.assertIn(
-            "can't be banned or shadowbanned", msg.text_sent[0]
+            "Yes — it can happen", msg.text_sent[0]
         )
         self.assertNotIn("CHATTY-MOCK", msg.text_sent[0])
 
@@ -11843,13 +11917,16 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             ),
             "",
         )
-        # The established ban answer is not moralizing: it stays.
+        # The ban answer is not moralizing: it states the owner's
+        # fact for the ban question (14 Nov 2026: yes, it can
+        # happen) and survives the sanitizer.
         self.assertIn(
-            "can't be banned",
-            bot.strip_moralizing(
-                "No — anybody can buy followers for you, so you "
-                "can't be banned without your permission."
-            ),
+            "Yes — it can happen",
+            bot.strip_moralizing(bot.t("ban_yes", "en")),
+        )
+        self.assertIn(
+            "shadowban or strike/ban",
+            bot.strip_moralizing(bot.t("ban_yes", "en")),
         )
 
     async def test_free_answer_never_moralizes_about_fake_followers(self):
@@ -11866,15 +11943,21 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertNotIn("fake followers", reply)
         self.assertTrue(reply.strip())
 
-    async def test_ban_question_keeps_established_no_answer(self):
+    async def test_ban_question_keeps_new_yes_answer(self):
+        # Owner, 14 Nov 2026 (REVERSING the 13 Nov NO answer):
+        # the ban question gets YES, it can happen — and the
+        # free-answer sanitizer must not strip it.
         msg = await self._turns([
             ("can I get banned for buying followers?",
              intent_of("safety")),
         ])
         self.assertIn(
-            "anybody can buy followers for you", msg.text_sent[0]
+            "Yes — it can happen", msg.text_sent[0]
         )
-        self.assertIn("can't be banned", msg.text_sent[0])
+        self.assertIn(
+            "without your permission", msg.text_sent[0]
+        )
+        self.assertNotIn("can't be banned", msg.text_sent[0])
 
     # (2) a price question always gets a price --------------------
 
@@ -12097,6 +12180,103 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertEqual(pending["service"]["service"], 6537)
         self.assertIn("Heart", msg.text_sent[1])
         self.assertNotIn("Pray", msg.text_sent[1])
+        self.assertEqual(msg.get_bot().deleted, [(1, 1)])
+        self.assertEqual(pending.get("message_id"), 2)
+
+    async def test_correction_fires_when_ai_carries_quantity(self):
+        # Live bug, 14 Nov 2026 (check 5b): the AI classifier
+        # carries the pending order's quantity (10) forward from
+        # conversation history, so "I want only ❤️ reaction"
+        # arrives as a change_order WITH quantity=10 — and the
+        # quantity-change path re-issues the same Pray card
+        # instead of the correction running.
+        msg = await self._turns([
+            ("For this please add 10 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="🙏")),
+            ("I want only ❤️ reaction",
+             intent_of("change_order", quantity=10)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 6537)
+        self.assertIn("Heart", msg.text_sent[1])
+        self.assertNotIn("Pray", msg.text_sent[1])
+        # The old 🙏 card (first message sent, id 1) is deleted,
+        # so the chat never shows two live cards for one order.
+        self.assertEqual(msg.get_bot().deleted, [(1, 1)])
+        self.assertEqual(pending.get("message_id"), 2)
+
+    async def test_correction_fires_when_order_intent_carries_quantity(self):
+        # Same live bug via the other path: the AI returns an
+        # "order" intent carrying quantity=10 (and no link, since
+        # PARTIAL was popped when the card was created), so the
+        # inline quantity-change branch in handle_order_text
+        # re-issues the Pray card before the correction runs.
+        msg = await self._turns([
+            ("For this please add 10 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="🙏")),
+            ("I want only ❤️ reaction",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       quantity=10)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 6537)
+        self.assertIn("Heart", msg.text_sent[1])
+        self.assertNotIn("Pray", msg.text_sent[1])
+        self.assertEqual(msg.get_bot().deleted, [(1, 1)])
+        self.assertEqual(pending.get("message_id"), 2)
+
+    async def test_correction_chains_across_emoji(self):
+        # Pray -> Heart -> Fire: each correction replaces the
+        # previous card, and every replaced card is deleted.
+        msg = await self._turns([
+            ("For this please add 10 🙏 of tg reaction for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=10, reaction_emoji="🙏")),
+            ("I want only ❤️ reaction",
+             intent_of("change_order", quantity=10)),
+            ("I want only 🔥 reaction",
+             intent_of("change_order", quantity=10)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 6540)
+        self.assertIn("Fire", msg.text_sent[2])
+        self.assertNotIn("Heart", msg.text_sent[2])
+        self.assertEqual(msg.get_bot().deleted, [(1, 1), (1, 2)])
+        self.assertEqual(pending.get("message_id"), 3)
+
+    async def test_correction_thumbs_up_to_heart(self):
+        # A 👍 order corrected to ❤️: the Heart-only service, not
+        # the Thumbs-up one, and the old card is deleted.
+        msg = await self._turns([
+            ("add 100 👍 reactions for this post "
+             "https://t.me/godofpanelcom/768",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="https://t.me/godofpanelcom/768",
+                       quantity=100, reaction_emoji="👍")),
+            ("I want only ❤️ reaction",
+             intent_of("change_order", quantity=100)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 6537)
+        self.assertIn("Heart", msg.text_sent[1])
+        self.assertEqual(msg.get_bot().deleted, [(1, 1)])
 
     async def test_no_exact_reaction_service_says_so_honestly(self):
         # 😮 has no dedicated service: say so instead of silently
