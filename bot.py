@@ -674,6 +674,10 @@ TEXT = {
         "am": "Order ተሰርዟል።",
         "en": "Order cancelled.",
     },
+    "nothing_to_cancel": {
+        "am": "ምንም የሚሰርዝ ነገር የለም።",
+        "en": "Nothing to cancel.",
+    },
     "deposit_too_big": {
         "am": "ይህ በጣም ብዙ ነው — በአንድ ጊዜ የሚያስገቡት ከፍተኛው 100,000 ETB ነው።",
         "en": "That's too much — the most you can deposit in one go is 100,000 ETB.",
@@ -4829,6 +4833,40 @@ def is_usual_request(text: str) -> bool:
     phrasing is caught locally, before the classifier."""
     s = " ".join((text or "").strip().lower().split())
     return any(p in s for p in _USUAL_PHRASES)
+
+
+_CANCEL_PHRASES = (
+    "cancel", "cancel it", "cancel this", "cancel that",
+    "cancel my order", "cancel the order", "cancel this order",
+    "cancel please", "cancel my order please",
+    "cancel the order please", "never mind", "nevermind",
+    "forget it", "stop", "stop it", "stop this", "stop the order",
+    "stop my order",
+)
+
+
+def is_cancel_request(text: str) -> bool:
+    """True when the message IS a cancel command (\"cancel\", \"I
+    don't want to\", \"never mind\", bare \"stop\") — a deterministic
+    command the classifier must never misread. A bare \"Cancel\"
+    with nothing pending came back from the AI as off_topic and got
+    a free-chat continuation (live, 14 Nov 2026 19:10 and 19:29
+    EAT — \"no one can guarantee zero risk\", contradicting the
+    standing ban answer), so it is caught locally, before the
+    classifier, like the usual-request check. Questions ABOUT
+    cancelling (\"can I cancel after it starts?\") are not matched:
+    the terms answer still handles those, since it runs before the
+    cancel branch. \"Cancel my schedule\" is not matched either: the
+    classifier routes that to stop_schedule."""
+    s = " ".join((text or "").strip().lower().split())
+    s = re.sub(r"[.!?]+$", "", s)
+    if s in _CANCEL_PHRASES:
+        return True
+    if "don't want to" in s or "dont want to" in s:
+        return True
+    if "don't want it" in s or "dont want it" in s:
+        return True
+    return s.startswith("please cancel")
 
 
 # English number words (owner, 14 Nov 2026 — "one thousand" and
@@ -9257,6 +9295,15 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 else 3 if "triple" in _words else None
             ),
         )
+    # A cancel command is deterministic (live bug, 14 Nov 2026
+    # 19:10 and 19:29 EAT): a bare "Cancel" with nothing pending
+    # came back from the AI as off_topic and got a free-chat
+    # continuation ("no one can guarantee zero risk"), contradicting
+    # the standing ban answer. Caught locally, before the
+    # classifier, like the usual-request check above — the cancel
+    # branch below then answers deterministically.
+    if intent is None and is_cancel_request(text):
+        intent = _empty_intent("cancel")
     # Price questions are answered from local detection only, BEFORE
     # the AI classifier (live bug, 14 Nov 2026: the price arrived
     # 68 seconds late because the classifier and the bridge ran
@@ -9515,6 +9562,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if schedules:
             await stop_schedules_flow(update, schedules, lang, voice=voice)
             return
+        # Nothing was being built or waiting: say so instead of
+        # "Order cancelled." (live bug, 14 Nov 2026 19:10 and 19:29
+        # EAT — a bare "Cancel" with nothing pending got a free AI
+        # continuation). "Order cancelled." stays for a real draft
+        # or card that was just dropped.
+        had_something = bool(
+            PARTIAL.get(user.id)
+            or RECURRING_DRAFT.get(user.id)
+            or DEPOSIT_DRAFT.get(user.id)
+            or SPLIT_DRAFT.get(user.id)
+        )
         clear_order_state(user.id)
         RECURRING_DRAFT.pop(user.id, None)
         DEPOSIT_DRAFT.pop(user.id, None)
@@ -9525,7 +9583,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         batch_id, _batch = pending_batch_for_user(user.id)
         if batch_id is not None:
             PENDING_BATCH.pop(batch_id, None)
-        await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+        await reply_message(
+            update.message,
+            t(
+                "cancelled" if had_something else "nothing_to_cancel",
+                lang,
+            ),
+            lang, voice=voice,
+        )
         return
     if intent_type == "recurring":
         await handle_recurring_text(update, text, intent, lang, voice=voice)
@@ -9820,8 +9885,39 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # the order instead of "I did not understand". A message naming a
     # different platform starts a new order and drops the stored pieces.
     stored = PARTIAL.get(user.id) or {}
-    new_platform = (intent.get("platform") or "").strip().lower()
     stored_platform = (stored.get("platform") or "").strip().lower()
+    # A bare link completing a draft the user already started is a
+    # slot-fill, not a new order (live bug, 14 Nov 2026 19:27 EAT):
+    # "10 🙏" then a bare link asked "How many?" and built a Post
+    # Views card, because the AI guessed "views" for the bare post
+    # link and that hint overwrote the reactions draft in the merge
+    # below (and the metric-change reset wiped the rest). A link
+    # carries no words of its own — when the message names no metric
+    # and no platform, and the link is for the draft's platform (or
+    # has none, like a @handle), the AI's guessed platform and hint
+    # are dropped for this turn so the stored draft's metric, emoji
+    # and quantity survive. A message WITH words still goes through
+    # the normal platform/metric logic below, and a link for a
+    # different platform still starts a fresh order.
+    _bare_link = (extract_links(text) or [None])[0]
+    _bare_link_platform = (
+        platform_from_link(_bare_link)
+        if _bare_link is not None else None
+    )
+    if (
+        stored
+        and _bare_link is not None
+        and kind_from_text(text) is None
+        and _explicit_platform_word(text) is None
+        and (
+            _bare_link_platform is None
+            or _bare_link_platform == stored_platform
+        )
+    ):
+        intent = dict(intent)
+        intent["platform"] = None
+        intent["service_hint"] = None
+    new_platform = (intent.get("platform") or "").strip().lower()
     if new_platform and stored_platform and new_platform != stored_platform:
         stored = {}
     merged = {}

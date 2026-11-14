@@ -286,7 +286,18 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   link; the cancelled link/quantity are never auto-shown again.
   The cancelled record clears only when an order is placed, not
   when a fresh link merely appears in a turn that never becomes an
-  order.
+  order. CANCEL IS CAUGHT LOCALLY (live bug, 14 Nov 2026 19:10
+  and 19:29 EAT): a bare "Cancel" with nothing pending came back
+  from the AI as off_topic and got a free-chat continuation ("no
+  one can guarantee zero risk"), contradicting the standing ban
+  answer — so "cancel", "I don't want to", "never mind", "forget
+  it" and bare "stop" are matched in code before the classifier
+  and always take the cancel path. With nothing to cancel the bot
+  says "Nothing to cancel." (en + am); with a draft or a card
+  pending it still says "Order cancelled." Questions ABOUT
+  cancelling ("can I cancel after it starts?") still get the
+  terms answer, and "cancel my schedule" still goes to the
+  schedule flow.
 - A NEW METRIC REPLACES THE OLD DRAFT: a message naming a different
   metric (views after followers) starts a fresh order — the old
   draft's link/quantity are dropped unless the user typed them in
@@ -411,6 +422,17 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   "Which platform?" when the draft already says Telegram
   reactions. While a Confirm card is pending, the same message is
   left to the normal flow (emoji correction / quantity change).
+  A BARE LINK IS A SLOT-FILL, NOT A NEW ORDER (live bug, 14 Nov
+  2026 19:27 EAT): "10 🙏" then a bare link asked "How many?"
+  and built a Post Views card, because the AI guessed "views"
+  for the bare post link and that hint overwrote the reactions
+  draft. A link carries no words of its own — when the message
+  names no metric and no platform, and the link is for the
+  draft's platform, the AI's guessed platform and hint are
+  dropped for the turn, so the stored draft's metric, emoji and
+  quantity survive and the card appears at once. A message WITH
+  words naming another metric still replaces the draft, and a
+  bare link for a different platform still starts a fresh order.
 - NO BARE EMOJI IS EVER "NOT UNDERSTOOD" (owner, 14 Nov 2026 —
   "he also misunderstood the emoji"): any message that is only
   emoji gets an emoji-aware reply. A bare 👀, 💔, 🤗 ... (not a

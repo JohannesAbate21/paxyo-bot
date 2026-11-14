@@ -810,12 +810,17 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
              "What would you like to order?"],
         )
 
-    async def test_cancel_without_pending_says_cancelled(self):
+    async def test_cancel_without_pending_says_nothing_to_cancel(self):
         # The owner's exact words: "What if I don't want to".
+        # Live change, 14 Nov 2026 19:10/19:29 EAT: a bare "Cancel"
+        # with nothing pending used to say "Order cancelled." — and
+        # when the AI misclassified it, it got a free-chat
+        # continuation instead. With nothing to cancel, the bot says
+        # so; "Order cancelled." is only for a real draft or card.
         msg = await self._send(
             "What if I don't want to", intent_of("cancel")
         )
-        self.assertEqual(msg.text_sent, ["Order cancelled."])
+        self.assertEqual(msg.text_sent, ["Nothing to cancel."])
 
     async def test_cancel_with_pending_clears_it(self):
         bot.PENDING["abc123"] = make_pending()
@@ -14088,6 +14093,307 @@ class TestWordQuantitiesAndLinkPlatform(_LanguageRoundBase):
         self._assert_card(
             msg, 2001, 100, "https://t.me/godofpanelcom"
         )
+
+
+class TestBareLinkReactionAndCancelFix(_LanguageRoundBase):
+    """Fix round for the 19:27/19:29 EAT 14 Nov 2026 live retest
+    (commit 50562b4). (1) A bare "10 🙏" then a bare link lost the
+    reaction: the AI guessed "views" for the bare post link and the
+    merge let that hint overwrite the reactions draft, so the bot
+    asked "How many?" and built a Post Views card. A bare link
+    completing a draft is a slot-fill — the AI's guessed hint must
+    never override the draft. (2) A bare "Cancel" with nothing
+    pending got a free AI continuation ("no one can guarantee zero
+    risk") because the AI misclassified it as off_topic; cancel is
+    caught locally now, and with nothing to cancel the bot says so
+    instead of "Order cancelled." """
+
+    async def _turns(self, turns, paxyo=None, ai_reply=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        ai = mock.AsyncMock(
+            return_value=ai_reply if ai_reply is not None else ""
+        )
+        with mock.patch("bot.paxyo", paxyo or RealReactionsPaxyo()), \
+                mock.patch("bot.speak_reply"), \
+                mock.patch("bot.ai_generate", new=ai):
+            for text, intent in turns:
+                with mock.patch(
+                    "bot.extract_intent",
+                    new=mock.AsyncMock(return_value=intent),
+                ):
+                    await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _send_no_classifier(self, text, paxyo=None):
+        # extract_intent raises if it is ever called: the local
+        # cancel catch must answer without the AI at all.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+                mock.patch("bot.speak_reply"), \
+                mock.patch(
+                    "bot.extract_intent",
+                    new=mock.AsyncMock(
+                        side_effect=AssertionError(
+                            "extract_intent must not be called"
+                        )
+                    ),
+                ):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    def _assert_card(self, msg, service_id, quantity, link=None):
+        self.assertIn("Please confirm:", msg.text_sent[-1])
+        self.assertIn(f"(#{service_id})", msg.text_sent[-1])
+        self.assertIn(f"🔢 {quantity}", msg.text_sent[-1])
+        if link is not None:
+            self.assertIn(link, msg.text_sent[-1])
+
+    # Fault 1: bare link completing a reactions draft ---------------
+
+    async def test_bare_link_with_views_hint_keeps_pray_card(self):
+        # The exact live flow, 14 Nov 2026 19:27 EAT: "10 🙏"
+        # then the bare link. The AI guesses "telegram views" for
+        # a bare post link — the Pray #1723 card must still appear,
+        # qty 10, with NO "How many?" re-ask in between.
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 🙏", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link of the Telegram post."
+        )
+        self.assertNotIn("How many?", msg.text_sent[1])
+        self._assert_card(msg, 1723, 10, link)
+        pending = list(bot.PENDING.values())[0]
+        self.assertEqual(pending["service"]["service"], 1723)
+        self.assertEqual(pending["quantity"], 10)
+        self.assertEqual(bot.PARTIAL, {})
+
+    async def test_bare_link_with_post_views_hint_keeps_pray_card(self):
+        # Same flow, the AI's hint spelled out as "telegram post
+        # views" — still the Pray card, never a views card.
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 🙏", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram post views", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self._assert_card(msg, 1723, 10, link)
+
+    async def test_bare_pray_emoji_then_link_then_quantity(self):
+        # Bare "🙏" carries no quantity: the link still completes
+        # the reactions draft, the bot asks "How many?" once, and
+        # the answer builds the Pray card — not a views card.
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("🙏", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+            ("10", intent_of("order", quantity=10)),
+        ])
+        self.assertEqual(len(msg.text_sent), 3)
+        self.assertIn("How many?", msg.text_sent[1])
+        self._assert_card(msg, 1723, 10, link)
+
+    async def test_bare_heart_emoji_then_link_keeps_exact_emoji(self):
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 ❤️", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self._assert_card(msg, 6537, 10, link)
+
+    async def test_bare_fire_emoji_then_link_keeps_exact_emoji(self):
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 🔥", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self._assert_card(msg, 6540, 10, link)
+
+    async def test_bare_thumbs_up_then_link_keeps_exact_emoji(self):
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 👍", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self._assert_card(msg, 6541, 10, link)
+
+    async def test_channel_link_after_reaction_draft_asks_post_link(self):
+        # A channel link is still Telegram, but reactions need a
+        # post: ask for the post link, keep the draft, then the
+        # post link completes the Pray card.
+        msg = await self._turns([
+            ("10 🙏", intent_of("unclear")),
+            ("https://t.me/godofpanelcom", intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views",
+                link="https://t.me/godofpanelcom",
+            )),
+            ("https://t.me/godofpanelcom/768", intent_of(
+                "order", link="https://t.me/godofpanelcom/768",
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 3)
+        self.assertIn("That link is a channel", msg.text_sent[1])
+        self.assertNotIn("could not find a service", msg.text_sent[1])
+        self.assertEqual(bot.PARTIAL, {})
+        self._assert_card(
+            msg, 1723, 10, "https://t.me/godofpanelcom/768"
+        )
+
+    async def test_link_with_words_still_changes_metric(self):
+        # The guard is only for a BARE link: a message that names
+        # views in words still replaces the reactions draft (round
+        # 7 rule), and the views card appears.
+        msg = await self._turns([
+            ("10 🙏", intent_of("unclear")),
+            ("1000 views for this https://t.me/godofpanelcom/768",
+             intent_of(
+                 "order", platform="telegram",
+                 service_hint="telegram views", quantity=1000,
+                 link="https://t.me/godofpanelcom/768",
+             )),
+        ], paxyo=LinkPlatformPaxyo())
+        self.assertEqual(len(msg.text_sent), 2)
+        self._assert_card(
+            msg, 6139, 1000, "https://t.me/godofpanelcom/768"
+        )
+
+    async def test_bare_link_for_other_platform_starts_fresh(self):
+        # A bare link for a DIFFERENT platform is a new order, not
+        # a slot-fill: the reactions draft is dropped and the bot
+        # asks for the missing quantity.
+        link = "https://www.tiktok.com/@someuser/video/1234567890123456789"
+        msg = await self._turns([
+            ("10 🙏", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="tiktok", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("How many?", msg.text_sent[1])
+        self.assertNotIn("reaction_emoji", bot.PARTIAL.get(1, {}))
+
+    # Fault 2: bare Cancel with nothing pending --------------------
+
+    def test_is_cancel_request(self):
+        for text in (
+            "Cancel", "cancel", "cancel!", "Cancel it",
+            "cancel my order", "cancel the order",
+            "I don't want to", "What if I don't want to",
+            "never mind", "Never mind.", "forget it", "stop",
+            "please cancel my order",
+        ):
+            self.assertTrue(
+                bot.is_cancel_request(text), text
+            )
+        for text in (
+            "can I cancel my order after it starts?",
+            "cancel my schedule", "cancel the repeating order",
+            "how do I cancel an order?",
+            "I want to order", "cancelled orders",
+        ):
+            self.assertFalse(
+                bot.is_cancel_request(text), text
+            )
+
+    def test_nothing_to_cancel_template(self):
+        self.assertEqual(
+            bot.t("nothing_to_cancel", "en"), "Nothing to cancel."
+        )
+        self.assertEqual(
+            bot.t("nothing_to_cancel", "am"),
+            "ምንም የሚሰርዝ ነገር የለም።",
+        )
+
+    async def test_cancel_without_pending_says_nothing_to_cancel(self):
+        msg = await self._turns([
+            ("Cancel", intent_of("cancel")),
+        ])
+        self.assertEqual(msg.text_sent, ["Nothing to cancel."])
+
+    async def test_cancel_misclassified_as_off_topic_still_nothing(self):
+        # The exact live failure: the AI called a bare "Cancel"
+        # off_topic after the ban answer, and the free reply
+        # continued the ban thread ("no one can guarantee zero
+        # risk"). The local catch must answer first, so the AI's
+        # continuation never reaches the user.
+        msg = await self._turns([
+            ("Cancel", intent_of("off_topic")),
+        ], ai_reply=(
+            "These services deliver gradually and are widely used, "
+            "but no one can guarantee zero risk."
+        ))
+        self.assertEqual(msg.text_sent, ["Nothing to cancel."])
+        self.assertNotIn("zero risk", msg.text_sent[0])
+
+    async def test_cancel_misclassified_as_unclear_still_nothing(self):
+        msg = await self._turns([
+            ("Cancel", intent_of("unclear")),
+        ])
+        self.assertEqual(msg.text_sent, ["Nothing to cancel."])
+
+    async def test_cancel_never_answers_without_the_classifier(self):
+        # The local catch runs before the classifier: extract_intent
+        # must never be called for a bare "Cancel".
+        msg = await self._send_no_classifier("Cancel")
+        self.assertEqual(msg.text_sent, ["Nothing to cancel."])
+
+    async def test_cancel_with_draft_pending_says_cancelled(self):
+        msg = await self._turns([
+            ("10 🙏", intent_of("unclear")),
+            ("Cancel", intent_of("cancel")),
+        ])
+        self.assertEqual(
+            msg.text_sent,
+            [
+                "Please send the link of the Telegram post.",
+                "Order cancelled.",
+            ],
+        )
+        self.assertEqual(bot.PARTIAL, {})
+
+    async def test_cancel_with_card_pending_says_cancelled(self):
+        bot.PENDING["abc123"] = make_pending()
+        msg = await self._turns([
+            ("Cancel", intent_of("cancel")),
+        ])
+        self.assertEqual(msg.text_sent, ["Order cancelled."])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_cancel_question_about_cancelling_gets_terms(self):
+        # "Can I cancel after it starts?" is a question, not a
+        # cancel command: the terms answer still wins.
+        msg = await self._turns([
+            ("can I cancel my order after it starts?",
+             intent_of("cancel")),
+        ])
+        self.assertIn("can't be canceled", msg.text_sent[0])
 
 
 if __name__ == "__main__":
