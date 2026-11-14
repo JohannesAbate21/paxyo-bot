@@ -4,7 +4,7 @@ This file is the bot's memory of everything its owner taught it. If the bot
 ever has to be rebuilt from scratch, read this file first: it holds every
 rule, fact and behaviour the owner set, so the rebuild learns fast.
 Source of truth for behaviour is `bot.py`; this file is the human-readable
-record of *why* it behaves that way. Last updated: 14 Nov 2026 (paused services: CapCut Pro, Canva Pro, SMS OTP).
+record of *why* it behaves that way. Last updated: 14 Nov 2026 (deterministic price fix: the price never depends on which AI answers).
 
 ## Who Paxyo is
 - Paxyo is an Ethiopian service for ordering followers, likes, views,
@@ -61,6 +61,12 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (paused services:
 ## Answering questions
 - PRICE: when asked the price, tell the price right there — per 1000, and
   the total when a quantity is given. NEVER ask for the link first.
+  The price is deterministic code, never left to the AI's wording:
+  it does NOT depend on which AI classified the message (14 Nov
+  2026: the same "how much 1k" got its price from Groq and lost it
+  from DeepSeek, because the answer used to depend on the
+  classifier's intent). And a reply that asks for the link after a
+  price question always carries the price in that same reply.
 - SPEED: when asked how long something takes, give a REAL estimated time
   from the service's average time (e.g. "usually starts within 1 minute"),
   and add: the sooner we place the order, the sooner it will be completed

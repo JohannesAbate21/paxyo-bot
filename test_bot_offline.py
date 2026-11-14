@@ -10572,5 +10572,177 @@ class TestPausedServices(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("canva", text, key)
 
 
+class FlakyReactionsPaxyo(RealReactionsPaxyo):
+    """Catalogue fails on the first call, works after — the direct
+    price answer finds nothing, so the order flow must still carry
+    the price into the link-asking reply."""
+
+    def __init__(self):
+        self._calls = 0
+
+    async def services(self):
+        self._calls += 1
+        if self._calls == 1:
+            raise RuntimeError("catalogue hiccup")
+        return await super().services()
+
+
+class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
+    """The live bug of 14 Nov 2026: the same message ("I want 👍
+    reaction for my telegram channel post how much 1k") got its
+    price from Groq at 12:52 and lost it from DeepSeek at 13:16 —
+    the price answer used to depend on which AI classified the
+    message. Now the price is deterministic code: the price branch
+    runs on the detector alone, and a reply that asks for the link
+    after a price question always carries the price too."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _send(self, text, intent, paxyo=None, ai_reply=_UNSET):
+        from contextlib import ExitStack
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        patches = [
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ),
+            mock.patch("bot.paxyo", paxyo or FakePaxyo()),
+            mock.patch("bot.speak_reply"),
+        ]
+        if ai_reply is not _UNSET:
+            patches.append(mock.patch(
+                "bot.ai_generate",
+                new=mock.AsyncMock(return_value=ai_reply),
+            ))
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    # (1) the live repro: same message, any intent, price present ----
+
+    async def test_live_message_quotes_price_whatever_the_intent(self):
+        # The 13:16 EAT DeepSeek reply was "Got it — 👍 reactions.
+        # Send the link to the post and I'll get it going." — the
+        # service identified, no price. Mock the AI to that exact
+        # price-less wording and classify the message as something
+        # the old intent gate did not cover: the deterministic
+        # price must win over the AI's wording either way.
+        for intent_type in ("how_to_order", "goal", "safety"):
+            with self.subTest(intent=intent_type):
+                msg = await self._send(
+                    "I want 👍 reaction for my telegram channel post how much 1k",
+                    intent_of(intent_type, platform="telegram",
+                              service_hint="telegram reactions",
+                              quantity=1000),
+                    paxyo=RealReactionsPaxyo(),
+                    ai_reply=(
+                        "Got it — 👍 reactions. Send the link to the "
+                        "post and I'll get it going."
+                    ),
+                )
+                reply = msg.text_sent[0]
+                self.assertIn("Thumbs up 👍", reply)
+                self.assertIn("5.46", reply)
+                self.assertIn("1,000", reply)
+                self.assertNotIn("81.90", reply)
+                self.assertNotIn("336.00", reply)
+                self.assertNotIn("Bot Start", reply)
+                bot.PARTIAL.clear()
+
+    # (2) a different service and quantity ----------------------------
+
+    async def test_other_service_and_quantity_quotes_total(self):
+        msg = await self._send(
+            "how much is 5000 tiktok likes?",
+            intent_of("goal", platform="tiktok",
+                      service_hint="tiktok likes", quantity=5000),
+            paxyo=TikTokPaxyo(),
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("TikTok Likes", reply)
+        self.assertIn("50.00", reply)
+        self.assertIn("5,000", reply)
+        self.assertNotIn("Please send the link", reply)
+
+    # (3) the price line appears exactly once, unmangled ---------------
+
+    async def test_price_line_appears_exactly_once(self):
+        msg = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=RealReactionsPaxyo(),
+        )
+        self.assertEqual(
+            msg.text_sent[0],
+            "Telegram Reactions + Free Views — Thumbs up 👍: "
+            "5.46 ETB for 1,000 (5.46 ETB per 1000).",
+        )
+        self.assertEqual(msg.text_sent[0].count("5.46 ETB for 1,000"), 1)
+
+    # (4) the link-asking reply carries the price when the first
+    # lookup fails ------------------------------------------------------
+
+    async def test_link_ask_reply_carries_price_when_lookup_fails_once(self):
+        paxyo = FlakyReactionsPaxyo()
+        msg = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=paxyo,
+        )
+        self.assertEqual(paxyo._calls, 2)
+        reply = msg.text_sent[0]
+        # The price line is there, once, ahead of the link ask —
+        # and the emoji acknowledgement survived intact.
+        self.assertIn("Thumbs up 👍", reply)
+        self.assertIn("5.46 ETB for 1,000", reply)
+        self.assertEqual(reply.count("5.46 ETB for 1,000"), 1)
+        self.assertIn("Got it — 👍 reactions", reply)
+        self.assertIn("Send the link to the post", reply)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

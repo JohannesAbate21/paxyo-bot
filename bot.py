@@ -4515,14 +4515,19 @@ def is_price_question(text: str) -> bool:
     return False
 
 
-async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
-    """The price, straight from the catalogue: ETB per 1000, and the
-    total when a quantity was asked for. Returns None when no
-    service can be named (the caller then falls through). Never
-    asks for the link first."""
-    platform = (intent.get("platform") or "").strip().lower() or None
-    hint = intent.get("service_hint")
-    quantity = intent.get("quantity")
+async def _price_line(user_id: int, text: str, platform, hint, quantity,
+                      lang: str, reaction_emoji=None):
+    """The deterministic price line for an identified service, straight
+    from the catalogue (rate x420 ETB): "Thumbs up 👍: 5.46 ETB for
+    1,000 (5.46 ETB per 1000)." when a quantity was asked for, else
+    the per-1000 rate. Returns (line, platform, hint) — line is None
+    when no service can be named, and platform/hint are the values
+    actually used, after falling back to the order in progress and
+    then to the message itself. Short service names only, like
+    everywhere else. The caller decides what None means:
+    price_answer_text asks which service; the link-ask safety net
+    just skips the line."""
+    platform = (platform or "").strip().lower() or None
     if not platform and not hint:
         platform, hint = _conversation_context(user_id)
     if not platform and not hint:
@@ -4531,18 +4536,18 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
         metric = kind_from_text(text)
         hint = " ".join(p for p in (platform, metric) if p) or None
     if not platform and not hint:
-        return t("price_ask_service", lang)
+        return None, platform, hint
     try:
         services = await paxyo.services()
     except Exception as exc:
         log.warning("price lookup failed: %s", exc)
-        return None
+        return None, platform, hint
     picks = pick_services(
         services, platform=platform, service_hint=hint, limit=100,
-        reaction_emoji=reaction_emoji(text),
+        reaction_emoji=reaction_emoji,
     )
     if not picks:
-        return None
+        return None, platform, hint
     service = picks[0]
     rate = float(service.get("rate_etb_per_1000", 0) or 0)
     name = short_service_name(service.get("name"))
@@ -4552,13 +4557,40 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
         except (TypeError, ValueError):
             qty = None
         if qty:
-            _remember_price_question(user_id, platform, hint, qty, text)
             return t(
                 "price_total", lang, service=name, quantity=f"{qty:,}",
                 rate=format_money(rate),
                 total=format_money(estimated_total_etb(rate, qty)),
-            )
-    return t("price_per_1000", lang, service=name, rate=format_money(rate))
+            ), platform, hint
+    return t(
+        "price_per_1000", lang, service=name, rate=format_money(rate)
+    ), platform, hint
+
+
+async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
+    """The price, straight from the catalogue: ETB per 1000, and the
+    total when a quantity was asked for. Returns None when no
+    service can be named (the caller then falls through). Never
+    asks for the link first."""
+    platform = (intent.get("platform") or "").strip().lower() or None
+    hint = intent.get("service_hint")
+    quantity = intent.get("quantity")
+    line, platform, hint = await _price_line(
+        user_id, text, platform, hint, quantity, lang,
+        reaction_emoji=reaction_emoji(text),
+    )
+    if line is not None:
+        if quantity is not None:
+            try:
+                qty = int(quantity)
+            except (TypeError, ValueError):
+                qty = None
+            if qty:
+                _remember_price_question(user_id, platform, hint, qty, text)
+        return line
+    if not platform and not hint:
+        return t("price_ask_service", lang)
+    return None
 
 
 def _remember_price_question(user_id: int, platform, hint, qty, text):
@@ -7935,7 +7967,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # --- round 5: direct answers that must not fall through to the
     # --- order flow or the generic AI line ---
-    if intent_type in ("paxyo_info", "unclear", "order", "budget") and is_price_question(text):
+    # The price question is answered by the deterministic detector,
+    # never by the AI's classification (live bug, 14 Nov 2026: the
+    # same "I want 👍 reaction ... how much 1k" got its price from
+    # Groq and lost it from DeepSeek, because the old intent-type
+    # gate let the classifier decide whether a price question got
+    # its price at all).
+    if is_price_question(text):
         price = await price_answer_text(user.id, text, intent, lang)
         if price is not None:
             await reply_message(update.message, price, lang, voice=voice)
@@ -8757,13 +8795,27 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # never the stock link line on its own.
         _emoji = merged.get("reaction_emoji")
         if _emoji and "reaction" in (merged.get("service_hint") or "").lower():
-            await reply_message(
-                update.message,
-                t("emoji_ack_order", lang, emoji=_emoji),
-                lang, voice=voice,
-            )
+            _reply = t("emoji_ack_order", lang, emoji=_emoji)
         else:
-            await reply_message(update.message, t("ask_link", lang), lang, voice=voice)
+            _reply = t("ask_link", lang)
+        # A price question that reached this far (the direct price
+        # answer above found no service, or the catalogue hiccuped)
+        # still gets its price in the very reply that asks for the
+        # link — the price is deterministic code, never left to the
+        # AI's wording (live bug, 14 Nov 2026: DeepSeek's reply
+        # asked for the link with no price at all). The line is
+        # only prepended when a service can actually be named, so
+        # it can never duplicate a price already in the reply —
+        # neither template above carries one.
+        if is_price_question(text):
+            _line, _p, _h = await _price_line(
+                user.id, text, merged.get("platform"),
+                merged.get("service_hint"), merged.get("quantity"),
+                lang, reaction_emoji=merged.get("reaction_emoji"),
+            )
+            if _line is not None:
+                _reply = _line + "\n" + _reply
+        await reply_message(update.message, _reply, lang, voice=voice)
         return
     if not merged.get("quantity"):
         PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
