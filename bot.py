@@ -151,6 +151,21 @@ GLM_URL = "https://api.z.ai/api/paas/v4"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
+# Kilo Code gateway — the free fallback since 14 Nov 2026: it
+# routes to a currently-free model (default model "kilo-auto/free",
+# which picks a free model automatically, so the rotating free
+# lineup cannot break the integration) via an OpenAI-compatible API
+# (https://api.kilo.ai/api/gateway). $0 total — no key, no signup,
+# no card, no Authorization header. 200 requests/hour per IP, so
+# it only runs after Gemini failed, and a Kilo failure falls
+# through to OpenRouter, then GLM. Caveat (owner told, 14 Nov
+# 2026): the limit is per IP and Render's free tier shares outbound
+# IPs with other tenants, so another service can eat the quota;
+# and free prompts may be used for training — the bot sends no
+# secrets, balances, orders, phone numbers or payment details to
+# any provider, so nothing sensitive goes there.
+KILO_MODEL = os.environ.get("KILO_MODEL", "kilo-auto/free")
+KILO_URL = "https://api.kilo.ai/api/gateway"
 # Google Cloud Text-to-Speech (voice replies). The API key comes from a
 # Google Cloud project with the Cloud Text-to-Speech API enabled and
 # billing on; the AI Studio (Gemini) key does NOT work for it.
@@ -2876,6 +2891,64 @@ async def openrouter_generate(prompt: str, system: str = None) -> str:
         return ""
 
 
+# ---------------------------------------------------------------- Kilo ---
+# Kilo Code gateway mirrors the OpenRouter provider exactly (same
+# inputs, same outputs, same retry shape), with Kilo's base URL and
+# its own model env var — but NO API key: the free gateway needs no
+# signup and takes no Authorization header. The default model
+# "kilo-auto/free" is a router that picks a currently-free model
+# automatically. It sits between Gemini and OpenRouter in
+# ai_generate — only after Gemini failed — so it never burns its
+# per-IP hourly cap on healthy days; a Kilo failure falls through
+# to OpenRouter, then GLM.
+
+async def _kilo_post(path: str, headers=None, json=None) -> dict:
+    """One POST to the Kilo Code gateway, with retries on rate limits
+    and server errors. Same shape as _openrouter_post (two retries,
+    after 5s then 15s; 500 joins 429/503). The client shape is
+    identical (timeout 120s, trust_env False)."""
+    url = KILO_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning(
+                    "Kilo %s, retrying (attempt %d of 3)", status, attempt + 2
+                )
+                continue
+            raise
+
+
+def _kilo_headers() -> dict:
+    # No key, no signup: the free gateway takes no Authorization header.
+    return {}
+
+
+async def kilo_generate(prompt: str, system: str = None) -> str:
+    """One Kilo text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _kilo_post(
+        "/chat/completions",
+        headers=_kilo_headers(),
+        json={"model": KILO_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 def _log_ai_failure(message: str, exc) -> None:
     """Log an AI-provider failure: message + HTTP status only.
 
@@ -2896,8 +2969,10 @@ async def ai_generate(prompt: str, system: str = None) -> str:
     """Text from the AI: DeepSeek when DEEPSEEK_API_KEY is set, else
     Qwen when QWEN_API_KEY is set, else Groq when GROQ_API_KEY is
     set, else ChatGPT when OPENAI_API_KEY is set, else Gemini, else
-    OpenRouter when OPENROUTER_API_KEY is set (free :free models —
-    only after Gemini failed, so it never burns its daily cap), else
+    Kilo (no key — free gateway, only after Gemini failed, so it
+    never burns its per-IP hourly cap), else OpenRouter when
+    OPENROUTER_API_KEY is set (free :free models — only after
+    Kilo failed, so it never burns its daily cap), else
     GLM when GLM_API_KEY is set (free last resort — slow and
     rate-limited, so it only runs when every other provider failed).
     Every caller uses this, so the provider switch is one env var
@@ -2938,6 +3013,11 @@ async def ai_generate(prompt: str, system: str = None) -> str:
         except Exception as exc:
             _log_ai_failure("Gemini generate failed, trying next provider", exc)
             last_exc = exc
+    try:
+        return await kilo_generate(prompt, system=system)
+    except Exception as exc:
+        _log_ai_failure("Kilo generate failed, trying next provider", exc)
+        last_exc = exc
     if OPENROUTER_API_KEY:
         try:
             return await openrouter_generate(prompt, system=system)
@@ -3313,8 +3393,8 @@ def local_intent(text: str) -> dict:
 
 
 async def extract_intent(text: str, user_id: int = None) -> dict:
-    """Ask the AI (DeepSeek, then Qwen, Groq, ChatGPT, Gemini, GLM —
-    see ai_generate) to classify the message and extract the order intent.
+    """Ask the AI (DeepSeek, then Qwen, Groq, ChatGPT, Gemini, Kilo,
+    OpenRouter, GLM — see ai_generate) to classify the message and extract the order intent.
 
     The text is normalised first (typos/slang fixed, URLs kept
     verbatim), so "let me deposit 10 br by teleirr" still classifies

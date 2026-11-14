@@ -5714,6 +5714,10 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
         client = FlakyClient([err, err, err])
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=err),
+             ), \
              self.assertLogs("paxorder_bot", level="WARNING") as logs:
             intent = await bot.extract_intent("hello")
         joined = "\n".join(logs.output)
@@ -7597,15 +7601,19 @@ class TestGlmProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(side_effect=RuntimeError("ge")),
              ) as gem, \
              mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as kilo, \
+             mock.patch(
                  "bot.glm_generate",
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "glm")
-        for fn in (deepseek, qwen, groq, gen, gem, glm):
+        for fn in (deepseek, qwen, groq, gen, gem, kilo, glm):
             fn.assert_awaited_once()
 
     async def test_ai_generate_raises_when_every_provider_fails(self):
-        # All six fail: the last provider's error propagates, and
+        # All providers fail: the last provider's error propagates, and
         # Gemini is not called a second time.
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
@@ -7634,12 +7642,17 @@ class TestGlmProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(side_effect=RuntimeError("ge")),
              ) as gem, \
              mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as kilo, \
+             mock.patch(
                  "bot.glm_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("gl")),
              ) as glm:
             with self.assertRaises(RuntimeError):
                 await bot.ai_generate("hello")
         gem.assert_awaited_once()
+        kilo.assert_awaited_once()
         glm.assert_awaited_once()
 
     async def test_ai_generate_glm_failure_logs_no_bearer(self):
@@ -7654,6 +7667,10 @@ class TestGlmProvider(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(
                  bot, "gemini_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
              ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
              self.assertLogs("paxorder_bot", level="WARNING") as logs:
             with self.assertRaises(bot.httpx.HTTPStatusError):
@@ -7750,8 +7767,9 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_ai_generate_calls_openrouter_when_gemini_fails(self):
-        # Every provider before OpenRouter fails: OpenRouter
-        # answers, GLM is never reached, each provider tried once.
+        # Every provider before OpenRouter fails (including Kilo, which
+        # has no key to skip): OpenRouter answers, GLM is never
+        # reached, each provider tried once.
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
@@ -7780,6 +7798,10 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(side_effect=RuntimeError("ge")),
              ) as gem, \
              mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as kilo, \
+             mock.patch(
                  "bot.openrouter_generate",
                  new=mock.AsyncMock(return_value="or"),
              ) as router, \
@@ -7788,13 +7810,13 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "or")
-        for fn in (deepseek, qwen, groq, gen, gem, router):
+        for fn in (deepseek, qwen, groq, gen, gem, kilo, router):
             fn.assert_awaited_once()
         glm.assert_not_awaited()
 
     async def test_ai_generate_skips_openrouter_without_key(self):
         # No OPENROUTER_API_KEY: the chain jumps straight from
-        # Gemini to GLM, and openrouter_generate is never called.
+        # Kilo to GLM, and openrouter_generate is never called.
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
@@ -7823,6 +7845,10 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(side_effect=RuntimeError("ge")),
              ), \
              mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as kilo, \
+             mock.patch(
                  "bot.openrouter_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("or")),
              ) as router, \
@@ -7831,11 +7857,12 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "glm")
+        kilo.assert_awaited_once()
         router.assert_not_awaited()
         glm.assert_awaited_once()
 
     async def test_ai_generate_falls_back_to_glm_when_openrouter_raises(self):
-        # OpenRouter fails after Gemini: GLM answers as last resort.
+        # OpenRouter fails after Kilo: GLM answers as last resort.
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
@@ -7864,6 +7891,10 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(side_effect=RuntimeError("ge")),
              ), \
              mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as kilo, \
+             mock.patch(
                  "bot.openrouter_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("or")),
              ) as router, \
@@ -7872,10 +7903,222 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "glm")
+        kilo.assert_awaited_once()
         router.assert_awaited_once()
         glm.assert_awaited_once()
 
     async def test_ai_generate_openrouter_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "QWEN_API_KEY", ""), \
+             mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ), \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            self.assertEqual(await bot.ai_generate("hi"), "glm")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "OpenRouter generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("sk-or-test", joined)
+        self.assertNotIn("key=", joined)
+
+
+class TestKiloProvider(unittest.IsolatedAsyncioTestCase):
+    """Kilo Code gateway is the free fallback after Gemini (owner,
+    14 Nov 2026): it routes to a currently-free model (default model
+    "kilo-auto/free") via an OpenAI-compatible API, $0 total — no
+    key, no signup, no card, no Authorization header. 200
+    requests/hour per IP. It only runs after Gemini failed — never
+    on healthy days — and a Kilo failure falls through to
+    OpenRouter, then GLM. The provider mirrors OpenRouter exactly,
+    minus the auth header."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.kilo.ai/api/gateway/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_kilo_default_model_is_kilo_auto_free(self):
+        self.assertEqual(bot.KILO_MODEL, "kilo-auto/free")
+
+    def test_kilo_default_url_is_gateway(self):
+        self.assertEqual(bot.KILO_URL, "https://api.kilo.ai/api/gateway")
+
+    async def test_kilo_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client):
+            self.assertEqual(await bot.kilo_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(
+            post["url"].startswith("https://api.kilo.ai/api/gateway")
+        )
+        # No key, no signup: the request carries NO Authorization
+        # header at all.
+        self.assertEqual(post["headers"], {})
+        self.assertNotIn("Authorization", post["headers"])
+        self.assertEqual(post["json"]["model"], "kilo-auto/free")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_kilo_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client):
+            await bot.kilo_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_kilo_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.kilo_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_kilo_generate_model_env_honoured(self):
+        # A pinned model (KILO_MODEL) replaces the router
+        # default "kilo-auto/free" in the posted request.
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(
+                 bot, "KILO_MODEL",
+                 "nvidia/nemotron-3-ultra-550b-a55b:free",
+             ):
+            await bot.kilo_generate("hi")
+        self.assertEqual(
+            client.posts[0]["json"]["model"],
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        )
+
+    async def test_ai_generate_calls_kilo_when_gemini_fails(self):
+        # Every provider before Kilo fails: Kilo answers, OpenRouter
+        # and GLM are never reached, each provider tried once.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ) as qwen, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("o")),
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ) as gem, \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(return_value="kilo"),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "kilo")
+        for fn in (deepseek, qwen, groq, gen, gem, kilo):
+            fn.assert_awaited_once()
+        router.assert_not_awaited()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_falls_back_to_openrouter_when_kilo_raises(self):
+        # Kilo fails after Gemini: OpenRouter answers, GLM is never
+        # reached.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
+             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
+             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
+             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("d")),
+             ), \
+             mock.patch(
+                 "bot.qwen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("q")),
+             ), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
+             ), \
+             mock.patch(
+                 "bot.openai_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("o")),
+             ), \
+             mock.patch(
+                 "bot.gemini_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("ge")),
+             ), \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as kilo, \
+             mock.patch(
+                 "bot.openrouter_generate",
+                 new=mock.AsyncMock(return_value="or"),
+             ) as router, \
+             mock.patch(
+                 "bot.glm_generate",
+                 new=mock.AsyncMock(return_value="glm"),
+             ) as glm:
+            self.assertEqual(await bot.ai_generate("hello"), "or")
+        kilo.assert_awaited_once()
+        router.assert_awaited_once()
+        glm.assert_not_awaited()
+
+    async def test_ai_generate_kilo_failure_logs_no_bearer(self):
         err = self._status_error(404)
         client = GroqFlakyClient([err, err, err])
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
@@ -7897,7 +8140,7 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await bot.ai_generate("hi"), "glm")
         joined = "\n".join(logs.output)
         self.assertIn(
-            "OpenRouter generate failed, trying next provider (HTTP 404)",
+            "Kilo generate failed, trying next provider (HTTP 404)",
             joined,
         )
         self.assertNotIn("Bearer ", joined)
