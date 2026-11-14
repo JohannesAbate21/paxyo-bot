@@ -6529,7 +6529,11 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Paris", msg.text_sent[0])
         self.assertIn("what would you like to order?", msg.text_sent[0].lower())
 
-    async def test_third_off_topic_steers_back(self):
+    async def test_off_topic_questions_always_answered(self):
+        # Widened 14 Nov 2026 (owner): a real question always gets
+        # a free AI answer plus the steer-back line — never the
+        # canned deflection, however many turns it takes. (Was:
+        # the third off-topic turn steered back with no answer.)
         msg = FakeMessage()
         update = FakeUpdate(msg)
         with mock.patch(
@@ -6542,7 +6546,32 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
             for text in (
                 "Who will win the football tonight?",
                 "What is the weather like?",
+                "How do I get the link of a Telegram post?",
+            ):
+                await bot.handle_order_text(update, None, text)
+        self.assertEqual(len(msg.text_sent), 3)
+        for reply in msg.text_sent:
+            self.assertIn("Paris", reply)
+            self.assertIn("what would you like to order?", reply.lower())
+        self.assertNotIn("Paris", bot.t("off_topic_steer", "en"))
+
+    async def test_third_off_topic_statement_steers_back(self):
+        # Only non-question chit-chat is capped: the first two
+        # turns get a general answer plus a nudge, the third
+        # steers back with no answer.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("off_topic")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(return_value="The capital of France is Paris."),
+        ), mock.patch("bot.speak_reply"):
+            for text in (
                 "Tell me a story.",
+                "Sing me a song.",
+                "Make me laugh.",
             ):
                 await bot.handle_order_text(update, None, text)
         self.assertEqual(len(msg.text_sent), 3)
@@ -9275,7 +9304,7 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
         # unchanged), so the Amharic templates answer directly.
         with mock.patch(
             "bot.translate_to_english",
-            new=mock.AsyncMock(side_effect=lambda text: text),
+            new=mock.AsyncMock(side_effect=lambda text, **kw: text),
         ):
             await self._send(
                 "እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ",
@@ -10574,9 +10603,10 @@ class TestPausedServices(unittest.IsolatedAsyncioTestCase):
 
 class FlakyReactionsPaxyo(RealReactionsPaxyo):
     """Catalogue fails on the first call, works after — since the
-    prompt shrink (14 Nov 2026) the first call is the pre-fetch for
-    the classifier hint, which fails silently, so the direct price
-    answer still finds the price on its own lookup."""
+    price fast path (14 Nov 2026) the first call is the fast-path
+    price lookup, which fails silently, so the direct price answer
+    still finds the price on its own lookup after the classifier
+    pre-fetch."""
 
     def __init__(self):
         self._calls = 0
@@ -10590,9 +10620,10 @@ class FlakyReactionsPaxyo(RealReactionsPaxyo):
 
 class FlakyTwiceReactionsPaxyo(RealReactionsPaxyo):
     """Catalogue fails on the first TWO calls, works after — the
-    pre-fetch fails and the direct price answer finds nothing, so
-    the order flow must still carry the price into the
-    link-asking reply (the link-ask safety net)."""
+    fast-path lookup and the classifier pre-fetch both fail, but
+    the post-classification direct price answer still finds the
+    price on its own lookup, so the reply is the direct price
+    (no link ask)."""
 
     def __init__(self):
         self._calls = 0
@@ -10600,6 +10631,23 @@ class FlakyTwiceReactionsPaxyo(RealReactionsPaxyo):
     async def services(self):
         self._calls += 1
         if self._calls <= 2:
+            raise RuntimeError("catalogue hiccup")
+        return await super().services()
+
+
+class FlakyThriceReactionsPaxyo(RealReactionsPaxyo):
+    """Catalogue fails on the first THREE calls, works after — the
+    fast-path lookup, the classifier pre-fetch and the direct
+    price answer all find nothing, so the order flow must still
+    carry the price into the link-asking reply (the link-ask
+    safety net)."""
+
+    def __init__(self):
+        self._calls = 0
+
+    async def services(self):
+        self._calls += 1
+        if self._calls <= 3:
             raise RuntimeError("catalogue hiccup")
         return await super().services()
 
@@ -10740,8 +10788,9 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.text_sent[0].count("5.46 ETB for 1,000"), 1)
 
     # (4) the price still quotes when the first lookup fails --------
-    # (the pre-fetch for the classifier hint absorbs the hiccup, so
-    # the direct price answer still finds the price) ------------------
+    # (the fast-path lookup fails silently, the classifier
+    # pre-fetch succeeds, and the direct price answer still finds
+    # the price) ------------------------------------------------------
 
     async def test_link_ask_reply_carries_price_when_lookup_fails_once(self):
         paxyo = FlakyReactionsPaxyo()
@@ -10751,7 +10800,7 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
                       service_hint="telegram reactions", quantity=1000),
             paxyo=paxyo,
         )
-        self.assertEqual(paxyo._calls, 2)
+        self.assertEqual(paxyo._calls, 3)
         reply = msg.text_sent[0]
         # The direct price answer quotes 5.46 exactly once, even
         # though the first catalogue lookup failed.
@@ -10760,10 +10809,11 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.count("5.46 ETB for 1,000"), 1)
         self.assertNotIn("Please send the link", reply)
 
-    # (5) the link-asking reply carries the price when the direct
-    # answer finds nothing (first TWO lookups fail) -------------------
+    # (5) the direct price still answers when the first TWO lookups
+    # fail (fast path + pre-fetch), and the link-asking reply
+    # carries the price when the first THREE fail ------------------
 
-    async def test_link_ask_reply_carries_price_when_lookup_fails_twice(self):
+    async def test_direct_price_answers_when_lookup_fails_twice(self):
         paxyo = FlakyTwiceReactionsPaxyo()
         msg = await self._send(
             "I want 👍 reaction for my telegram channel post how much 1k",
@@ -10772,6 +10822,21 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
             paxyo=paxyo,
         )
         self.assertEqual(paxyo._calls, 3)
+        reply = msg.text_sent[0]
+        self.assertIn("Thumbs up 👍", reply)
+        self.assertIn("5.46 ETB for 1,000", reply)
+        self.assertEqual(reply.count("5.46 ETB for 1,000"), 1)
+        self.assertNotIn("Please send the link", reply)
+
+    async def test_link_ask_reply_carries_price_when_lookup_fails_thrice(self):
+        paxyo = FlakyThriceReactionsPaxyo()
+        msg = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=paxyo,
+        )
+        self.assertEqual(paxyo._calls, 4)
         reply = msg.text_sent[0]
         # The price line is there, once, ahead of the link ask —
         # and the emoji acknowledgement survived intact.
@@ -11040,6 +11105,628 @@ class TestPromptShrink(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("#2005", sent_prompt)
         self.assertEqual(result["intent"], "order")
         self.assertEqual(result["platform"], "tiktok")
+
+
+class FastestLikesPaxyo(FakePaxyo):
+    """TikTok Likes modelled on the live 14 Nov 2026 case: the
+    cheapest service is slow, the fastest costs 237.01 ETB/1000
+    (live services #5812/#2374, "Instant Start"), and the
+    cheapest-of-all (#5379, 5.88) is blacklisted and must never
+    be picked."""
+
+    LIKES_SERVICES = [
+        {
+            "service": 4019, "name": "TikTok Likes | Slow Cheap",
+            "category": "TikTok Likes", "type": "Default",
+            "rate_etb_per_1000": 6.30, "min": 10, "max": 1000000,
+            "average_time": "2 hours", "active": True,
+        },
+        {
+            "service": 5812, "name": "TikTok Likes | Instant Start",
+            "category": "TikTok Likes", "type": "Default",
+            "rate_etb_per_1000": 237.01, "min": 10, "max": 20000000,
+            "average_time": "1 minute", "active": True,
+        },
+        {
+            "service": 5379, "name": "TikTok Likes | Blacklisted",
+            "category": "TikTok Likes", "type": "Default",
+            "rate_etb_per_1000": 5.88, "min": 10, "max": 1000000,
+            "average_time": "1 minute", "active": True,
+        },
+    ]
+
+    async def services(self):
+        return list(self.LIKES_SERVICES)
+
+
+class TwoPlatformViewsPaxyo(FakePaxyo):
+    """Views on two platforms: Instagram views are faster AND
+    cheaper than TikTok views, so only the conversation context
+    (a TikTok draft being built) can keep a bare "how much are
+    the views?" on TikTok."""
+
+    VIEWS_SERVICES = [
+        {
+            "service": 2001, "name": "TikTok Video Views | Fast",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 18.90, "min": 10, "max": 100000,
+            "average_time": "5 minutes", "active": True,
+        },
+        {
+            "service": 3001, "name": "Instagram Views | Fast",
+            "category": "Instagram Views", "type": "Default",
+            "rate_etb_per_1000": 9.00, "min": 10, "max": 100000,
+            "average_time": "1 minute", "active": True,
+        },
+    ]
+
+    async def services(self):
+        return list(self.VIEWS_SERVICES)
+
+
+class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
+    """Shared set-up for the language + price-fast-path tests:
+    empty stores and a reset bridge flag, like the other
+    handle_order_text test classes."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        bot._BRIDGE_LANG.set(None)
+        bot._BRIDGE_AMHARIC.set(False)
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        bot._BRIDGE_LANG.set(None)
+        bot._BRIDGE_AMHARIC.set(False)
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+
+class TestLanguageRound(_LanguageRoundBase):
+    """Owner rule, 14 Nov 2026: the bot replies in the language of
+    the user's CURRENT message — English in, English out; Amharic
+    in, Amharic out — and Oromo (Afaan Oromo) and Tigrinya get the
+    same treatment as Amharic. The live bug was a stuck bridge
+    flag: an Amharic turn translated every later English reply
+    back to Amharic."""
+
+    def test_detect_language_samples(self):
+        cases = (
+            ("ሰላም, የቲክቶክ ተከታዮች መግዛት እፈልጋለሁ", "am"),
+            ("ሰላም! ኣነ Paxyo Order bot እየ።", "ti"),
+            ("ኣነ 1000 TikTok followers እደሊ", "ti"),
+            ("Akkam, tajaajila TikTok barbaada", "om"),
+            ("galatoomi, meeqa views?", "om"),
+            ("I want 1000 views", "en"),
+            ("I want 1000 views", "en"),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(bot.detect_language(text), expected)
+        # The account language never overrides the words typed:
+        # English text stays English even on an Amharic account.
+        self.assertEqual(bot.detect_language("I want 1000 views", "am"), "en")
+        self.assertEqual(bot.lang_of("I want 1000 views", "am"), "en")
+        # ... and is only the fallback when the message itself
+        # carries no language signal (a bare number, an emoji).
+        self.assertEqual(bot.detect_language("1000", "am"), "am")
+        self.assertEqual(bot.detect_language("1000", "en"), "en")
+        self.assertEqual(bot.detect_language("👍", ""), "en")
+
+    def test_t_falls_back_to_english_for_missing_language(self):
+        # Keys with no Oromo/Tigrinya version fall back to English
+        # (the bridge translates prose replies at send time).
+        self.assertEqual(
+            bot.t("ask_link", "om"), bot.t("ask_link", "en")
+        )
+        self.assertEqual(
+            bot.t("ask_link", "ti"), bot.t("ask_link", "en")
+        )
+        # Keys with a version use it.
+        self.assertIn("argachuu", bot.t("contact_owner", "om"))
+        self.assertIn("t.me/paxyo", bot.t("contact_owner", "om"))
+        self.assertIn("ተዓጺዩ", bot.t("paused_services", "ti"))
+        self.assertIn(
+            "hin kufan",
+            bot.t("never_drop", "om", service="Telegram reactions"),
+        )
+        self.assertIn(
+            "ኣይወድቁን",
+            bot.t("never_drop", "ti", service="Telegram reactions"),
+        )
+
+    async def test_reply_follows_current_message_after_switch(self):
+        # The live repro: an Amharic turn, then the English
+        # "I'm tired today" — the second reply must be English,
+        # not translated back to Amharic.
+        amharic_q = "አገልግሎቶችዎን ከየት ታገኛላችሁ?"
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                return_value="where do you get your services"
+            ),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(return_value="AMHARIC-REPLY"),
+        ) as to_am, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("classifier must not run")
+            ),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            msg = FakeMessage()
+            await bot.handle_order_text(FakeUpdate(msg), None, amharic_q)
+            self.assertEqual(msg.text_sent, ["AMHARIC-REPLY"])
+            to_am.assert_awaited_once()
+        # Same task, next turn, English: the bridge must NOT fire.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("must not translate English")
+            ),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("must not translate back")
+            ),
+        ) as to_am2, mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(
+                return_value="Hope you feel better soon."
+            ),
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("classifier must not run")
+            ),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            msg2 = FakeMessage()
+            await bot.handle_order_text(
+                FakeUpdate(msg2), None, "I'm tired today"
+            )
+        self.assertIn("Hope you feel better soon.", msg2.text_sent[0])
+        self.assertNotIn("AMHARIC", msg2.text_sent[0])
+        to_am2.assert_not_awaited()
+        self.assertIsNone(bot._BRIDGE_LANG.get())
+
+    async def test_oromo_order_is_bridged_to_english(self):
+        oromo = (
+            "Akkam, 200 TikTok views barbaada: "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        )
+        english = (
+            "please order 200 TikTok views for this video: "
+            "https://vt.tiktok.com/ZSpQWTSmH/"
+        )
+        intent = intent_of(
+            "order", platform="tiktok", service_hint="views",
+            link="https://vt.tiktok.com/ZSpQWTSmH/", quantity=200,
+        )
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=english),
+        ) as to_en, mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=AssertionError(
+                    "Confirm card must not be translated"
+                )
+            ),
+        ), mock.patch(
+            "bot.translate_to_language",
+            new=mock.AsyncMock(
+                side_effect=AssertionError(
+                    "Confirm card must not be translated"
+                )
+            ),
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ) as extract, mock.patch(
+            "bot.paxyo", TikTokPaxyo()
+        ), mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(FakeUpdate(msg), None, oromo)
+        self.assertEqual(
+            to_en.await_args.args[0], bot.normalize_text(oromo)
+        )
+        self.assertEqual(to_en.await_args.kwargs.get("source_lang"), "om")
+        extract.assert_awaited_once()
+        self.assertEqual(extract.await_args.args[0], english)
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_tigrinya_reply_is_translated_back(self):
+        tigrinya = "ኣነ 1000 TikTok followers እደሊ"
+        english = "I want 1000 TikTok followers"
+        intent = intent_of(
+            "order", platform="tiktok", service_hint="followers",
+            quantity=1000,
+        )
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=english),
+        ) as to_en, mock.patch(
+            "bot.translate_to_language",
+            new=mock.AsyncMock(return_value="ሊንክ ይላኩ"),
+        ) as to_ti, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ), mock.patch(
+            "bot.paxyo", TikTokPaxyo()
+        ), mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(FakeUpdate(msg), None, tigrinya)
+        self.assertEqual(
+            to_en.await_args.args[0], bot.normalize_text(tigrinya)
+        )
+        self.assertEqual(to_en.await_args.kwargs.get("source_lang"), "ti")
+        self.assertEqual(to_ti.await_args.args, ("Please send the link the order is for.", "ti"))
+        self.assertEqual(msg.text_sent, ["ሊንክ ይላኩ"])
+
+    async def test_translate_prompts_name_the_language(self):
+        with mock.patch(
+            "bot.gemini_generate",
+            new=mock.AsyncMock(return_value="hello"),
+        ) as gen:
+            await bot.translate_to_english("ሰላም", source_lang="ti")
+        self.assertIn("Tigrinya", gen.await_args.args[0])
+        with mock.patch(
+            "bot.gemini_generate",
+            new=mock.AsyncMock(return_value="akkam"),
+        ) as gen:
+            await bot.translate_to_language("Hello", "om")
+        self.assertIn("Oromo", gen.await_args.args[0])
+        self.assertIn("service names", gen.await_args.args[0])
+
+
+class TestPriceFastPath(_LanguageRoundBase):
+    """Live bug, 14 Nov 2026: the 👍 price arrived 68 seconds late
+    as a separate message, because the price answer waited on the
+    AI classifier and the bridge. Price questions are now answered
+    from local detection only, before the classifier runs — the
+    greeting branch (and any other post-classification branch)
+    can never swallow one, and the classifier is never called for
+    it at all."""
+
+    async def _send(self, text, paxyo=None, intent=_UNSET):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        patches = [
+            mock.patch("bot.paxyo", paxyo or FakePaxyo()),
+            mock.patch("bot.speak_reply"),
+        ]
+        if intent is _UNSET:
+            patches.append(mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError("classifier must not run")
+                ),
+            ))
+        else:
+            patches.append(mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ))
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def test_price_question_never_calls_classifier(self):
+        # The live repro: the greeting reply the retest saw was a
+        # late answer to an earlier message, but the price itself
+        # waited on the classifier. Now one reply goes out, with
+        # the price, and the classifier never runs.
+        msg = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            paxyo=RealReactionsPaxyo(),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("Thumbs up 👍", reply)
+        self.assertIn("5.46 ETB for 1,000", reply)
+        self.assertNotIn("Hello! I am the Paxyo Order bot", reply)
+
+    async def test_greeting_intent_cannot_swallow_price_question(self):
+        # Even on the fallback path (the fast-path lookup fails
+        # once, so the classifier runs), a "greeting" verdict must
+        # not swallow the price — the post-classification price
+        # branch runs before the greeting branch.
+        msg = await self._send(
+            "I want 👍 reaction for my telegram channel post how much 1k",
+            paxyo=FlakyReactionsPaxyo(),
+            intent=intent_of(
+                "greeting", platform="telegram",
+                service_hint="telegram reactions", quantity=1000,
+            ),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("Thumbs up 👍", reply)
+        self.assertIn("5.46 ETB for 1,000", reply)
+        self.assertNotIn("Hello! I am the Paxyo Order bot", reply)
+
+    async def test_fast_path_uses_conversation_platform(self):
+        # A bare "how much are the views?" while a TikTok views
+        # draft is being built is about TikTok views — not the
+        # faster, cheaper Instagram views in the same catalogue.
+        bot.PARTIAL[1] = {"platform": "tiktok", "service_hint": "views"}
+        msg = await self._send(
+            "how much are the views?",
+            paxyo=TwoPlatformViewsPaxyo(),
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("TikTok", reply)
+        self.assertIn("18.90", reply)
+        self.assertNotIn("Instagram", reply)
+
+    async def test_tiktok_likes_fastest_pick_matches_live_price(self):
+        # The live 14 Nov 2026 figure (1,185.05 ETB for 5,000) is
+        # the FASTEST TikTok Likes service (237.01/1000, "Instant
+        # Start" — live #5812/#2374), not the cheapest (6.30) and
+        # never the blacklisted #5379 (5.88). Fastest-first, not
+        # cheapest-first, is the documented pick rule.
+        msg = await self._send(
+            "how much is 5000 tiktok likes?",
+            paxyo=FastestLikesPaxyo(),
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("TikTok Likes", reply)
+        self.assertIn("1,185.05", reply)
+        self.assertIn("5,000", reply)
+        self.assertNotIn("31.50", reply)
+
+
+class TestWidenFreeAnswers(_LanguageRoundBase):
+    """Owner rule, 14 Nov 2026 (course correction): DeepSeek answers
+    how-to and general questions FREELY — no big canned Q&A list.
+    Deterministic answers stay only for Paxyo facts that must be
+    exact (prices, comment-likes requirements, private-account
+    rule, refunds to balance only, reseller/contact, paused
+    services). Off-topic questions get a free answer plus ONE
+    short steer-back line; on-topic how-tos get no steer-back."""
+
+    async def test_link_howto_repro_answered_on_third_turn(self):
+        # Owner repro, 14 Nov 2026: "how do I get the link of a
+        # Telegram post?" got no reply — the classifier called it
+        # off_topic, and from the third turn the bot only sent the
+        # steer line ("I'm the Paxyo order bot — I can only help
+        # with Paxyo orders."). A real question must get a free AI
+        # answer on EVERY turn, not just the first two.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("off_topic")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(
+                return_value="Tap the post, then tap Copy Link."
+            ),
+        ), mock.patch("bot.speak_reply"):
+            for _ in range(3):
+                await bot.handle_order_text(
+                    update, None,
+                    "how do I get the link of a Telegram post?",
+                )
+        self.assertEqual(len(msg.text_sent), 3)
+        for reply in msg.text_sent:
+            self.assertIn("Copy Link", reply)
+
+    async def test_off_topic_question_gets_answer_plus_steer_back(self):
+        # Rule, 14 Nov 2026: an off-topic question is answered
+        # freely first, then brought back to ordering with ONE
+        # short line at the end.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("off_topic")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(
+                return_value="Paris is the capital of France."
+            ),
+        ), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "What is the capital of France?"
+            )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Paris is the capital", msg.text_sent[0])
+        self.assertIn(
+            "By the way — what would you like to order?",
+            msg.text_sent[0],
+        )
+
+    async def test_how_to_intent_gets_free_answer_without_steer(self):
+        # On-topic how-tos need no steer-back line: the question
+        # itself is about ordering.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("how_to")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(
+                return_value="Tap the post, then tap Copy Link."
+            ),
+        ), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None,
+                "how do I get the link of a Telegram post?",
+            )
+        self.assertEqual(
+            msg.text_sent, ["Tap the post, then tap Copy Link."]
+        )
+
+    def test_is_question(self):
+        self.assertTrue(bot.is_question("how do I get the link?"))
+        self.assertTrue(bot.is_question("Who will win tonight?"))
+        self.assertTrue(bot.is_question("What is the capital of France?"))
+        self.assertTrue(bot.is_question("can I order for someone else"))
+        self.assertFalse(bot.is_question("Tell me a story."))
+        self.assertFalse(bot.is_question("haha nice"))
+        self.assertFalse(bot.is_question(""))
+
+    def test_is_comment_likes_question(self):
+        self.assertTrue(
+            bot.is_comment_likes_question(
+                "what do I need for comment likes?"
+            )
+        )
+        self.assertTrue(
+            bot.is_comment_likes_question("how do I order comment likes?")
+        )
+        # An actual order (a link is pasted) is never a question.
+        self.assertFalse(
+            bot.is_comment_likes_question(
+                "I want likes for my comment https://tiktok.com/@x/video/1"
+            )
+        )
+        self.assertFalse(
+            bot.is_comment_likes_question("I want likes for my comment")
+        )
+
+    async def test_comment_likes_question_gets_deterministic_answer(self):
+        # Paxyo fact (owner, 14 Nov 2026): comment likes need the
+        # video/post link plus either the comment's own link or
+        # the username. Deterministic — the AI must never invent
+        # a different requirement.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("paxyo_info")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("AI must not be asked")
+            ),
+        ), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "what do I need for comment likes?"
+            )
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("link of the video or post", reply)
+        self.assertIn("link of the comment itself or your username", reply)
+
+    async def test_comment_likes_order_is_not_swallowed(self):
+        # A real order for comment likes still goes through the
+        # order flow — the deterministic answer is only for the
+        # question, never for the order itself.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "order", platform="tiktok",
+                service_hint="tiktok comment likes",
+                link="https://www.tiktok.com/@x/video/123",
+                quantity=100,
+            )),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.handle_order_text(
+                update, None,
+                "I want likes for my comment "
+                "https://www.tiktok.com/@x/video/123 100",
+            )
+        self.assertTrue(msg.text_sent)
+        self.assertNotIn(
+            "For likes on a comment I need two things",
+            " ".join(msg.text_sent),
+        )
+
+    async def test_private_account_rule_is_deterministic(self):
+        # Paxyo fact: a private account can't receive the order —
+        # the account must be public. The "how to make it public"
+        # part is a free AI answer; the rule itself is fixed.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("paxyo_info")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.handle_order_text(
+                update, None, "must my account be public to order?"
+            )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("must be public", msg.text_sent[0])
+        self.assertIn("can't receive the order", msg.text_sent[0])
+
+    async def test_amharic_howto_answered_in_amharic(self):
+        # Amharic already works (owner, 14 Nov 2026): the bridge
+        # translates the question to English, DeepSeek answers
+        # freely, and the reply comes back in Amharic.
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=FakeUser(language_code="am"))
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                return_value="how do i get the link of a telegram post"
+            ),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(return_value="AMHARIC-LINK-ANSWER"),
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("off_topic")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(
+                return_value="Tap the post, then tap Copy Link."
+            ),
+        ), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "የቴሌግራም ፖስት ሊንክ እንዴት አገኛለሁ?"
+            )
+        self.assertEqual(msg.text_sent, ["AMHARIC-LINK-ANSWER"])
 
 
 if __name__ == "__main__":

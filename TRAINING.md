@@ -4,7 +4,7 @@ This file is the bot's memory of everything its owner taught it. If the bot
 ever has to be rebuilt from scratch, read this file first: it holds every
 rule, fact and behaviour the owner set, so the rebuild learns fast.
 Source of truth for behaviour is `bot.py`; this file is the human-readable
-record of *why* it behaves that way. Last updated: 14 Nov 2026 (deterministic price fix: the price never depends on which AI answers).
+record of *why* it behaves that way. Last updated: 14 Nov 2026 (language round: reply in the user's current language + Oromo/Tigrinya; price fast path: price questions answered before the classifier).
 
 ## Who Paxyo is
 - Paxyo is an Ethiopian service for ordering followers, likes, views,
@@ -67,6 +67,41 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (deterministic pr
   from DeepSeek, because the answer used to depend on the
   classifier's intent). And a reply that asks for the link after a
   price question always carries the price in that same reply.
+  PRICE FAST PATH (14 Nov 2026): a price question is answered from
+  local detection only, BEFORE the AI classifier runs — the
+  classifier is never called for it, so a slow or wrong
+  classification can never delay or swallow the price (live retest
+  13:35 EAT: the 👍 price arrived 68 seconds late as a separate
+  message because the classifier and the bridge ran first, and the
+  greeting that arrived in between was the late answer to an
+  earlier message, not the price question's reply). When the fast
+  path cannot name a service, the flow still runs the classifier
+  and the post-classification price branch. A price question that
+  names a metric but no platform ("how much are the views?") takes
+  its platform from the order being built, never from another
+  platform's fastest service.
+- HOW-TO / GENERAL QUESTIONS — ANSWER FREELY (owner, 14 Nov 2026,
+  course correction): do NOT prepare canned answers for every
+  possible question. When a user asks how to do something (how to
+  get a Telegram post link, how to make an Instagram account
+  public, how to copy a link, how to find a username), DeepSeek
+  answers FREELY, like a normal AI — no deflection, no silence, no
+  canned "I only help with orders" reply. A real question always
+  gets an answer, however many turns it takes. (14 Nov 2026 repro:
+  "how do I get the link of a Telegram post?" got no reply
+  because the classifier called it off_topic and from the third
+  turn the bot only sent the steer line.) New intent "how_to"
+  routes these to the AI. Off-topic questions are answered freely
+  first, then brought back to ordering with ONE short line ("By
+  the way — what would you like to order?"). On-topic how-tos get
+  no steer-back line. Only non-question chit-chat is capped
+  (2 turns, then the steer).
+- DETERMINISTIC PAXYO FACTS ONLY: prices (above), comment likes
+  (the video/post link plus either the comment's link or the
+  username), private accounts must be public (a private account
+  can't receive the order), refunds to Paxyo balance only,
+  reseller/contact → t.me/paxyo, paused services. Everything else
+  is answered by the AI, never canned.
 - SPEED: when asked how long something takes, give a REAL estimated time
   from the service's average time (e.g. "usually starts within 1 minute"),
   and add: the sooner we place the order, the sooner it will be completed
@@ -139,6 +174,11 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (deterministic pr
   A TikTok video link for a followers order (or a profile link
   for views/likes) gets ONE plain line explaining it and asking
   for the right link — never a bare "send the link" loop.
+- COMMENT LIKES — WHAT THE BOT NEEDS: the link of the video/post
+  the comment is on, plus either the link of the comment itself or
+  the username. A question about it gets this exact deterministic
+  answer; an actual order (a link is pasted) goes through the
+  order flow, never the answer.
 - BUDGET: "10 birr, how many views?" — answer with the QUANTITY (e.g.
   "about 520 views"), not just the per-1000 price.
 - IMPATIENCE: give the real status + average time, never "soon".
@@ -250,15 +290,44 @@ record of *why* it behaves that way. Last updated: 14 Nov 2026 (deterministic pr
   silent and never forgets these lessons, because the lessons are in
   this repo (bot.py + this file), NOT in any AI provider. No provider
   keeps any memory of the bot between chats.
-- Amharic translate-bridge (owner, 13 Nov 2026): an Amharic message
-  is translated to English by Gemini first, the flow runs in
-  English, and prose replies are translated back to Amharic before
+- LANGUAGE RULE (owner, 14 Nov 2026): the bot replies in the SAME
+  language the user is speaking in the CURRENT message — English
+  in, English out; Amharic in, Amharic out; and the same for
+  Tigrinya and Oromo (Afaan Oromo). NEVER the previous turn's
+  language. The reply language is decided from the current
+  message's words alone (detect_language): Ge'ez script is
+  Amharic or Tigrinya (vocabulary decides, Amharic on a tie);
+  Latin script with an Oromo word is Oromo; other Latin text is
+  English. The Telegram account language is only the fallback
+  when the message carries no language signal (a bare number, an
+  emoji) — it must never override the words typed.
+- Translate-bridge (owner, 13 Nov 2026; Oromo and Tigrinya added
+  14 Nov 2026): an Amharic, Tigrinya or Oromo message is translated
+  to English by Gemini first, the flow runs in English, and prose
+  replies are translated back to the user's language before
   sending. English never touches the bridge. If a translation fails,
   the original text is used — never silent, never a dropped order.
   Confirm cards, buttons, prices, links and service IDs are never
   translated. The bridge does not break the local Amharic metric
   words or Amharic reply templates — those still apply when
   translation fails.
+  STUCK-LANGUAGE BUG (live, 14 Nov 2026): the old bridge flag was
+  set on an Amharic turn and never cleared — and because PTB
+  processes updates sequentially in one task (max_concurrent_updates
+  = 1, the default), it leaked into every later English turn, so
+  "I'm tired" and "I said do you speak English" both got Amharic
+  replies. The flag is now the per-turn _BRIDGE_LANG, reset at the
+  start of every turn in handle_order_text. The same sequential
+  processing is also why slow turns delay later replies: each
+  update waits for the one before it, so a price question that
+  waits on the AI arrives late — see PRICE FAST PATH above.
+  Oromo and Tigrinya have first-pass translations for the short
+  deterministic lines (greeting, contact/reseller, paused
+  services, never-drop); anything without one falls back to
+  English in t() and the bridge translates it at send time.
+  Those first-pass translations are unreviewed by a native
+  speaker — fix them if a user reports a wrong one, do not guess
+  further translations; the bridge is the fallback.
 - Groq free tier: 1,000 requests/day, 200,000 tokens/day. The TOKEN limit
   binds first. Paid Groq (Developer, pay-as-you-go) is $0.15/$0.60 per
   1M tokens, no monthly fee, first bill at $1 usage. (Note: on 13 Nov

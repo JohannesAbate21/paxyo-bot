@@ -283,6 +283,7 @@ Rules:
   - "deposit_status": asks whether a deposit went through, or says they paid and wants it rechecked ("I paid but my balance didn't change", "my deposit failed").
   - "help": asks for the help menu ("help", "what can you do?").
   - "how_to_order": does not know how to order ("how do I order?", "teach me how to order").
+  - "how_to": asks how to do something needed to order or use a platform — how to get a post or comment link, how to make an account public, how to copy a link, how to find a username. Answer from general knowledge; never deflect.
   - "miniapp": asks for the mini app.
   - "social": asks for Paxyo's social media or channel.
   - "greeting": greeting or small talk.
@@ -419,6 +420,24 @@ TEXT = {
             "“I want 1000 views” with your link.\n"
             "Use /balance to check your balance.\n"
             "Let's get you ordered! 😄"
+        ),
+        # Oromo and Tigrinya versions (owner, 14 Nov 2026): first
+        # pass — short lines only. Anything without a translation
+        # falls back to English in t() and the bridge translates
+        # it at send time.
+        "om": (
+            "Akkam! Ani Paxyo Order bot dha.\n"
+            "Tajaajila barbaaddan chat keessatti naa himi — "
+            "fakkeenyaaf, link kee waliin “views 1000 barbaada” jedhi.\n"
+            "Balance kee argachuuf /balance fayyadami.\n"
+            "Ajaja kee haa galchinu! 😄"
+        ),
+        "ti": (
+            "ሰላም! ኣነ Paxyo Order bot እየ።\n"
+            "እትደልዮ ኣገልግሎት ብቻት ንገረኒ — ንኣብነት ምስ ሊንክካ "
+            "“1000 views እደሊ” ኢልካ።\n"
+            "ሚዛንካ ንምርኣይ /balance ተጠቐም።\n"
+            "ትእዛዝካ ንእትዎ! 😄"
         ),
     },
     "help": {
@@ -774,6 +793,14 @@ TEXT = {
             "If you want to sell Paxyo's services, contact William "
             "at t.me/paxyo — he will set it up with you."
         ),
+        "om": (
+            "Tajaajila Paxyo gurguruu yoo barbaadde, William "
+            "t.me/paxyo irratti qunnami — si waliin qopheessa."
+        ),
+        "ti": (
+            "ኣገልግሎት Paxyo ክትሸጡ እንተደሊኹም, William ኣብ "
+            "t.me/paxyo ተራኸቡ — ምሳኻ ከዳሉዎ እዩ።"
+        ),
     },
     # The user wants a human — support, the owner, the admin
     # (next batch, 14 Nov 2026). Same one line every time, so
@@ -787,6 +814,14 @@ TEXT = {
             "You can reach William (Yohannes Abate) at t.me/paxyo "
             "— he will help you."
         ),
+        "om": (
+            "William (Yohannes Abate) t.me/paxyo irratti argachuu "
+            "dandeessu — isin gargaara."
+        ),
+        "ti": (
+            "William (Yohannes Abate) ኣብ t.me/paxyo ክትረኽብዎ "
+            "ትኽእሉ ኢኹም — ክሕግዘኩም እዩ።"
+        ),
     },
     # Telegram reactions, Telegram views and Facebook reactions
     # never drop (owner, 14 Nov 2026). ONLY those three — the
@@ -795,6 +830,8 @@ TEXT = {
     "never_drop": {
         "am": "{service} በጭራሽ አይቀነሱም — ከደረሱ በኋላ ይቆያሉ።",
         "en": "{service} never drop — once they are delivered, they stay.",
+        "om": "{service} hin kufan — erga geessan booda achumaan turu.",
+        "ti": "{service} ኣይወድቁን — ምስ ቀረቡ ድሕሪኡ ኣብኡ ይጸንሑ።",
     },
     # Premium subscriptions (CapCut Pro, Canva Pro, Netflix/Spotify
     # premium, ...) and the SMS OTP verification service are PAUSED
@@ -810,6 +847,14 @@ TEXT = {
         "en": (
             "That one is paused right now — we will let you know "
             "when it's ready."
+        ),
+        "om": (
+            "Tajaajilli kun amma dhaabbateera — yeroo qophaa'u "
+            "isin beeksifna."
+        ),
+        "ti": (
+            "እዚ ኣገልግሎት እዚ ሕጂ ተዓጺዩ ኣሎ — ምስ ተዳልዩ "
+            "ክንሕብረኩም ኢና።"
         ),
     },
     # Messy real-world inputs (owner edge-case spec, 13 Nov 2026):
@@ -1186,6 +1231,24 @@ TEXT = {
         "am": "አዎ — accountዎ public መሆን አለበት፣ private አይደለም። Private account order መቀበል አይችልም።",
         "en": "Yes — your account must be public, not private. A private account can't receive the order.",
     },
+    # What the bot needs for likes on a comment (owner, 14 Nov
+    # 2026): the link of the video/post the comment is on, plus
+    # either the comment's own link or the username. One of the
+    # few deterministic Paxyo facts — the AI must never invent a
+    # different requirement.
+    "comment_likes_need": {
+        "am": (
+            "ለcomment likes ሁለት ነገሮች እፈልጋለሁ፦ የቪዲዮው ወይም "
+            "የፖስቱ link፣ እና የcommentው link ወይም usernameዎ። "
+            "ሁለቱን ይላኩልኝ እና order አደርጋለሁ።"
+        ),
+        "en": (
+            "For likes on a comment I need two things: the link of the "
+            "video or post the comment is on, and either the link of the "
+            "comment itself or your username. Send me both and I can "
+            "order it."
+        ),
+    },
     # Ban / shadowban (owner, 13 Nov 2026): the answer is NO, with his
     # reasoning. This replaces the old "no zero-risk guarantee" line
     # for this specific question.
@@ -1229,9 +1292,10 @@ TEXT = {
         "am": "በዚህ ቋንቋ እየተነጋገርክ መቀጠል አልችልም። በትክክል ስትጠይቅ ተመልሰህ ና።",
         "en": "I'm not continuing this while you talk like that. Come back when you can ask properly.",
     },
-    # Off-topic steering (owner, 13 Nov 2026): the first two
-    # off-topic turns get a brief general answer plus a nudge; from
-    # the third, the bot steers back to ordering.
+    # Off-topic steering (owner, 13 Nov 2026; widened 14 Nov
+    # 2026): a real question always gets a free AI answer plus a
+    # nudge; only non-question chit-chat steers back to ordering
+    # from the third turn.
     "off_topic_steer": {
         "am": "ወደ ordering እንመለስ — ምን ማዘዝ ይፈልጋሉ? Followers, likes, views እና ሌሎች እረዳለሁ።",
         "en": "Let's get back to ordering — what would you like to order? I can help with followers, likes, views and more.",
@@ -1378,8 +1442,13 @@ TEXT = {
 
 
 def t(key: str, lang: str, **kw) -> str:
-    """Short reply in the user's language."""
-    return TEXT[key][lang].format(**kw)
+    """Short reply in the user's language. Falls back to English
+    when the key has no translation in that language — a prose
+    reply is then translated by the bridge at send time, and a
+    card/button reply stays English (cards are never translated,
+    in any language)."""
+    entry = TEXT[key]
+    return (entry.get(lang) or entry["en"]).format(**kw)
 
 
 def is_amharic(text: str) -> bool:
@@ -1387,13 +1456,73 @@ def is_amharic(text: str) -> bool:
     return any("\u1200" <= ch <= "\u137f" for ch in text)
 
 
-def lang_of(text: str, user_lang: str = "") -> str:
-    """'am' for Amharic, otherwise 'en'."""
-    if is_amharic(text or ""):
-        return "am"
-    if (user_lang or "").lower().startswith("am"):
+# Ge'ez words that only Tigrinya uses, and words that only Amharic
+# uses, so a Ge'ez message can be told apart deterministically.
+# Shared words (ሰላም, names, numbers) are deliberately absent:
+# when neither side wins, the message is Amharic — most Paxyo
+# users write Amharic, and the bridge translates either way.
+_TIGRINYA_WORDS = frozenset((
+    "ኣነ", "እየ", "እዩ", "እያ", "ኢኹም", "ኢኻ", "ኣብ", "ድሕሪ",
+    "ምስ", "እንተ", "ከም", "ናይ", "ኣሎ", "ትኽእል", "እደሊ", "ሓደ",
+    "ሕጂ", "ክትረኽብ", "ንገረኒ", "ትኽእሉ", "ኣይት", "ምስኡ",
+    "እንተኾይኑ", "ከምኡ", "ድሕሪኡ", "ኣብኡ", "ኣለዎ", "ነይሩ",
+    "ክሕግዝ", "ክሕግዘኩም", "ትእዛዝካ", "ሚዛንካ", "ኣገልግሎት",
+))
+_AMHARIC_WORDS = frozenset((
+    "እኔ", "ነኝ", "ነው", "ናት", "እፈልጋለሁ", "እፈልግ", "እባክዎ",
+    "አለ", "አለው", "አለች", "እንደ", "ምንድን", "ይህ", "እዚህ",
+    "ሆነ", "አመሰግናለሁ", "እሺ", "አዎ", "ይሁን", "እችላለሁ",
+    "ይቻላል", "እንደምን", "እንዲህ", "አሁን", "እንደገና", "ይገኛል",
+    "እይታዎች", "ተከታዮች", "እንዴት",
+))
+
+# Latin-script Oromo words: when one of these shows up, the message
+# is Oromo (Afaan Oromo), not English. Deliberately distinctive
+# words only — ordinary English never contains them.
+_OROMO_WORDS = frozenset((
+    "akkam", "galatoomi", "galatooma", "barbaada", "barbaadu",
+    "barbaadda", "tajaajila", "meeqa", "maal", "yoom", "eessa",
+    "amma", "ani", "ati", "isin", "jedhi", "jedhu", "gatiin",
+    "ajaja", "bitachuu", "lakkoofsa", "bilbila", "akkamitti",
+    "eessaa", "waliin", "erga", "garuu", "jecha", "dubbi",
+    "keessa", "irraa", "isaan", "otuu", "yoo",
+))
+
+
+def detect_language(text: str, user_lang: str = "") -> str:
+    """'am', 'ti', 'om' or 'en' for a message. Ge'ez script is
+    Amharic or Tigrinya (vocabulary decides, Amharic on a tie);
+    Latin script with an Oromo word is Oromo; other Latin text is
+    English. The account language is only the fallback when the
+    message itself carries no language signal (a bare number, an
+    emoji, a link) — it must never override the words the user
+    actually typed (live bug, 14 Nov 2026: English replies came
+    back in Amharic)."""
+    s = text or ""
+    geez = re.findall(r"[\u1200-\u137c]+", s)
+    if geez:
+        ti = sum(1 for w in geez if w in _TIGRINYA_WORDS)
+        am = sum(1 for w in geez if w in _AMHARIC_WORDS)
+        return "ti" if ti > am else "am"
+    words = set(re.findall(r"[a-z]+", s.lower()))
+    if words & _OROMO_WORDS:
+        return "om"
+    if words:
+        return "en"
+    code = (user_lang or "").lower()
+    if code.startswith("ti"):
+        return "ti"
+    if code.startswith("om"):
+        return "om"
+    if code.startswith("am"):
         return "am"
     return "en"
+
+
+def lang_of(text: str, user_lang: str = "") -> str:
+    """'am' for Amharic, otherwise 'en'. Kept for callers that only
+    know two languages; detect_language is the full version."""
+    return "am" if detect_language(text, user_lang) == "am" else "en"
 
 
 # --------------------------------------------------------- pure helpers ---
@@ -3058,56 +3187,101 @@ async def ai_generate(prompt: str, system: str = None) -> str:
 
 
 # ------------------------------------------- Amharic translate-bridge ---
-# Amharic messages are translated to English by Gemini first, the
-# whole flow runs in English, and prose replies are translated back
-# to Amharic before sending (see reply_message). Owner, 13 Nov 2026:
-# DeepSeek/Qwen/Groq have unproven Amharic, but Gemini is strong on
-# it, so Gemini does the translating while the main AI does the
-# thinking. Links, numbers, service IDs, prices and service names
-# are never translated — the prompts say so, and Confirm cards,
-# buttons and post-acceptance summaries never pass through the
-# bridge at all. If either translation call fails, the original
-# text is used instead — the bot never goes silent and never drops
-# an order over a translation failure.
+# Amharic, Tigrinya and Oromo messages are translated to English by
+# Gemini first, the whole flow runs in English, and prose replies
+# are translated back to the user's language before sending (see
+# reply_message). Owner, 13 Nov 2026: DeepSeek/Qwen/Groq have
+# unproven Amharic, but Gemini is strong on it, so Gemini does the
+# translating while the main AI does the thinking. Oromo and
+# Tigrinya were added the same way on 14 Nov 2026. Links, numbers,
+# service IDs, prices and service names are never translated — the
+# prompts say so, and Confirm cards, buttons and post-acceptance
+# summaries never pass through the bridge at all. If either
+# translation call fails, the original text is used instead — the
+# bot never goes silent and never drops an order over a translation
+# failure.
+#
+# _BRIDGE_LANG is the language this turn's message was bridged from
+# ("am", "ti" or "om"), or None when the message was English. It is
+# reset at the start of every turn in handle_order_text: the old
+# boolean flag was set on an Amharic turn and never cleared, and
+# because PTB processes updates sequentially in one task
+# (max_concurrent_updates=1, the default — build_application does
+# not change it), it leaked into every later English turn and
+# translated those replies to Amharic too (live bug, 14 Nov 2026:
+# "I'm tired" and "I said do you speak English" both got Amharic
+# replies). _BRIDGE_AMHARIC is kept as a legacy alias, synced by
+# _set_bridge_lang, because the offline tests reset it between
+# cases.
+_BRIDGE_LANG = contextvars.ContextVar("paxyo_bridge_lang", default=None)
 _BRIDGE_AMHARIC = contextvars.ContextVar("paxyo_bridge_amharic", default=False)
 
-BRIDGE_TO_ENGLISH_PROMPT = (
-    "Translate this Amharic message to English. Keep links, numbers, "
-    "service IDs and prices exactly as they are. Reply with only the "
-    "translation."
-)
-BRIDGE_TO_AMHARIC_PROMPT = (
-    "Translate this reply to Amharic. Keep links, numbers, service "
-    "IDs, prices and service names exactly as they are. Reply with "
-    "only the translation."
-)
+_BRIDGE_LANG_NAMES = {
+    "am": "Amharic", "ti": "Tigrinya", "om": "Oromo (Afaan Oromo)",
+}
 
 
-async def translate_to_english(text: str) -> str:
-    """Amharic -> English via Gemini. Returns "" on any failure
-    (no key, 429, empty reply) — the caller then uses the original
-    Amharic text instead."""
+def _set_bridge_lang(lang):
+    """Record the language this turn was bridged from (or None)."""
+    _BRIDGE_LANG.set(lang)
+    _BRIDGE_AMHARIC.set(lang == "am")
+
+
+def _bridge_to_english_prompt(lang: str) -> str:
+    return (
+        f"Translate this {_BRIDGE_LANG_NAMES[lang]} message to English. "
+        "Keep links, numbers, service IDs and prices exactly as they "
+        "are. Reply with only the translation."
+    )
+
+
+def _bridge_from_english_prompt(lang: str) -> str:
+    return (
+        f"Translate this reply to {_BRIDGE_LANG_NAMES[lang]}. Keep links, "
+        "numbers, service IDs, prices and service names exactly as "
+        "they are. Reply with only the translation."
+    )
+
+
+BRIDGE_TO_ENGLISH_PROMPT = _bridge_to_english_prompt("am")
+BRIDGE_TO_AMHARIC_PROMPT = _bridge_from_english_prompt("am")
+
+
+async def translate_to_english(text: str, source_lang: str = "am") -> str:
+    """A non-English message -> English via Gemini. Returns "" on any
+    failure (no key, 429, empty reply) — the caller then uses the
+    original text instead."""
     if not GEMINI_API_KEY:
         return ""
     try:
-        result = await gemini_generate(BRIDGE_TO_ENGLISH_PROMPT + "\n\n" + text)
+        result = await gemini_generate(
+            _bridge_to_english_prompt(source_lang) + "\n\n" + text
+        )
     except Exception as exc:
-        _log_ai_failure("Amharic bridge translate to English failed", exc)
+        _log_ai_failure("bridge translate to English failed", exc)
+        return ""
+    return (result or "").strip()
+
+
+async def translate_to_language(text: str, lang: str) -> str:
+    """English -> the user's language via Gemini. Returns "" on any
+    failure — the caller then sends the English reply as-is."""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        result = await gemini_generate(
+            _bridge_from_english_prompt(lang) + "\n\n" + text
+        )
+    except Exception as exc:
+        _log_ai_failure("bridge translate from English failed", exc)
         return ""
     return (result or "").strip()
 
 
 async def translate_to_amharic(text: str) -> str:
-    """English -> Amharic via Gemini. Returns "" on any failure —
-    the caller then sends the English reply as-is."""
-    if not GEMINI_API_KEY:
-        return ""
-    try:
-        result = await gemini_generate(BRIDGE_TO_AMHARIC_PROMPT + "\n\n" + text)
-    except Exception as exc:
-        _log_ai_failure("Amharic bridge translate to Amharic failed", exc)
-        return ""
-    return (result or "").strip()
+    """English -> Amharic via Gemini. Wrapper kept for callers that
+    only know Amharic; translate_to_language is the general one."""
+    return await translate_to_language(text, "am")
 
 
 async def ai_transcribe(audio_bytes: bytes) -> str:
@@ -3348,6 +3522,17 @@ def local_intent(text: str) -> dict:
         )
     ):
         intent["intent"] = "how_to_order"
+    elif (
+        "how" in words
+        and ("link" in words or "public" in words or "username" in words)
+        and any(p in s for p in (
+            "how do i", "how to", "how can i", "how do you",
+        ))
+    ):
+        # A how-to question (owner, 14 Nov 2026): how to get a
+        # link, how to make an account public, how to find a
+        # username. Answered freely by the AI — never deflected.
+        intent["intent"] = "how_to"
     elif "stop" in words and (
         "repeat" in words or "recurr" in s or "every" in words
     ):
@@ -3432,7 +3617,7 @@ async def extract_intent(text: str, user_id: int = None,
     "phone": ..., "quantity_multiplier": ..., "orders": ...,
     "split": ...}. intent is one of order, recurring, schedules,
     stop_schedule, balance, orders, deposit, deposit_status, help,
-    how_to_order, miniapp, social, greeting, paxyo_info,
+    how_to_order, how_to, miniapp, social, greeting, paxyo_info,
     source_question, reseller, contact, paused_services, usual, goal, budget, batch,
     change_order, refill, split_payment, max_for_balance, discount,
     safety, refund_policy, geo_target, free_sample, price_pushback,
@@ -3561,8 +3746,12 @@ async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> st
         + "\nAnswer the user's question using only these facts, in "
         + ("Amharic (Ethiopic fidels mixed with English) — " if lang == "am"
            else "English — ")
-        + "1-3 short sentences. If the question is about something outside "
-        "Paxyo, answer in one short line steering back to ordering. "
+        + "1-3 short sentences. If the question is about how to do "
+        "something needed to order (getting a link, making an "
+        "account public, using Telegram, TikTok or Instagram), "
+        "answer it from your own general knowledge in 1-3 short "
+        "sentences. Only questions truly unrelated to Paxyo or "
+        "ordering get a one-line steer back to ordering. "
         "Never say where Paxyo's services come from, and never talk "
         "about what Paxyo pays for them. Never quote a price; say "
         "prices are shown in ETB per 1000 before confirming. If the "
@@ -3716,17 +3905,21 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
 
     Amharic translate-bridge: when this turn's message was bridged
     (see handle_order_text), prose replies are translated back to
-    Amharic here before sending. Anything with buttons (Confirm
-    cards, keyboards) is never translated, and a failed translation
-    sends the English reply as-is. The English original is what
-    goes into the conversation history, so the AI keeps reading
-    English there.
+    the user's language here before sending. Anything with buttons
+    (Confirm cards, keyboards) is never translated, and a failed
+    translation sends the English reply as-is. The English original
+    is what goes into the conversation history, so the AI keeps
+    reading English there.
     """
     out_text, out_lang = text, lang
-    if reply_markup is None and _BRIDGE_AMHARIC.get():
-        _amharic = await translate_to_amharic(text)
-        if _amharic:
-            out_text, out_lang = _amharic, "am"
+    _target = _BRIDGE_LANG.get()
+    if reply_markup is None and _target:
+        if _target == "am":
+            _translated = await translate_to_amharic(text)
+        else:
+            _translated = await translate_to_language(text, _target)
+        if _translated:
+            out_text, out_lang = _translated, _target
     if voice and reply_markup is None:
         ogg = await speak_reply(out_text, out_lang)
         if ogg:
@@ -3959,7 +4152,11 @@ async def answer_general_question(text: str, lang: str):
     system = (
         "Answer briefly (1-2 short sentences) from your own general "
         "knowledge, in "
-        + ("Amharic (Ethiopic fidels mixed with English)" if lang == "am" else "English")
+        + {
+            "am": "Amharic (Ethiopic fidels mixed with English)",
+            "ti": "Tigrinya (Ge'ez script)",
+            "om": "Oromo (Afaan Oromo, Latin script)",
+        }.get(lang, "English")
         + ". Never mention where Paxyo's services come from, what "
         "Paxyo pays for them, or any supplier. Never quote a price."
     )
@@ -4393,6 +4590,14 @@ async def _price_line(user_id: int, text: str, platform, hint, quantity,
     platform = (platform or "").strip().lower() or None
     if not platform and not hint:
         platform, hint = _conversation_context(user_id)
+    if not platform and hint:
+        # A price question that names a metric but no platform
+        # ("how much are the views?") is about the order being
+        # built, not the fastest views service on any platform —
+        # take the platform from the pending order or the draft.
+        _ctx_platform, _ctx_hint = _conversation_context(user_id)
+        if _ctx_platform:
+            platform = _ctx_platform
     if not platform and not hint:
         words = set(re.findall(r"[a-z]+", normalize_text(text).lower()))
         platform = next((p for p in _PLATFORMS if p in words), None)
@@ -4513,6 +4718,43 @@ def is_history_question(text: str) -> bool:
         "what was my last", "do you remember", "what did i order before",
         "what did i ask about before", "what did i talk about",
     ))
+
+
+_QUESTION_OPENERS = (
+    "how", "what", "where", "when", "why", "who", "whom", "whose",
+    "which", "can", "could", "should", "would", "do", "does", "did",
+    "is", "are", "was", "were", "will", "have", "has",
+)
+
+
+def is_question(text: str) -> bool:
+    """True when the message is shaped like a question: it ends
+    with '?' or opens with a question word. A question always
+    gets a free AI answer (owner, 14 Nov 2026) — it is never
+    steered away unanswered, however many turns it takes."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return False
+    if s.endswith("?"):
+        return True
+    return s.split(" ", 1)[0] in _QUESTION_OPENERS
+
+
+def is_comment_likes_question(text: str) -> bool:
+    """True when the user asks what the bot needs for likes on a
+    comment (owner, 14 Nov 2026): the link of the video/post the
+    comment is on, plus either the comment's own link or the
+    username. An actual order (a link is pasted) is never a
+    question — the order flow keeps it."""
+    if extract_links(text):
+        return False
+    s = " ".join((text or "").strip().lower().split())
+    if "comment" not in s or "like" not in s:
+        return False
+    return (
+        "how" in s or "what" in s or "need" in s or "do i" in s
+        or "?" in (text or "")
+    )
 
 
 async def speed_answer_text(user_id: int, text: str, intent: dict, lang: str):
@@ -5665,7 +5907,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _update_seen(update):
         return
     user = update.effective_user
-    lang = "am" if (user.language_code or "").lower().startswith("am") else "en"
+    lang = detect_language("", user.language_code)
     try:
         await paxyo.create_user(
             user.id, username=user.username, first_name=user.first_name
@@ -7569,7 +7811,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       is pending places that order — no new intent is extracted.
     - Gemini first classifies the message (order, recurring, schedules,
       stop_schedule, balance, orders, deposit, deposit_status,
-      how_to_order, miniapp, social, help, greeting,
+      how_to_order, how_to, miniapp, social, help, greeting,
       paxyo_info, source_question, reseller, contact, paused_services, usual, goal,
       budget, batch, change_order, refill, split_payment,
       max_for_balance, discount, safety, refund_policy, geo_target,
@@ -7577,7 +7819,9 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       cancel, off_topic, unclear).
       Conversational intents are answered before the order flow, so the bot talks like
       customer support instead of only understanding orders;
-      off-topic talk is steered back to ordering in one line.
+      a real question always gets a free AI answer (owner,
+      14 Nov 2026) — only non-question chit-chat is steered back
+      to ordering, from the third turn.
     - Asked where the services come from, or what Paxyo pays for them,
       the bot deflects in one short line (local guard first, then the
       "source_question" intent) — it never names a supplier, never
@@ -7600,9 +7844,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       Paxyo API, so it survives restarts), and a repeating-order plan
       ("every 3 hours") is built the same way, then shown as a plan
       summary with Confirm — nothing repeats until confirmed.
-    - Orders work in Amharic and English, by text. (Voice messages
-      are still transcribed when sent, but the bot does not claim to
-      take orders by voice — owner, 13 Nov 2026.)
+    - Orders work in Amharic, Tigrinya, Oromo and English, by text.
+      (Voice messages are still transcribed when sent, but the bot
+      does not claim to take orders by voice — owner, 13 Nov 2026.)
+      The reply is always in the language of the user's current
+      message (owner, 14 Nov 2026): English in -> English out,
+      Amharic in -> Amharic out, and the same for Tigrinya and
+      Oromo — never the previous turn's language.
     - A user replying TO one of the bot's messages (a quote) is read
       in that context: "1000" replied to "How many?" is the quantity;
       "yes" replied to a Confirm card confirms it. See
@@ -7613,22 +7861,27 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # the acceptance check and the follow-up parsers all see the
     # cleaned text. URLs are kept verbatim (case-sensitive links).
     text = normalize_text(text)
-    lang = lang_of(text, user.language_code)
-    # Amharic translate-bridge (owner, 13 Nov 2026): a message in
-    # Ethiopic fidels is translated to English by Gemini first, so
-    # the whole flow below runs in English and the main AI never has
-    # to guess Amharic. Prose replies are translated back before
-    # sending (see reply_message). Only Ethiopic text triggers it —
+    # Reply in the language of THIS message (owner, 14 Nov 2026):
+    # the bridge flag is reset every turn, so a bridged turn can
+    # never leak into the next one.
+    _set_bridge_lang(None)
+    _detected = detect_language(text, user.language_code)
+    lang = _detected
+    # Translate-bridge (owner, 13 Nov 2026; Oromo and Tigrinya
+    # added 14 Nov 2026): a message in Amharic, Tigrinya or Oromo
+    # is translated to English by Gemini first, so the whole flow
+    # below runs in English and the main AI never has to guess the
+    # language. Prose replies are translated back before sending
+    # (see reply_message). Only non-English text triggers it —
     # English never touches the bridge. If translation fails or
-    # comes back unchanged, the original Amharic text is used and
-    # the local Amharic handling (round-7 metric words, Amharic
-    # templates) applies untouched.
-    if is_amharic(text):
-        _english = await translate_to_english(text)
+    # comes back unchanged, the original text is used and the local
+    # handling applies untouched.
+    if _detected in ("am", "ti", "om"):
+        _english = await translate_to_english(text, source_lang=_detected)
         if _english and _english.strip() != text.strip():
             text = _english
             lang = "en"
-            _BRIDGE_AMHARIC.set(True)
+            _set_bridge_lang(_detected)
     # Conversation memory: remember who is speaking and what they
     # said, so the bot's first reply of this turn is recorded.
     _CURRENT_USER_ID.set(user.id)
@@ -7887,6 +8140,22 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 else 3 if "triple" in _words else None
             ),
         )
+    # Price questions are answered from local detection only, BEFORE
+    # the AI classifier (live bug, 14 Nov 2026: the price arrived
+    # 68 seconds late because the classifier and the bridge ran
+    # first, and the queue of earlier updates delayed it further).
+    # local_intent reads the platform, metric and quantity straight
+    # from the message, and the price comes from the catalogue —
+    # the AI is never in the path. When this fast path cannot name
+    # a service (price is None), the flow continues to the
+    # classifier and the post-classification price branch below,
+    # which may resolve it from the AI's intent instead.
+    if intent is None and is_price_question(text):
+        _local = local_intent(text)
+        price = await price_answer_text(user.id, text, _local, lang)
+        if price is not None:
+            await reply_message(update.message, price, lang, voice=voice)
+            return
     # `intent` is injected by the photo handler (a picture's link is
     # already classified by Gemini vision, so a second text
     # classification of the bare link would be wasted and could
@@ -7990,6 +8259,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if is_public_question(text):
         await reply_message(update.message, with_pending_note(user.id, lang, t("public_answer", lang)), lang, voice=voice)
+        return
+    if is_comment_likes_question(text):
+        # Owner, 14 Nov 2026: for likes on a comment the bot needs
+        # the video/post link plus either the comment's own link or
+        # the username. A deterministic Paxyo fact — the AI must
+        # never invent a different requirement.
+        await reply_message(update.message, with_pending_note(user.id, lang, t("comment_likes_need", lang)), lang, voice=voice)
         return
     _terms = terms_answer(text, lang)
     if _terms is not None:
@@ -8310,12 +8586,37 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             lang, voice=voice,
         )
         return
+    if intent_type == "how_to":
+        # A how-to question gets a free AI answer, like DeepSeek
+        # would give (owner, 14 Nov 2026). No steer-back line: it
+        # is about ordering, not off-topic chat. The AI is up here
+        # (the classifier ran), so a None answer only means an
+        # empty reply — the short Paxyo line is the fallback.
+        general = await answer_general_question(text, lang)
+        await reply_message(
+            update.message,
+            general if general is not None else t("paxyo_info_fallback", lang),
+            lang, voice=voice,
+        )
+        return
     if intent_type == "off_topic":
-        # Off-topic steering (owner, 13 Nov 2026): the first two
-        # off-topic turns get a brief general answer plus a small
-        # nudge toward ordering; the third (and beyond) steers back
-        # to ordering with a short friendly line. General chat never
-        # runs forever.
+        # Off-topic steering (owner, 13 Nov 2026; widened 14 Nov
+        # 2026): a real QUESTION always gets a free AI answer plus
+        # one short steer-back line — never the canned deflection,
+        # however many turns it takes. Only non-question chit-chat
+        # is capped: the first two turns get a general answer plus
+        # a nudge, the third (and beyond) steers back.
+        if is_question(text):
+            general = await answer_general_question(text, lang)
+            if general is not None:
+                await reply_message(
+                    update.message,
+                    general + "\n" + t("off_topic_nudge", lang),
+                    lang, voice=voice,
+                )
+                return
+            # AI down: fall through to the cap logic below, which
+            # ends in the one-line deflection.
         count = OFF_TOPIC_COUNT.get(user.id, 0) + 1
         OFF_TOPIC_COUNT[user.id] = count
         if count >= 3:
