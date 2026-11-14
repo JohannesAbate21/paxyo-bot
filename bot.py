@@ -2019,7 +2019,14 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     reactions request and gets the Positive mix. Within ONE exact
     emoji the pick is cheapest first (owner, 14 Nov 2026), not
     fastest — fastest-first picked the Heart Eyes lookalike over
-    Heart for a ❤️ order live.
+    Heart for a ❤️ order live. When a SPECIFIC emoji was requested,
+    the hint-word filter below is skipped (live bug, 14 Nov 2026):
+    the AI paraphrases the emoji in the hint ("laugh reactions"
+    for 😂), but the catalogue names the service differently
+    ("Face with Tears of Joy") — a paraphrase word must never veto
+    the emoji's own service. The emoji decides: the platform check,
+    the kinds check and the exact-emoji pool still guard the pick.
+    A generic reactions request (no emoji) keeps the word filter.
     """
     wanted = (platform or "").strip().lower()
     hint = (service_hint or "").strip().lower()
@@ -2037,6 +2044,12 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
         metric = _canonical_metric(word)
         if metric is not None:
             hint_kinds.add(metric)
+    # A specific reaction emoji was requested: the emoji, not the
+    # AI's paraphrase of it in the hint, selects the service.
+    _reactions_request = _is_reactions_hint(hint, hint_kinds)
+    reaction = None
+    if _reactions_request:
+        reaction = reaction_emoji or _reaction_emoji_in_hint(hint)
     candidates = []
     for s in services:
         if not s.get("active", True):
@@ -2051,7 +2064,7 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
         name = str(s.get("name") or "").lower()
         if wanted and wanted not in category and wanted not in name:
             continue
-        if words:
+        if words and reaction is None:
             hay = name + " " + category
             if not all(_hint_word_matches(w, hay) for w in words):
                 continue
@@ -2062,9 +2075,7 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     # reactions services, in the emoji's family — never a Bot Start
     # service and never an "Auto … 10 Future Posts" service for a
     # single post. The emoji may also ride in the hint itself.
-    reaction = None
-    if _is_reactions_hint(hint, hint_kinds):
-        reaction = reaction_emoji or _reaction_emoji_in_hint(hint)
+    if _reactions_request:
         candidates = _reactions_pool(candidates, reaction)
     if cheapest or reaction is not None:
         # Cheapest first (owner, 14 Nov 2026): within ONE exact
@@ -10118,9 +10129,15 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # and no platform, and the link is for the draft's platform (or
     # has none, like a @handle), the AI's guessed platform and hint
     # are dropped for this turn so the stored draft's metric, emoji
-    # and quantity survive. A message WITH words still goes through
-    # the normal platform/metric logic below, and a link for a
-    # different platform still starts a fresh order.
+    # and quantity survive. A draft with no platform of its own
+    # (the bare-emoji acknowledgement stores only the hint and the
+    # emoji) has nothing to conflict with, so the link's platform
+    # is no bar either — the platform still comes from the link
+    # itself below (live bug, 14 Nov 2026 20:26 EAT: bare 😂 then a
+    # bare link then "10" lost the reactions draft the same way).
+    # A message WITH words still goes through the normal
+    # platform/metric logic below, and a link for a different
+    # platform still starts a fresh order.
     _bare_link = (extract_links(text) or [None])[0]
     _bare_link_platform = (
         platform_from_link(_bare_link)
@@ -10133,6 +10150,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         and _explicit_platform_word(text) is None
         and (
             _bare_link_platform is None
+            or not stored_platform
             or _bare_link_platform == stored_platform
         )
     ):

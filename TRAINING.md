@@ -85,6 +85,32 @@ Telegram post-link answer; last-5 order history; exact-emoji reactions).
   Positive mix" — instead of silently selling the mix.
   A bare "thank you 🙏" is thanks, not a reaction order: 🙏 only
   counts as a reaction when the message is about reactions.
+- THE EMOJI DECIDES, NOT THE AI'S PARAPHRASE OF IT (live bug,
+  14 Nov 2026 20:26 EAT): bare 😂, then a bare link, then "10"
+  answered "I don't have a 😂-only service" although #6579
+  ("Face with Tears of Joy 😂") exists. Two defects in that one
+  flow. (1) The bare-link guard never fired for the bare-emoji
+  draft, because that draft stores no platform while the link has
+  one — so the AI's "views" guess for the bare link overwrote the
+  reactions draft and the metric-change reset wiped the emoji.
+  The guard now also fires when the stored draft has no platform
+  of its own: a platform-less draft has nothing to conflict with,
+  and the platform still comes from the link itself. (2) Even with
+  the draft intact, the AI paraphrases the emoji in the hint
+  ("laugh reactions" — the bot's own acknowledgement wording),
+  and pick_services vetoed #6579 because "laugh" appears nowhere
+  in "Face with Tears of Joy". Seven of the 59 mapped emoji have
+  a meaning word that never appears in their service's name
+  (😂 laugh, 🎃 pumpkin, 🍾 champagne, 🕊️ dove, 🎉 party,
+  😢 sad, 🤬 cursing). For a specific-emoji request the
+  hint-word filter is now skipped in pick_services — the emoji
+  decides, and the platform check, the kinds check and the
+  exact-emoji pool still guard the pick. A generic reactions
+  request (no emoji) keeps the word filter. The "10" answer turn
+  never consults the classifier at all: reply_or_bare_intent
+  returns an empty intent (quantity only), so the stored draft
+  is everything — whatever the link turn stored is what the card
+  is built from.
 - A CORRECTION RE-PICKS THE CARD (owner, 14 Nov 2026): while a
   Confirm card is waiting, "I want only 🙏 reaction" (or any other
   single emoji) re-picks the service for that emoji and shows a

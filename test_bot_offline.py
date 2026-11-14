@@ -15345,6 +15345,122 @@ class TestManyEmojiReactions(_LanguageRoundBase):
         self.assertEqual(msg.get_bot().deleted, [(1, 2)])
         self.assertEqual(pending.get("message_id"), 3)
 
+    # (5) bare-emoji-alone order completion — the 😂 live fault ----
+    # Live, 14 Nov 2026 20:26 EAT: bare 😂 -> bare link -> "10"
+    # answered "I don't have a 😂-only service" although #6579
+    # exists. Two defects in the same flow: (1) the bare-link
+    # guard never fired for the bare-emoji draft, because that
+    # draft stores no platform while the link has one — so the
+    # AI's "views" guess overwrote the reactions draft and the
+    # metric-change reset wiped the emoji; (2) even with the draft
+    # intact, the AI paraphrases the emoji in the hint ("laugh
+    # reactions") and pick_services vetoed #6579, whose name says
+    # "Face with Tears of Joy" — "laugh" appears nowhere in it.
+
+    async def test_bare_emoji_alone_then_link_then_quantity_builds_exact_card(self):
+        # The exact live flow: bare emoji, bare link (the AI
+        # guesses "views" for it), then the quantity answer.
+        link = "https://t.me/godofpanelcom/768"
+        for emoji, service_id in (("😂", 6579), ("😭", 6571)):
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([
+                    (emoji, intent_of("unclear")),
+                    (link, intent_of(
+                        "order", platform="telegram",
+                        service_hint="telegram views", link=link,
+                    )),
+                    ("10", intent_of("order", quantity=10)),
+                ])
+                self.assertEqual(len(msg.text_sent), 3)
+                self.assertIn("How many?", msg.text_sent[1])
+                self._assert_card(msg, service_id, 10, link)
+                pending = list(bot.PENDING.values())[0]
+                self.assertEqual(
+                    pending["service"]["service"], service_id
+                )
+
+    async def test_quantity_first_laugh_emoji_builds_exact_card(self):
+        # "10 😂" -> link -> the Tears of Joy card #6579.
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("10 😂", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self._assert_card(msg, 6579, 10, link)
+
+    def test_paraphrase_hint_does_not_veto_emoji_service(self):
+        # The AI paraphrases the emoji in the hint ("laugh
+        # reactions" for 😂, "pumpkin reactions" for 🎃) — but the
+        # catalogue names the service differently ("Face with
+        # Tears of Joy"). For a specific-emoji request the emoji
+        # decides: the hint-word filter must never veto the
+        # emoji's own service. Every mapped Telegram emoji, with
+        # its meaning-word hint and the -ing form of it.
+        for emoji, service_id in self.TG_EMOJI_SERVICES:
+            meaning = bot.EMOJI_MEANINGS.get(emoji, "").replace(
+                "-", " "
+            )
+            for hint in (
+                f"{meaning} reactions", f"{meaning}ing reactions",
+            ):
+                with self.subTest(emoji=emoji, hint=hint):
+                    picks = bot.pick_services(
+                        RealReactionsPaxyo.REACTIONS_SERVICES,
+                        platform="telegram", service_hint=hint,
+                        reaction_emoji=emoji,
+                    )
+                    self.assertTrue(picks)
+                    self.assertEqual(picks[0]["service"], service_id)
+
+    async def test_paraphrase_hint_in_words_message_still_builds_exact_card(self):
+        # The paraphrase reaches the picker when the message has
+        # words (the bare-link guard rightly does not fire then):
+        # "laugh reactions for this <link>" after a bare 😂, and
+        # "pumpkin reactions for this <link>" after a bare 🎃.
+        link = "https://t.me/godofpanelcom/768"
+        for emoji, hint, service_id in (
+            ("😂", "laugh reactions", 6579),
+            ("🎃", "pumpkin reactions", 6567),
+        ):
+            with self.subTest(emoji=emoji):
+                self._reset_state()
+                msg = await self._turns([
+                    (emoji, intent_of("unclear")),
+                    (f"{hint} for this {link}", intent_of(
+                        "order", platform="telegram",
+                        service_hint=hint, link=link,
+                    )),
+                    ("10", intent_of("order", quantity=10)),
+                ])
+                self.assertEqual(len(msg.text_sent), 3)
+                self.assertIn("How many?", msg.text_sent[1])
+                self._assert_card(msg, service_id, 10, link)
+
+    async def test_bare_no_service_emoji_alone_still_gets_honest_answer(self):
+        # 😄 has no dedicated service anywhere: the bare-alone
+        # flow still ends in the honest answer + mix offer, never
+        # a card for a different emoji — the fixes above must not
+        # turn a genuine no-service into a silent mix sale.
+        link = "https://t.me/godofpanelcom/768"
+        msg = await self._turns([
+            ("😄", intent_of("unclear")),
+            (link, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram views", link=link,
+            )),
+            ("10", intent_of("order", quantity=10)),
+        ])
+        self.assertEqual(len(msg.text_sent), 3)
+        self.assertIn("How many?", msg.text_sent[1])
+        self.assertIn("don't have a 😄-only service", msg.text_sent[2])
+        self.assertIn("Positive mix", msg.text_sent[2])
+        self.assertEqual(bot.PENDING, {})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
