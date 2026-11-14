@@ -213,6 +213,10 @@ extract the intent as JSON.
 
 Rules:
 - Reply with JSON only, no extra text, no markdown fences.
+- Emoji carry meaning, read them as words: 👍 is the thumbs-up
+  reaction, ❤️ the heart reaction, 🔥 the fire reaction, 😂
+  laughing, 👀 views. A message that is only an emoji still means
+  that thing.
 - JSON shape: {"intent": "...", "platform": "...", "service_hint": "...",
   "service_id": 123, "link": "...", "quantity": 123,
   "interval_minutes": 180,
@@ -1259,6 +1263,106 @@ TEXT = {
     "history_summary": {
         "am": "ስለተነጋገርንበት: {summary}",
         "en": "Here's what we've talked about: {summary}",
+    },
+    # Confirm-understanding + conversation questions (round 8,
+    # 14 Nov 2026 — live case: "Do you understand what I said
+    # first" got the link prompt repeated back). The bot restates
+    # what it understood and what is still missing, instead of
+    # repeating the last question. The description is plain
+    # language, with the reaction emoji kept in it.
+    "understand_pending": {
+        "am": "አዎ፣ ገብቶኛል — {desc} ይፈልጋሉ። ዝግጁ ነው — Confirm ሲያደርጉ እዘዛለሁ።",
+        "en": "Yeah, I got it — you want {desc}. It's ready — just tap Confirm when you want me to place it.",
+    },
+    "understand_partial": {
+        "am": "አዎ፣ ገብቶኛል — {desc} ይፈልጋሉ።{missing}",
+        "en": "Yeah, I got it — you want {desc}.{missing}",
+    },
+    "understand_none": {
+        "am": "አዎ፣ እያዳመጥኩ ነው — ገና order የለኝም። ምን እንደሚፈልጉ ይንገሩኝ።",
+        "en": "Yeah, I'm listening — I don't have an order from you yet. Tell me what you want and I'll get it going.",
+    },
+    "missing_link": {
+        "am": " Link ብቻ ነው የሚያስፈልገኝ።",
+        "en": " I just need the link to the post.",
+    },
+    "missing_quantity": {
+        "am": " Quantity ብቻ ነው የሚያስፈልገኝ።",
+        "en": " I just need to know how many.",
+    },
+    "missing_link_quantity": {
+        "am": " Link እና quantity ብቻ ነው የሚያስፈልገኝ።",
+        "en": " I just need the link and how many.",
+    },
+    # "What do you mean / why are you asking" — the bot explains
+    # what it needs and why, then the order continues.
+    "mean_link": {
+        "am": "Link የጠየቅሁት {desc} በየትኛው post ላይ እንደሚሄድ ለማወቅ ነው — ሲልኩት price እና Confirm አሳይዎታለሁ።",
+        "en": "I asked for the link because I need to know which post the {desc} go on — once you send it, I'll show you the price and the Confirm button.",
+    },
+    "mean_quantity": {
+        "am": "Quantity የጠየቅሁት price በquantity ስለሚወሰን ነው — ቁጥሩን ይንገሩኝ Confirm አሳይዎታለሁ።",
+        "en": "I asked how many because the price depends on the quantity — tell me the number and I'll show you the Confirm card.",
+    },
+    "mean_pending": {
+        "am": "የምለው orderዎ ዝግጁ ነው — {desc}። Confirm ያድርጉ እዘዛለሁ፣ ወይም ምን እንደሚቀየር ይንገሩኝ።",
+        "en": "I mean your order is ready — {desc}. Tap Confirm and I'll place it, or tell me what to change.",
+    },
+    "mean_deposit": {
+        "am": "Deposit ለማዘጋጀት ነው የጠየቅሁት — ሲያገኘሁ Confirm አሳይዎታለሁ።",
+        "en": "I asked because I need that to set up your deposit — once I have it, I'll show you the Confirm card.",
+    },
+    "mean_last": {
+        "am": "የጠየቅሁት: “{last}”።",
+        "en": "I just asked: “{last}”.",
+    },
+    # Free chat (round 8, 14 Nov 2026): the bot talks like a normal
+    # AI for a turn — acknowledges, answers, comments — then a soft
+    # line steers back to the order without interrogating. The AI
+    # answer is used when it works; these are the no-AI fallbacks.
+    "chat_laugh": {
+        "am": "😄 Haha, ደስ ይላል!",
+        "en": "😄 Haha, glad you're in a good mood!",
+    },
+    "chat_thanks": {
+        "am": "እንኳን ደህና መጡ! 🙂",
+        "en": "You're welcome! 🙂",
+    },
+    "chat_tired": {
+        "am": "አዝናለሁ — እረፍት ያግኙ። 🙂",
+        "en": "Sorry to hear that — hope you get some rest. 🙂",
+    },
+    "chat_happy": {
+        "am": "ጥሩ ነው — ደስ ይላል! 🙂",
+        "en": "Nice — love to hear it! 🙂",
+    },
+    "chat_greeting": {
+        "am": "ሰላም! ደህና ነኝ 🙂",
+        "en": "Hey! I'm doing well, thanks for asking 🙂",
+    },
+    "chat_viral": {
+        "am": "እሱ በቪዲዮው ላይ ይወሰናል — ጥሩ content እና views ወይም likes ከሆነ ብዙ ሰው ይደርስበታል።",
+        "en": "Honestly, it depends on the video — good content plus a push from views or likes usually helps it travel further.",
+    },
+    "chat_default": {
+        "am": "ገብቶኛል 🙂",
+        "en": "Got it 🙂",
+    },
+    "chat_continue_link": {
+        "am": "Link ሲልኩት እጀምራለሁ።",
+        "en": "Just send the link when you're ready and I'll get it going.",
+    },
+    "chat_continue_quantity": {
+        "am": "Quantity ሲነግሩኝ እጀምራለሁ።",
+        "en": "Just tell me how many when you're ready.",
+    },
+    "chat_continue_confirm": {
+        "am": "Orderዎ Confirm እየጠበቀ ነው።",
+        "en": "Your order is still waiting for your Confirm tap whenever you're ready.",
+    },
+    "chat_continue_fresh": {
+        "am": "ምን ማዘዝ ይፈልጋሉ? ይንገሩኝ።",
+        "en": "Want to order something? Just tell me what you need.",
     },
     "orders_history_title": {
         "am": "Ordersዎ:",
@@ -2713,8 +2817,74 @@ def platform_from_link(link: str):
 _PLATFORMS = ("instagram", "tiktok", "telegram", "youtube", "facebook", "x")
 _METRICS = (
     "followers", "likes", "views", "subscribers", "members", "shares",
-    "comments",
+    "comments", "reactions",
 )
+
+# Emoji the bot reads (round 8, 14 Nov 2026): an emoji in a message
+# carries meaning — 👍 IS the thumbs-up reaction, ❤️ the heart
+# reaction, and so on. The classifier sees the emoji itself (it
+# survives normalize_text), but the local helpers only read words,
+# so the meaning is mapped here for local intent, kind detection
+# and restatements. 👀 means views; 🙏 is thanks/prayer, not a
+# reaction type, so it maps to a word but never to "reactions".
+EMOJI_MEANINGS = {
+    "👍": "thumbs-up",
+    "❤️": "heart",
+    "❤": "heart",
+    "🔥": "fire",
+    "😂": "laugh",
+    "🤣": "laugh",
+    "😮": "wow",
+    "😢": "sad",
+    "🙏": "pray",
+    "👀": "views",
+    "😍": "heart-eyes",
+    "😊": "smile",
+    "🥰": "love",
+    "👏": "clap",
+    "🎉": "party",
+    "💯": "hundred",
+    "😎": "cool",
+    "🤔": "thinking",
+    "😡": "angry",
+    "👎": "thumbs-down",
+}
+# Emoji that pick a Telegram reaction type when the user orders one.
+REACTION_EMOJI = ("👍", "❤️", "❤", "🔥", "😂", "🤣", "😮", "😢")
+# Emoji that are just chat (a laugh, a smile) — never an order.
+_CHAT_EMOJI = ("😂", "🤣", "😄", "😊")
+
+
+def emoji_meanings(text: str):
+    """[(emoji, meaning)] for every known emoji in the text, in
+    order. A variation selector is kept with its emoji (❤️ stays
+    ❤️) and a skin tone is dropped (👍🏻 reads as 👍), so the
+    returned emoji is the one the user sent."""
+    s = text or ""
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        emoji = ch
+        j = i + 1
+        if j < len(s) and s[j] == "\ufe0f":
+            emoji = ch + s[j]
+            j += 1
+        while j < len(s) and "\U0001f3fb" <= s[j] <= "\U0001f3ff":
+            j += 1
+        meaning = EMOJI_MEANINGS.get(ch)
+        if meaning is not None and (not out or out[-1][0] != emoji):
+            out.append((emoji, meaning))
+        i = j
+    return out
+
+
+def reaction_emoji(text: str):
+    """The reaction emoji in the text (👍 ❤️ 🔥 ...), or None."""
+    for emoji, _meaning in emoji_meanings(text):
+        if emoji in REACTION_EMOJI:
+            return emoji
+    return None
 
 
 def local_intent(text: str) -> dict:
@@ -3673,6 +3843,7 @@ def quantity_before_metric(text: str):
     pattern = (
         r"(\d[\d,]*)\s+(?:[^\s]+\s+){0,2}?"
         r"(views?|followers?|likes?|comments?|subscribers?|members?|shares?"
+        r"|reactions?"
         r"|" + am_words + r")\b"
     )
     for m in re.finditer(pattern, s, flags=re.IGNORECASE):
@@ -4328,6 +4499,13 @@ def kind_from_text(text: str):
             return metric
     if am_metrics:
         return am_metrics[0]
+    # An emoji can carry the metric on its own (round 8, 14 Nov
+    # 2026): "👍" means the thumbs-up reaction, "👀" means views.
+    # It is a fallback only — a word the user typed wins over it.
+    if reaction_emoji(text) is not None:
+        return "reactions"
+    if "👀" in (text or ""):
+        return "views"
     return None
 
 
@@ -4478,9 +4656,366 @@ def start_order_keyboard(lang: str) -> InlineKeyboardMarkup:
     )
 
 
+# ------------------------------------------------- conversation (round 8) ---
+
+# Round 8, 14 Nov 2026 — the bot talks like a normal AI mid-order.
+# Live case: the user said "Do you understand what I said first"
+# and the bot just repeated "Please send the link the order is for."
+# A normal AI says what it understood first, then continues. These
+# guards run BEFORE the order flow, so a question or a chatty
+# message is never swallowed by the next order prompt. They never
+# touch the draft or a pending Confirm card — the order survives
+# the chat, and the next order message picks it up where it was.
+
+_CONFIRM_UNDERSTANDING_PHRASES = (
+    "do you understand", "did you understand", "do you get it",
+    "did you get it", "did you get that", "do you know what i mean",
+    "do you know what i want", "do you understand what i said",
+    "do you understand me", "did you understand me",
+    "what did i say", "what did i just say", "what did i tell you",
+    "are you following", "are you listening", "did you hear me",
+    "do you follow", "did you get what i said",
+    # Amharic equivalents (fidels): "did you understand",
+    # "what did I say".
+    "ገባህ", "ገብቶሃል", "ተረድተሃል", "ተረድተሺ", "ምን አልኩ",
+)
+
+_CONVERSATION_QUESTION_PHRASES = (
+    "what do you mean", "what did you mean", "what do u mean", "wdym",
+    "why are you asking", "why do you ask", "why are you asking that",
+    "why do you need", "why do you need that", "why are you asking me",
+    "what are you asking", "what do you want to know",
+    "ምን ማለት", "ለምን ጠየቅ", "እያዳመጥክ",
+)
+
+# Chatty messages that are not orders: laughter, thanks, feelings,
+# small talk, opinions ("do you think ..."). Single words only
+# count in a short message, so "great, send me the link" still
+# goes to the order flow.
+_FREE_CHAT_PHRASES = (
+    "haha", "lol", "lmao", "hehe", "i'm tired", "i am tired",
+    "i'm bored", "i am bored", "i'm happy", "i am happy",
+    "i'm sad", "i am sad", "i feel", "how are you", "how r you",
+    "what's up", "whats up", "good morning", "good afternoon",
+    "good evening", "do you think", "what do you think",
+    "thank you", "thank u",
+)
+_FREE_CHAT_WORDS = {
+    "nice", "cool", "great", "awesome", "thanks", "thx", "wow", "lovely",
+}
+
+_PLATFORM_DISPLAY = {
+    "tiktok": "TikTok", "instagram": "Instagram", "telegram": "Telegram",
+    "youtube": "YouTube", "facebook": "Facebook", "x": "X",
+}
+
+
+def is_confirm_understanding(text: str) -> bool:
+    """True when the user asks whether the bot understood what they
+    said ("do you understand", "did you get that", "what did I
+    say", "are you listening" — English and Amharic)."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return False
+    return any(p in s for p in _CONFIRM_UNDERSTANDING_PHRASES)
+
+
+def is_conversation_question(text: str, user_id=None) -> bool:
+    """True when the user asks about the conversation itself mid-order
+    ("what do you mean", "why are you asking that"). A bare "what?"
+    or "huh?" counts only while an order is being built — otherwise
+    it is just confusion with nothing to explain."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return False
+    if any(p in s for p in _CONVERSATION_QUESTION_PHRASES):
+        return True
+    if s in ("what?", "what", "huh?", "huh", "??", "???", "what??", "huh??"):
+        if user_id is None:
+            return False
+        _cid, pending = pending_for_user(user_id)
+        return pending is not None or bool(PARTIAL.get(user_id))
+    return False
+
+
+def is_free_chat(text: str) -> bool:
+    """True when the message is chat, not an order: a greeting, small
+    talk, a comment, a feeling, an opinion, a joke. The caller must
+    have already ruled out order details (link, quantity, service
+    ID, deposit fields) — this only reads the chatty markers."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return False
+    if any(p in s for p in _FREE_CHAT_PHRASES):
+        return True
+    if any(emoji in s for emoji in _CHAT_EMOJI):
+        return True
+    words = set(re.findall(r"[a-z]+", s))
+    if words & _FREE_CHAT_WORDS and len(words) <= 4:
+        return True
+    return False
+
+
+def _describe_hint(hint: str, platform: str, user_id: int, text=None) -> str:
+    """Short plain description of an order being built, for
+    restatements: "👍 reactions for your Telegram channel post",
+    "TikTok views", "Instagram followers". The reaction emoji comes
+    from the message itself, else from the user's recent messages."""
+    h = (hint or "").strip().lower()
+    p = (platform or "").strip().lower()
+    if "reaction" in h:
+        emoji = reaction_emoji(text) if text else None
+        if emoji is None:
+            load_chat_history()
+            for entry in reversed(CHAT_HISTORY.get(int(user_id), [])[-5:]):
+                emoji = reaction_emoji(entry.get("user", ""))
+                if emoji is not None:
+                    break
+        label = f"{emoji} reactions" if emoji else "reactions"
+        if p == "telegram" or "telegram" in h:
+            return f"{label} for your Telegram channel post"
+        if p:
+            return f"{label} for your {p} post"
+        return label
+    if h:
+        words = h.split()
+        if words and words[0] in _PLATFORM_DISPLAY:
+            words[0] = _PLATFORM_DISPLAY[words[0]]
+            desc = " ".join(words)
+        elif p and p not in h:
+            desc = f"{_PLATFORM_DISPLAY.get(p, p.capitalize())} {h}"
+        else:
+            desc = h[:1].upper() + h[1:]
+        return desc
+    if p:
+        return _PLATFORM_DISPLAY.get(p, p.capitalize())
+    return ""
+
+
+def _order_context_summary(user_id: int):
+    """What the user is talking about: the pending Confirm card
+    first, then the draft being built, then the last thing they
+    asked about in chat history. Returns {"desc", "quantity",
+    "link", "missing", "pending"} or None when there is nothing
+    to restate."""
+    _cid, pending = pending_for_user(user_id)
+    if pending is not None:
+        service = pending.get("service") or {}
+        name = short_service_name(service.get("name")) or "your order"
+        qty = pending.get("quantity")
+        desc = f"{name}, {qty:,}" if qty else name
+        return {
+            "desc": desc, "quantity": qty, "link": pending.get("link"),
+            "missing": [], "pending": True,
+        }
+    partial = PARTIAL.get(user_id) or {}
+    hint = (partial.get("service_hint") or "").strip()
+    platform = (partial.get("platform") or "").strip()
+    if hint or platform:
+        desc = _describe_hint(hint, platform, user_id)
+        missing = []
+        if not partial.get("link"):
+            missing.append("link")
+        if not partial.get("quantity"):
+            missing.append("quantity")
+        return {
+            "desc": desc, "quantity": partial.get("quantity"),
+            "link": partial.get("link"), "missing": missing,
+            "pending": False,
+        }
+    load_chat_history()
+    entries = CHAT_HISTORY.get(int(user_id), [])
+    user_texts = [e.get("user", "") for e in entries if e.get("user")]
+    for text in reversed(user_texts[-3:]):
+        kind = kind_from_text(text)
+        qty = quantity_from_text(text)
+        words = set(re.findall(r"[a-z]+", (text or "").lower()))
+        platform = next((p for p in _PLATFORMS if p in words), None)
+        if kind or platform or qty:
+            desc = _describe_hint(kind or "", platform or "", user_id, text)
+            links = extract_links(text)
+            return {
+                "desc": desc, "quantity": qty,
+                "link": links[0] if links else None,
+                "missing": ["link"] if not links else [],
+                "pending": False,
+            }
+    return None
+
+
+def understanding_text(user_id: int, lang: str) -> str:
+    """The restatement for "do you understand": what the bot
+    understood from the conversation so far, and what is still
+    missing. Never just the link prompt again."""
+    summary = _order_context_summary(user_id)
+    if summary is None:
+        return t("understand_none", lang)
+    if summary.get("pending"):
+        return t("understand_pending", lang, desc=summary["desc"])
+    desc = summary["desc"]
+    qty = summary.get("quantity")
+    if qty and f"{qty:,}" not in desc:
+        desc = f"{desc}, {qty:,}"
+    missing = summary.get("missing") or []
+    if not missing:
+        return t("understand_partial", lang, desc=desc, missing="")
+    if missing == ["link"]:
+        missing_text = t("missing_link", lang)
+    elif missing == ["quantity"]:
+        missing_text = t("missing_quantity", lang)
+    else:
+        missing_text = t("missing_link_quantity", lang)
+    return t("understand_partial", lang, desc=desc, missing=missing_text)
+
+
+def explain_asking_text(user_id: int, lang: str) -> str:
+    """The answer for "what do you mean / why are you asking":
+    what the bot needs and why, from the order being built. Falls
+    back to quoting the bot's last message."""
+    _cid, pending = pending_for_user(user_id)
+    if pending is not None:
+        service = pending.get("service") or {}
+        name = short_service_name(service.get("name")) or "your order"
+        qty = pending.get("quantity")
+        desc = f"{name}, {qty:,}" if qty else name
+        return t("mean_pending", lang, desc=desc)
+    if DEPOSIT_DRAFT.get(user_id):
+        return t("mean_deposit", lang)
+    partial = PARTIAL.get(user_id) or {}
+    if partial:
+        desc = _describe_hint(
+            partial.get("service_hint") or "",
+            partial.get("platform") or "", user_id,
+        ) or "your order"
+        if not partial.get("link"):
+            return t("mean_link", lang, desc=desc)
+        if not partial.get("quantity"):
+            return t("mean_quantity", lang, desc=desc)
+    load_chat_history()
+    for entry in reversed(CHAT_HISTORY.get(int(user_id), [])):
+        last = entry.get("bot", "")
+        if last:
+            return t("mean_last", lang, last=last[:200])
+    return t("understand_none", lang)
+
+
+def local_chat_reply(text: str, lang: str) -> str:
+    """Warm acknowledgement when the AI is down: keyed by what the
+    user said. Never a price, never an order prompt — the caller
+    appends the soft continuation."""
+    s = " ".join((text or "").strip().lower().split())
+    if any(w in s for w in ("haha", "lol", "lmao", "hehe")) \
+            or any(e in s for e in ("😂", "🤣")):
+        return t("chat_laugh", lang)
+    if "thank" in s or "thx" in s:
+        return t("chat_thanks", lang)
+    if "tired" in s or "bored" in s:
+        return t("chat_tired", lang)
+    if "happy" in s or "feel good" in s:
+        return t("chat_happy", lang)
+    if any(p in s for p in (
+        "how are you", "how r you", "what's up", "whats up",
+        "good morning", "good afternoon", "good evening",
+    )):
+        return t("chat_greeting", lang)
+    if "viral" in s:
+        return t("chat_viral", lang)
+    return t("chat_default", lang)
+
+
+def chat_continue_note(user_id: int, lang: str) -> str:
+    """The soft line that ends a free-chat reply: it points back to
+    the order without interrogating ("send the link when you're
+    ready"), or invites a first order when there is none."""
+    _cid, pending = pending_for_user(user_id)
+    if pending is not None:
+        return t("chat_continue_confirm", lang)
+    partial = PARTIAL.get(user_id) or {}
+    if partial:
+        if not partial.get("link"):
+            return t("chat_continue_link", lang)
+        if not partial.get("quantity"):
+            return t("chat_continue_quantity", lang)
+        return t("chat_continue_confirm", lang)
+    return t("chat_continue_fresh", lang)
+
+
+async def conversation_reply(update, text: str, lang: str, voice: bool = False) -> bool:
+    """Answer a conversational message mid-order and return True
+    when handled (the caller returns). Three kinds, in order:
+    "do you understand" gets a restatement of the order; "what do
+    you mean / why are you asking" gets an explanation; free chat
+    (greetings, small talk, comments, feelings, opinions) gets a
+    natural AI answer plus a soft steer back. Real questions and
+    order details are never swallowed: ban, price, source, payment,
+    usual, order-now, links, quantities, service IDs and deposit
+    fields all fall through to their own handlers. The draft and
+    any Confirm card stay untouched."""
+    user = update.effective_user
+    user_id = user.id
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return False
+    if (is_ban_question(text) or is_price_question(text)
+            or is_source_question(text) or is_paid_phrase(text)
+            or is_usual_request(text) or is_order_now(text)
+            or extract_links(text) or extract_service_id(text) is not None
+            or quantity_from_text(text) is not None
+            or normalize_method(text) is not None
+            or normalize_phone(text) is not None
+            or parse_deposit_amount(text) is not None
+            or parse_interval_minutes(text) is not None):
+        return False
+    if is_confirm_understanding(text):
+        await reply_message(
+            update.message, understanding_text(user_id, lang),
+            lang, voice=voice,
+        )
+        OFF_TOPIC_COUNT.pop(user_id, None)
+        return True
+    if is_conversation_question(text, user_id):
+        await reply_message(
+            update.message, explain_asking_text(user_id, lang),
+            lang, voice=voice,
+        )
+        OFF_TOPIC_COUNT.pop(user_id, None)
+        return True
+    if is_free_chat(text):
+        _cid, _pending = pending_for_user(user_id)
+        _partial = PARTIAL.get(user_id) or {}
+        if _pending is None and not _partial:
+            # Pure small talk with no order being built counts toward
+            # the same 2-3 turn steering as off-topic (round 5).
+            count = OFF_TOPIC_COUNT.get(user_id, 0) + 1
+            OFF_TOPIC_COUNT[user_id] = count
+            if count >= 3:
+                await reply_message(
+                    update.message,
+                    with_pending_note(
+                        user_id, lang, t("off_topic_steer", lang)
+                    ),
+                    lang, voice=voice,
+                )
+                return True
+        general = await answer_general_question(text, lang)
+        if general is None:
+            general = local_chat_reply(text, lang)
+        await reply_message(
+            update.message,
+            general + "\n" + chat_continue_note(user_id, lang),
+            lang, voice=voice,
+        )
+        return True
+    return False
+
+
 # ------------------------------------------------------------- handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # A redelivered /start (same update id, seen 14 Nov 2026: the
+    # greeting went out twice at 07:26) must not greet twice.
+    if _update_seen(update):
+        return
     user = update.effective_user
     lang = "am" if (user.language_code or "").lower().startswith("am") else "en"
     try:
@@ -6284,6 +6819,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             PENDING.pop(_cid, None)
             await send_order_result(update.message, lang, _pending, user.id)
             return
+
+    # A conversational message mid-order (round 8, 14 Nov 2026):
+    # "do you understand", "what do you mean", free chat — answer
+    # like a normal AI first, then continue the order. Never
+    # swallowed by the link prompt. The draft and any Confirm card
+    # stay untouched.
+    if await conversation_reply(update, text, lang, voice=voice):
+        return
 
     # Bare-quantity answers and replies to the bot's questions are
     # read before the classifier, so "1000 please" after "How many?"

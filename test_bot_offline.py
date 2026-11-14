@@ -7936,5 +7936,493 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(msg.text_sent)
 
 
+# Sentinel for "ai_generate not mocked" in the round-8 _send helper
+# (ai_reply=None must still mock the AI, to return None).
+_UNSET = object()
+
+
+class ReactionsPaxyo(FakePaxyo):
+    """FakePaxyo plus a Telegram reactions service (336 ETB/1000),
+    the service from the owner's 14 Nov 2026 screenshot."""
+
+    REACTION_SERVICE = {
+        "service": 2001, "name": "Telegram Reactions 👍 | Fast",
+        "category": "Telegram Reactions", "type": "Default",
+        "rate_etb_per_1000": 336.0, "min": 10, "max": 1000,
+        "average_time": "5 minutes", "active": True,
+        "provider_service_id": 2001,
+    }
+
+    async def services(self):
+        return SAMPLE_SERVICES + [self.REACTION_SERVICE]
+
+
+class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
+    """The 14 Nov 2026 round-8 fixes, from the owner's screenshot:
+    "Do you understand what I said first" got the link prompt
+    repeated back. The bot now restates what it understood, reads
+    emoji (👍 is the thumbs-up reaction), answers mid-order
+    questions instead of repeating the last prompt, and chats
+    freely for a turn or two instead of interrogating — while the
+    draft and any Confirm card survive the chat. A redelivered
+    /start greets once."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        self._history_file = os.path.join(
+            tempfile.gettempdir(), "paxyo-test-chat-history.json"
+        )
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+        self._history_patch = mock.patch.object(
+            bot, "CHAT_HISTORY_FILE", self._history_file
+        )
+        self._history_patch.start()
+        bot._LAST_HISTORY_SAVE = 0.0
+
+    def tearDown(self):
+        self._history_patch.stop()
+        for store in (
+            bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        if os.path.exists(self._history_file):
+            os.unlink(self._history_file)
+
+    async def _send(self, text, intent, paxyo=None, ai_reply=_UNSET):
+        from contextlib import ExitStack
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        patches = [
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(return_value=intent),
+            ),
+            mock.patch("bot.paxyo", paxyo or FakePaxyo()),
+            mock.patch("bot.speak_reply"),
+        ]
+        if ai_reply is not _UNSET:
+            patches.append(mock.patch(
+                "bot.ai_generate",
+                new=mock.AsyncMock(return_value=ai_reply),
+            ))
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _order_views_no_link(self):
+        return await self._send(
+            "I want tiktok views",
+            intent_of("order", platform="tiktok", service_hint="views"),
+            paxyo=TikTokPaxyo(),
+        )
+
+    # (1) emoji reading ----------------------------------------------
+
+    def test_emoji_meanings(self):
+        self.assertEqual(
+            bot.emoji_meanings("👍❤️"),
+            [("👍", "thumbs-up"), ("❤️", "heart")],
+        )
+        self.assertEqual(bot.emoji_meanings("no emoji here"), [])
+        # A skin tone does not change the meaning.
+        self.assertEqual(bot.emoji_meanings("👍🏻"), [("👍", "thumbs-up")])
+        self.assertEqual(
+            bot.reaction_emoji("I want 👍 this reaction"), "👍"
+        )
+        self.assertEqual(bot.reaction_emoji("I want ❤️ for my post"), "❤️")
+        self.assertIsNone(bot.reaction_emoji("hello"))
+        # 🙏 is thanks, not a reaction type.
+        self.assertIsNone(bot.reaction_emoji("thank you 🙏"))
+        self.assertEqual(bot.emoji_meanings("thank you 🙏"), [("🙏", "pray")])
+
+    def test_kind_from_text_reads_reaction_emoji(self):
+        self.assertEqual(
+            bot.kind_from_text("I want 👍 this reaction"), "reactions"
+        )
+        self.assertEqual(bot.kind_from_text("👍"), "reactions")
+        self.assertEqual(bot.kind_from_text("👀"), "views")
+        # A word the user typed wins over the emoji.
+        self.assertEqual(bot.kind_from_text("I want 👍 1000 views"), "views")
+        self.assertEqual(bot.kind_from_text("I want tiktok views"), "views")
+
+    def test_local_intent_reads_emoji_reaction(self):
+        result = bot.local_intent("I want 👍 this reaction")
+        self.assertEqual(result["intent"], "order")
+        self.assertIn("reaction", result["service_hint"])
+        result = bot.local_intent("👍")
+        self.assertEqual(result["intent"], "order")
+        self.assertEqual(result["service_hint"], "reactions")
+
+    def test_quantity_before_metric_reactions(self):
+        self.assertEqual(
+            bot.quantity_before_metric("1000 👍 reactions"), 1000
+        )
+        self.assertEqual(
+            bot.quantity_before_metric("1000 reactions"), 1000
+        )
+
+    # (2) confirm-understanding --------------------------------------
+
+    def test_confirm_understanding_phrases(self):
+        for text in (
+            "Do you understand what I said first",
+            "do you understand me",
+            "did you get that",
+            "do you know what i mean",
+            "what did i say",
+            "are you listening",
+            "ገባህ?",
+            "ምን አልኩ",
+        ):
+            self.assertTrue(bot.is_confirm_understanding(text), text)
+        for text in (
+            "I want tiktok views",
+            "how much is ig 1k views",
+            "what is the weather like",
+        ):
+            self.assertFalse(bot.is_confirm_understanding(text), text)
+
+    async def test_confirm_understanding_restates_emoji_order(self):
+        # The live screenshot flow (14 Nov 2026): the user ordered
+        # 👍 reactions, then asked "Do you understand what I said
+        # first" — and got the link prompt repeated back.
+        msg1 = await self._send(
+            "I want 👍 this reaction",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertIn(
+            "Please send the link the order is for.", msg1.text_sent[0]
+        )
+        msg2 = await self._send(
+            "Do you understand what I said first",
+            intent_of("unclear"),
+            paxyo=ReactionsPaxyo(),
+        )
+        reply = msg2.text_sent[0]
+        self.assertIn("Yeah, I got it", reply)
+        self.assertIn("👍 reactions", reply)
+        self.assertIn("Telegram channel post", reply)
+        self.assertIn("1,000", reply)
+        self.assertIn("link", reply.lower())
+        self.assertNotIn(
+            "Please send the link the order is for.", reply
+        )
+        # The draft survives the question.
+        self.assertEqual(
+            bot.PARTIAL[1].get("service_hint"), "telegram reactions"
+        )
+        # And the order still completes when the link arrives.
+        msg3 = await self._send(
+            "https://t.me/paxyo251/180",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions",
+                      link="https://t.me/paxyo251/180", quantity=1000),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIsNotNone(msg3.markups[0])  # the Confirm card
+
+    async def test_confirm_understanding_with_pending_card(self):
+        await self._send(
+            "I want 👍 reactions for https://t.me/paxyo251/180 1000",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions",
+                      link="https://t.me/paxyo251/180", quantity=1000),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        msg = await self._send(
+            "do you understand", intent_of("unclear"),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertIn("Yeah, I got it", msg.text_sent[0])
+        self.assertIn("Confirm", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)  # card untouched
+
+    async def test_confirm_understanding_with_no_context(self):
+        msg = await self._send(
+            "do you understand me", intent_of("unclear")
+        )
+        self.assertIn("I'm listening", msg.text_sent[0])
+        self.assertIn("don't have an order", msg.text_sent[0])
+
+    async def test_what_did_i_say_restates_instead_of_history_list(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "what did I say", intent_of("unclear"), paxyo=TikTokPaxyo()
+        )
+        self.assertIn("Yeah, I got it", msg.text_sent[0])
+        self.assertIn("TikTok views", msg.text_sent[0])
+        self.assertNotIn("Here's what we've talked about", msg.text_sent[0])
+
+    async def test_confirm_understanding_amharic(self):
+        # The bridge is off here (translation returns the text
+        # unchanged), so the Amharic templates answer directly.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(side_effect=lambda text: text),
+        ):
+            await self._send(
+                "እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ",
+                intent_of("order", platform="tiktok",
+                          service_hint="views", quantity=200),
+                paxyo=TikTokPaxyo(),
+            )
+            msg = await self._send(
+                "ገባህ?", intent_of("unclear"), paxyo=TikTokPaxyo()
+            )
+        self.assertIn("ገብቶኛል", msg.text_sent[0])
+        self.assertNotIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+
+    # (3) mid-order conversation questions ----------------------------
+
+    def test_conversation_question_phrases(self):
+        for text in (
+            "what do you mean", "why are you asking that",
+            "why do you need my link", "ምን ማለት",
+        ):
+            self.assertTrue(bot.is_conversation_question(text), text)
+        for text in (
+            "I want tiktok views", "how much is ig 1k views",
+            "what is the weather like",
+        ):
+            self.assertFalse(bot.is_conversation_question(text), text)
+
+    async def test_mid_order_what_do_you_mean_explains(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "What do you mean?", intent_of("unclear"),
+            paxyo=TikTokPaxyo(),
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("link", reply.lower())
+        self.assertIn("post", reply.lower())
+        self.assertNotIn(
+            "Please send the link the order is for.", reply
+        )
+        # The draft survives, and the order still completes.
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "views")
+        msg2 = await self._send(
+            "https://vt.tiktok.com/ZSpQWTSmH/ 1000",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      link="https://vt.tiktok.com/ZSpQWTSmH/",
+                      quantity=1000),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIsNotNone(msg2.markups[0])
+
+    async def test_mid_order_why_are_you_asking_explains(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "why are you asking that", intent_of("unclear"),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertIn("link", msg.text_sent[0].lower())
+        self.assertNotIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+
+    async def test_are_you_listening_restates(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "are you listening", intent_of("unclear"),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertIn("Yeah, I got it", msg.text_sent[0])
+        self.assertIn("TikTok views", msg.text_sent[0])
+
+    # (4) emoji-only messages ------------------------------------------
+
+    async def test_emoji_only_thumbs_up_in_order_context(self):
+        msg1 = await self._send(
+            "I want 👍 this reaction",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram reactions", quantity=1000),
+            paxyo=ReactionsPaxyo(),
+        )
+        self.assertIn(
+            "Please send the link the order is for.", msg1.text_sent[0]
+        )
+        msg2 = await self._send(
+            "👍", intent_of("unclear"), paxyo=ReactionsPaxyo()
+        )
+        self.assertIn(
+            "Please send the link the order is for.", msg2.text_sent[0]
+        )
+        self.assertNotIn("I did not understand", msg2.text_sent[0])
+        self.assertEqual(
+            bot.PARTIAL[1].get("service_hint"), "telegram reactions"
+        )
+
+    async def test_bare_thumbs_up_without_context_asks_for_link(self):
+        # No order context: a bare 👍 is still understood as the
+        # thumbs-up reaction, and the bot asks for the link (the
+        # link itself reveals the platform).
+        msg = await self._send("👍", intent_of("unclear"))
+        self.assertIn(
+            "Please send the link the order is for.", msg.text_sent[0]
+        )
+        self.assertNotIn("I did not understand", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "reactions")
+
+    # (5) free chat mid-order -----------------------------------------
+
+    async def test_free_chat_mid_order_gets_natural_reply(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "haha nice", intent_of("unclear"), paxyo=TikTokPaxyo(),
+            ai_reply="Haha, nice one!",
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("Haha, nice one!", reply)
+        self.assertIn("send the link when you're ready", reply)
+        self.assertNotIn(
+            "Please send the link the order is for.", reply
+        )
+        # The draft survives the chat.
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "views")
+
+    async def test_free_chat_viral_question_answered_naturally(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "do you think this video will go viral",
+            intent_of("unclear"), paxyo=TikTokPaxyo(),
+            ai_reply="It has a real shot — the hook is strong.",
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("It has a real shot", reply)
+        self.assertIn("send the link when you're ready", reply)
+        self.assertNotIn(
+            "Please send the link the order is for.", reply
+        )
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "views")
+
+    async def test_free_chat_tired_today_with_order_need(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "I'm tired today, I need views for my new video",
+            intent_of("unclear"), paxyo=TikTokPaxyo(),
+            ai_reply="Sorry you're tired — hope the video does well!",
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("Sorry you're tired", reply)
+        self.assertIn("send the link when you're ready", reply)
+        self.assertNotIn(
+            "Please send the link the order is for.", reply
+        )
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "views")
+
+    async def test_free_chat_fallback_without_ai(self):
+        await self._order_views_no_link()
+        msg = await self._send(
+            "haha nice", intent_of("unclear"), paxyo=TikTokPaxyo(),
+            ai_reply=None,
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("Haha", reply)
+        self.assertIn("send the link when you're ready", reply)
+
+    async def test_third_pure_small_talk_steers_back(self):
+        # No order being built: the same 2-3 turn steering as
+        # off-topic (round 5) still applies to pure small talk.
+        replies = []
+        for _ in range(3):
+            msg = await self._send(
+                "haha nice", intent_of("unclear"),
+                ai_reply="Haha, nice one!",
+            )
+            replies.append(msg.text_sent[0])
+        self.assertIn("Haha, nice one!", replies[0])
+        self.assertIn("Haha, nice one!", replies[1])
+        self.assertEqual(replies[2], bot.t("off_topic_steer", "en"))
+
+    async def test_free_chat_does_not_swallow_ban_question(self):
+        # "do you think I'll get banned?" is a ban question, not
+        # chat — the owner's NO answer must win.
+        msg = await self._send(
+            "do you think I'll get banned?",
+            intent_of("safety"), ai_reply="CHATTY-MOCK",
+        )
+        self.assertIn(
+            "can't be banned or shadowbanned", msg.text_sent[0]
+        )
+        self.assertNotIn("CHATTY-MOCK", msg.text_sent[0])
+
+    async def test_free_chat_does_not_swallow_price_pushback(self):
+        msg = await self._send(
+            "do you think 1k views is a good price?",
+            intent_of("price_pushback"), ai_reply="CHATTY-MOCK",
+        )
+        self.assertNotIn("CHATTY-MOCK", msg.text_sent[0])
+        self.assertNotIn("when you're ready", msg.text_sent[0])
+
+    async def test_free_chat_does_not_swallow_order_now(self):
+        # "please order now" with a Confirm card pending places the
+        # order — it is never answered as chat.
+        await self._send(
+            "I want 1000 Instagram followers https://instagram.com/p/x",
+            intent_of("order", platform="instagram",
+                      service_hint="followers",
+                      link="https://instagram.com/p/x", quantity=1000),
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        fake_paxyo = FakePaxyo()
+        msg = await self._send(
+            "please order now", intent_of("order"), paxyo=fake_paxyo,
+            ai_reply="CHATTY-MOCK",
+        )
+        self.assertEqual(len(fake_paxyo.orders_created), 1)
+        self.assertNotIn("CHATTY-MOCK", msg.text_sent[0])
+
+    # (6) duplicate greeting ------------------------------------------
+
+    async def test_start_greeting_sent_once_on_redelivery(self):
+        msg = FakeMessage("/start")
+        update = FakeUpdate(msg)
+        update.update_id = 424242
+        with mock.patch("bot.paxyo", FakePaxyo()):
+            await bot.start(update, None)
+            await bot.start(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+
+    async def test_start_greeting_sent_again_for_new_update(self):
+        msg = FakeMessage("/start")
+        first = FakeUpdate(msg)
+        first.update_id = 111
+        second = FakeUpdate(msg)
+        second.update_id = 222
+        with mock.patch("bot.paxyo", FakePaxyo()):
+            await bot.start(first, None)
+            await bot.start(second, None)
+        self.assertEqual(len(msg.text_sent), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

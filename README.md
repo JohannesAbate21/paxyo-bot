@@ -734,3 +734,51 @@ the suite is green again (439 tests: 428 existing + 11 new).
 
 450 tests: 439 existing + 11 new, all passing, no existing test
 changed.
+
+## Round 8 (14 Nov 2026 — the bot talks like a normal AI)
+
+Live case from the owner's screenshot: the user ordered 👍
+reactions, then asked "Do you understand what I said first" — and
+the bot just repeated "Please send the link the order is for."
+William: a normal AI says what it understood first.
+
+- **"Do you understand" gets a restatement, not the link prompt.**
+  A local guard (`conversation_reply`, before the order flow)
+  catches confirm-understanding phrasings ("do you understand",
+  "did you get that", "what did I say", "are you listening" —
+  English and Amharic) and answers by restating the order being
+  built — service, quantity, link if given, and what is still
+  missing ("Yeah, I got it — you want 👍 reactions for your
+  Telegram channel post, 1,000 of them. I just need the link to the
+  post."). With a Confirm card pending it restates the card; with
+  no context it says it is listening and has no order yet.
+- **Emoji are read.** 👍 is the thumbs-up reaction, ❤️ heart, 🔥
+  fire, 😂 laugh, 😮 wow, 😢 sad, 👀 views (`EMOJI_MEANINGS`,
+  `emoji_meanings`, `reaction_emoji`). "reactions" is now a metric,
+  so "I want 👍 this reaction" orders the 👍 Telegram reaction
+  service, and a bare "👍" in an order context is understood too.
+  The classifier prompt also says emoji carry meaning. 🙏 maps to
+  thanks, never to a reaction type.
+- **Mid-order questions are answered first.** "What do you mean",
+  "why are you asking that" (and a bare "what?" / "huh?" while an
+  order is being built) get an explanation of what the bot needs
+  and why, then the order continues — the previous prompt is never
+  repeated verbatim. The draft and any Confirm card stay untouched.
+- **Free chat, with room to talk.** Greetings, small talk,
+  comments, feelings and opinions ("haha nice", "I'm tired today,
+  I need views for my new video", "do you think this video will
+  go viral") get a natural AI answer plus one soft line back to
+  the order ("Just send the link when you're ready...") instead of
+  snapping back to the next order question. Pure small talk with
+  no order being built still counts toward the round-5 2–3 turn
+  steering. Real questions are never swallowed: ban, price,
+  source, payment, usual, order-now, links, quantities, service
+  IDs and deposit fields all fall through to their own handlers.
+  When the AI is down, a local fallback answers (`local_chat_reply`).
+- **Duplicate greeting guard.** A redelivered /start (same update
+  id — the greeting went out twice at 07:26) now greets once
+  (`_update_seen` in `start`). A genuine second /start still
+  greets again.
+
+498 tests: 472 existing + 26 new, all passing, no existing test
+changed.
