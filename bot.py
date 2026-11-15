@@ -1267,6 +1267,22 @@ TEXT = {
         "am": "ጠቅላላ: {total} ETB",
         "en": "Total: {total} ETB",
     },
+    # Low-balance warning (15 Nov 2026, feature 1): shown BEFORE
+    # the Confirm card when the user orders their usual service and
+    # the balance is short of the total. Names the shortfall; the
+    # deposit button on it carries exactly the shortfall. The user
+    # can still confirm — the warning never blocks the order.
+    "low_balance_warning": {
+        "am": "ማስጠንቅቂያ — balanceዎ ({balance} ETB) ለዚህ order ({total} ETB) በ{shortfall} ETB ይጎድላል። ማረጋገጥ ይችላሉ — ወይም መጀመሪያ ጉድለቱን deposit ያድርጉ።",
+        "en": "Heads up — your balance ({balance} ETB) is {shortfall} ETB short of this order ({total} ETB). You can still confirm — or top up the shortfall first.",
+    },
+    # Bulk orders (15 Nov 2026, feature 2): more than 5 links in
+    # one message — ask the user to split them into smaller
+    # messages. Never silently drop links.
+    "bulk_too_many": {
+        "am": "{n} links ናቸው — በአንድ መልእክት እስከ 5 ብቻ መቀበል እችላለሁ። እባክዎ ወደ ትናንሽ ቡድኖች ከፍለው እያንዳንዱን ለየብቻ ይላኩ።",
+        "en": "That's {n} links — I can take up to 5 in one message. Please split them into smaller messages and send each group separately.",
+    },
     "change_note": {
         "am": "Quantity ተቀይሯል: {quantity}።",
         "en": "Quantity updated: {quantity}.",
@@ -1286,6 +1302,54 @@ TEXT = {
     "refill_finished": {
         "am": "Order ተጠናቋል ግን ቁጥሩ አልደረሰም — ስለ refill እባክዎ support ያነጋግሩ። እኔ ራሴ refill ወይም refund ቃል መግባት አልችልም።",
         "en": "It finished short — please contact support about a refill. I can't promise a refill or a refund myself.",
+    },
+    # Refill in chat (15 Nov 2026, feature 3): "refill my last
+    # order" / "refill order #1841". Only the caller's own
+    # COMPLETED orders can be refilled. The refill itself is a
+    # real provider refill through POST /orders/{id}/refill; when
+    # the provider does not offer refills for that order, the bot
+    # says so honestly and offers a SECOND Confirm for a brand-new
+    # order of the same service — never claiming the new order is
+    # a refill.
+    "refill_confirm": {
+        "am": "Order #{order_id} refill ይደረግ?\n{service} ×{quantity}\n{link}\nይህ orderውን ወደ ሙሉ ቁጥሩ ይመልሳል።",
+        "en": "Refill order #{order_id}?\n{service} ×{quantity}\n{link}\nThis tops the order back up to the full quantity.",
+    },
+    "refill_done": {
+        "am": "ለorder #{order_id} refill ተጀምሯል (refill #{refill_id})። የጎደለው ቁጥር ይሞላል።",
+        "en": "Refill started for order #{order_id} (refill #{refill_id}). The missing amount will be topped up.",
+    },
+    "refill_not_ready": {
+        "am": "Refill ገና አልተቀሰቀሰም — ከchat order refill ማድረግ አልችልም። እባክዎ support ያነጋግሩ።",
+        "en": "Refills aren't switched on yet — I can't refill an order from chat right now. Please contact support and they'll help.",
+    },
+    "refill_not_completed": {
+        "am": "Order #{order_id} {status} ነው፣ ገና አልተጠናቀቀም — የተጠናቀቁ orders ብቻ refill ይደረጋሉ።",
+        "en": "Order #{order_id} is {status}, not completed yet — only completed orders can be refilled.",
+    },
+    "refill_order_not_found": {
+        "am": "ያ order ማግኘት አልቻልኩም — የእርስዎ ላይሆን ይችላል፣ ወይም ካየሁት orders በላይ እድሜው ጠፍቶ ሊሆን ይችላል። Order ቁጥሩን ያረጋግጡና እንደገና ይሞክሩ።",
+        "en": "I couldn't find that order — it may not be yours, or it may be older than the orders I can see. Check the order number and try again.",
+    },
+    "refill_no_completed": {
+        "am": "እስካሁን refill ልደረግ የሚችል የተጠናቀቀ order የለዎትም።",
+        "en": "You have no completed orders I can refill yet.",
+    },
+    "refill_not_refillable": {
+        "am": "ያ order refill ሊደረግ አይችልም — {reason}",
+        "en": "That order can't be refilled — {reason}",
+    },
+    "refill_unsupported": {
+        "am": "ለዚህ order refill አይሰጥም፣ ስለዚህ refill ማድረግ አይቻልም። በተመሳሳይ service፣ ተመሳሳይ quantity እና ተመሳሳይ link እንደገና እንደ አዲስ order መክፈት እችላለሁ — refill አይደለም፣ አዲስ order ነው።",
+        "en": "Refills aren't available for this order, so a refill isn't possible. I can place the same order again instead — same service, same quantity, same link — as a brand-new order. It won't be a refill, it will be a new order.",
+    },
+    "refill_reorder_note": {
+        "am": "አዲስ order ነው፣ refill አይደለም — ለዚህ refill አይሰጥም።",
+        "en": "New order, not a refill — refills aren't available for this one.",
+    },
+    "refill_failed": {
+        "am": "Refill መጀመር አልተቻለም። እባክዎ እንደገና ይሞክሩ ወይም support ያነጋግሩ።",
+        "en": "The refill couldn't be started. Please try again or contact support.",
     },
     "order_wait": {
         "am": "Order {order_id}: {status}። {service} አብዛኛውን ጊዜ በ {avg} ውስጥ ይጀምራል።",
@@ -2350,6 +2414,70 @@ TEXT = {
     "digest_not_ready": {
         "am": "Daily digest ገና አልተገናኘም — server stats የሉም። Owner እንዲያጠናቅቅ ይጠይቁ።",
         "en": "The daily digest is not connected yet — the server stats are not available. Ask the owner to finish the setup.",
+    },
+    # Provider price-change watch (feature 6) and low provider
+    # balance (feature 7): admin alerts, English only — William
+    # reads them, customers never see them. (The balance alerts
+    # live as module constants below, not in TEXT: the secrecy
+    # test treats every TEXT entry as user-facing, and these two
+    # name the provider — which only William may ever see.)
+    "big_deposit_alert": {
+        "en": "💰 Big deposit: {amount} ETB from {user} via {method}.",
+    },
+    "big_deposit_balance": {
+        "en": " New balance: {balance} ETB.",
+    },
+    # Loyalty bonus (feature 9): the delivery-message line rides in
+    # English like the rest of that message; the question answers
+    # are user-facing, so they carry a first-pass Amharic version.
+    "loyalty_bonus": {
+        "en": "...and you earned a {bonus} ETB loyalty bonus for your {order_number}th completed order — it is already in your balance.",
+    },
+    # Loyalty bonus admin report (feature 9, William 15 Nov 10:57
+    # EAT): every time the bonus is credited, William gets a
+    # report naming who got it and how much. Admin only, English.
+    # {user} is "@{username} ({telegram_id})" when the server
+    # reply carries a username, else "user {telegram_id}" — the
+    # bot never invents a name.
+    "loyalty_bonus_admin": {
+        "en": "🎁 Loyalty bonus credited: {bonus} ETB to {user} — their {order_number}th completed order.",
+    },
+    "loyalty_not_live": {
+        "am": "የታማኝነት ቦነስ ገና አልተጀመረም — ሲጀምር አሳውቅዎታለሁ።",
+        "en": "The loyalty bonus isn't switched on yet — I'll let you know when it is.",
+    },
+    "loyalty_explained": {
+        "am": "አዎ — እያንዳንዱ 10 የተጠናቀቁ ትዕዛዞች ከጠቅላላ ዋጋቸው {percent}% የታማኝነት ቦነስ ያገኛሉ፤ በቀጥታ ወደ Paxyo balanceዎ ይገባል።",
+        "en": "Yes — every 10 completed orders earns you a {percent}% loyalty bonus on those orders' total, credited straight to your Paxyo balance.",
+    },
+    "loyalty_explained_awarded": {
+        "am": "አዎ — እያንዳንዱ 10 የተጠናቀቁ ትዕዛዞች ከጠቅላላ ዋጋቸው {percent}% የታማኝነት ቦነስ ያገኛሉ፤ በቀጥታ ወደ Paxyo balanceዎ ይገባል። እና መልካም ዜና፦ ለ{order_number}ኛው የተጠናቀቀ ትዕዛዝዎ {bonus} ETB ቦነስ አግኝተዋል — አስቀድሞ በbalanceዎ ውስጥ ነው።",
+        "en": "Yes — every 10 completed orders earns you a {percent}% loyalty bonus on those orders' total, credited straight to your Paxyo balance. And good news: you just earned a {bonus} ETB bonus for your {order_number}th completed order — it is already in your balance.",
+    },
+    # Feedback check (feature 10): user-facing, en + first-pass Amharic.
+    "feedback_ask": {
+        "am": "ከPaxyo ጋር ያደረጉት የመጀመሪያ ትዕዛዝ እንዴት ነበር?",
+        "en": "How was your first order with Paxyo?",
+    },
+    "feedback_thanks": {
+        "am": "አመሰግናለሁ — መልካም መሆኑ ደስ ብሎኛል!",
+        "en": "Thanks — glad it went well!",
+    },
+    "feedback_bad_ask": {
+        "am": "ይቅርታ — በትዕዛዝ #{order_id} ላይ ምን ተሳክቶ አልነበረም? በአንድ መልእክት ይንገሩኝ እና ለsupport አስተላልፋለሁ።",
+        "en": "Sorry to hear that — what went wrong with order #{order_id}? Tell me in one message and I'll pass it to support.",
+    },
+    "feedback_filed": {
+        "am": "አመሰግናለሁ — ስለ ትዕዛዝ #{order_id} ለsupport አስተላልፌዋለሁ።",
+        "en": "Thanks — I've passed that to support about order #{order_id}. They'll look into it.",
+    },
+    "feedback_not_live": {
+        "am": "አሁን ለsupport መላክ አልቻልኩም — እባክዎ ስለ ትዕዛዝ #{order_id} Williamን በ t.me/paxyo ያግኙ።",
+        "en": "I couldn't send that to support right now — please message William at t.me/paxyo about order #{order_id}.",
+    },
+    "feedback_cancelled": {
+        "am": "ችግር የለም — ምንም አልልክም።",
+        "en": "No problem — I won't send anything.",
     },
 }
 
@@ -3630,6 +3758,16 @@ class PaxyoClient:
         self._client = httpx.AsyncClient(timeout=30.0, trust_env=False)
         self._services_cache = None
         self._services_cached_at = 0.0
+        # Price-change watch (feature 6, 15 Nov 2026): incremented
+        # on each REAL catalogue fetch (never on a cache hit), so
+        # the scheduler can tell a fresh catalogue from a cached
+        # one without re-fetching.
+        self._services_refresh_count = 0
+
+    @property
+    def services_refresh_count(self) -> int:
+        """Catalogue refreshes so far (real fetches only)."""
+        return self._services_refresh_count
 
     async def _send(self, request: httpx.Request):
         import time
@@ -3670,6 +3808,7 @@ class PaxyoClient:
             })
         self._services_cache = services
         self._services_cached_at = now
+        self._services_refresh_count += 1
         return services
 
     async def balance(self, telegram_id: int):
@@ -3812,6 +3951,63 @@ class PaxyoClient:
                 return None
             raise
 
+    # --------------------------------------------- refill in chat -----
+    # Contract (server side, server/api-order-refill.php — NOT
+    # installed live yet, 15 Nov 2026): POST
+    # /orders/{id}/refill {telegram_id} refills the caller's own
+    # COMPLETED order at the provider (action=refill with the
+    # provider order id) and records it in bot_order_refills.
+    # Success -> {"ok": true, "order_id", "refill_id",
+    # "provider_status", "duplicate": false}. A 404 for another
+    # user's order is the same as a missing order (no leaking).
+    # A 501 with {"ok": false, "refill_supported": false} means the
+    # provider does not offer the refill action at all — the bot
+    # then offers a fresh re-order instead, honestly labelled as a
+    # new order, never as a refill. A 409 returns
+    # {"ok": false, "error": <the provider's reason>} — the order
+    # or its service is not refillable. 404-tolerant like
+    # save_session/load_session: until the endpoint exists it
+    # returns None and the bot says refills are not switched on
+    # yet; a 409 or 501 body is passed through (like rate_order's
+    # 409 passthrough), never raised; any other failure raises.
+
+    async def refill_order(self, order_id, telegram_id: int):
+        """POST /orders/{id}/refill {telegram_id} ->
+        {"ok": true, "order_id", "refill_id"}. Returns None on 404
+        (endpoint not live yet); a 409 or 501 returns the server's
+        {"ok": false, ...} body so the caller can answer honestly
+        with the provider's reason or offer a re-order."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST",
+                    f"/orders/{order_id}/refill",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 404:
+                log.warning(
+                    "POST /orders/%s/refill returned 404 "
+                    "(endpoint not live yet)", order_id
+                )
+                return None
+            if status in (409, 501):
+                body = {}
+                try:
+                    body = exc.response.json()
+                except Exception:
+                    body = {}
+                if not isinstance(body, dict):
+                    body = {}
+                return {
+                    "ok": False,
+                    "refill_supported": body.get("refill_supported"),
+                    "error": body.get("error") or body.get("message") or "",
+                }
+            raise
+
     async def recent_orders(self, telegram_id: int, limit: int = 5):
         """GET /orders?telegram_id=&limit= — the user's most recent
         orders, newest first. The bot's memory of the last link lives
@@ -3850,6 +4046,158 @@ class PaxyoClient:
                 return None
             raise
         return data if isinstance(data, dict) else None
+
+    # --------------------------------------------- price watch ------
+    # Contract (server side, server/api-price-watch.php — NOT
+    # installed live yet, 15 Nov 2026): GET /price-watch/snapshot
+    # -> {"ok": true, "prices": {service_id: price_etb}} (empty {}
+    # when no snapshot exists yet, NOT a 404); POST
+    # /price-watch/snapshot {"prices": {...}} -> {"ok": true,
+    # "stored": N} and REPLACES the whole snapshot — always send
+    # the FULL catalogue map, never a partial one. Both methods
+    # are 404-tolerant like save_session/load_session: until the
+    # endpoint exists they return None and the watch stays off;
+    # any other failure raises, so the caller can skip that cycle
+    # and retry next time instead of alerting on stale data.
+    # Prices are ETB per 1000 as the catalogue reports them.
+
+    async def get_price_snapshot(self):
+        """GET /price-watch/snapshot -> {service_id str: price_etb}
+        ({} when nothing is stored yet). Returns None on 404
+        (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/price-watch/snapshot")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /price-watch/snapshot returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        if isinstance(data, dict):
+            prices = data.get("prices", {})
+            return prices if isinstance(prices, dict) else {}
+        return {}
+
+    async def save_price_snapshot(self, prices):
+        """POST /price-watch/snapshot {"prices": {...}} -> the
+        number of rows stored. Returns None on 404 (endpoint not
+        live yet). The map REPLACES the snapshot, so callers must
+        always pass the FULL catalogue map."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "POST", "/price-watch/snapshot",
+                    {"prices": dict(prices or {})},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /price-watch/snapshot returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        if isinstance(data, dict):
+            stored = data.get("stored")
+            try:
+                return int(stored)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    # --------------------------------------------- loyalty bonus ----
+    # Contract (server side, server/api-loyalty.php — NOT installed
+    # live yet, 15 Nov 2026): POST /loyalty/check {telegram_id} ->
+    # {"ok", "awarded", "milestone", "bonus_etb",
+    # "orders_total_etb", "orders_count", "already_awarded"}.
+    # milestone = floor(completed/10); bonus = 10% of that
+    # milestone's 10 orders' combined total (William, 15 Nov
+    # 10:57 EAT — confirmed, no longer an open decision; the
+    # server file is being updated to 10 separately), credited
+    # server-side to the Paxyo balance, idempotently (a repeat
+    # call returns already_awarded:true and credits nothing). 404-tolerant like
+    # save_session/load_session: until the endpoint exists it
+    # returns None and the bot says nothing about a bonus; any
+    # other failure raises. The bot NEVER credits anything itself
+    # — the server is the only writer.
+
+    async def check_loyalty(self, telegram_id: int):
+        """POST /loyalty/check {telegram_id} -> the server's reply
+        dict. Returns None on 404 (endpoint not live yet)."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST", "/loyalty/check",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /loyalty/check returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+
+    # --------------------------------------------- feedback asked ---
+    # Contract (server side, server/api-feedback.php — NOT installed
+    # live yet, 15 Nov 2026): GET /feedback/asked?telegram_id= ->
+    # {"ok": true, "asked": bool}; POST /feedback/asked
+    # {telegram_id} -> {"ok": true, "asked": true}, idempotent.
+    # The durable backstop for the bot's in-memory FEEDBACK_ASKED:
+    # without it a restart would ask the same user again. Both
+    # methods are 404-tolerant like save_session/load_session:
+    # until the endpoint exists they return None and the bot works
+    # from memory only; any other failure raises.
+
+    async def feedback_asked(self, telegram_id: int):
+        """GET /feedback/asked -> True/False. Returns None on 404
+        (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "GET", f"/feedback/asked?telegram_id={telegram_id}"
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /feedback/asked returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        if isinstance(data, dict):
+            return bool(data.get("asked"))
+        return False
+
+    async def mark_feedback_asked(self, telegram_id: int):
+        """POST /feedback/asked -> True. Returns None on 404
+        (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "POST", "/feedback/asked",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /feedback/asked returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        if isinstance(data, dict):
+            return bool(data.get("asked", True))
+        return True
 
     # --------------------------------------------- recurring orders ----
     # Contract (server side, built in parallel): a recurring_orders
@@ -6810,6 +7158,71 @@ RATED_ORDERS = set()
 # #2 -> #3). After that the bot stops moving the order and says so
 # honestly; it never loops forever.
 MAX_STALL_RESCUES = 2
+# Features 6–10 (10-feature build round, 15 Nov 2026).
+# Loyalty bonus (feature 9): DECIDED by William 15 Nov 10:57 EAT —
+# 10% of the 10 orders' total. CONFIRMED, no longer an open
+# decision. The server's LOYALTY_BONUS_PERCENT in
+# server/api-loyalty.php is being updated to 10 separately; the
+# bot only ever announces the figure the server returns.
+LOYALTY_BONUS_PERCENT = 10
+# Big-deposit alert (feature 8): a completed deposit of this much
+# ETB or more gets William one alert.
+BIG_DEPOSIT_ETB = 1000
+# Low provider balance alert (feature 7): DECIDED by William 15 Nov
+# 10:57 EAT — alert at $3 USD (not $5), critically low at $1 USD.
+# Below the first threshold William gets one "low" alert; below
+# the second, one more "critically low" alert. Checked at most
+# once an hour.
+PROVIDER_LOW_BALANCE_USD = 3.0
+PROVIDER_CRITICAL_BALANCE_USD = 1.0
+# The two balance alerts, as plain constants — NOT in TEXT (see
+# the note above "big_deposit_alert"): they name the provider,
+# which only William may ever see, and the secrecy test treats
+# every TEXT entry as user-facing. {balance} is the USD figure
+# with 2 decimals, filled in by run_provider_balance_cycle.
+PROVIDER_BALANCE_LOW_TEXT = (
+    "⚠️ Provider balance is low: ${balance} — orders may fail "
+    "soon. Top it up."
+)
+PROVIDER_BALANCE_CRITICAL_TEXT = (
+    "🚨 Provider balance is critically low: ${balance} — orders "
+    "may fail soon. Top it up now."
+)
+PROVIDER_BALANCE_CHECK_SECONDS = 3600
+# Feedback check (feature 10): days after the first completed
+# order before the bot asks how it went, once per user.
+FEEDBACK_DAYS = 7
+# Big deposits already alerted this process (feature 8): deposit
+# id (str) -> alerted. The status path can be called repeatedly
+# for the same deposit ("I paid" recheck), so this is what keeps
+# it to exactly one alert per completed deposit per process.
+BIG_DEPOSIT_ALERTED = set()
+# Users already asked for feedback this process (feature 10): the
+# server's bot_feedback_asked table is the backstop across
+# restarts — see maybe_feedback_ask.
+FEEDBACK_ASKED = set()
+# Feedback follow-up (feature 10): telegram_id -> {"order_id"} while
+# the bot waits for the user's answer to "what went wrong?". The
+# next message is filed via report_problem against that order.
+# In-memory only, like REPORT_PENDING: a restart drops the flow.
+FEEDBACK_PENDING = {}
+# Provider price-change watch (feature 6): the catalogue refresh
+# count the last watch run saw, and whether the watch is off (the
+# snapshot endpoint 404d — not installed yet). The watch only
+# compares when the counter moved, so a cached catalogue never
+# re-alerts. In-memory only: a restart re-runs the comparison
+# against the stored snapshot — which is exactly the dedupe the
+# snapshot gives, so no double alert.
+_PRICE_WATCH_LAST_REFRESH = None
+_PRICE_WATCH_OFF = False
+# Low provider balance watch (feature 7): monotonic time of the
+# last check, and the state machine's state — "ok" (at or above
+# the low threshold), "low" (below it, alert sent) or "critical"
+# (below $1, second alert sent). In-memory only: a restart resets
+# to "ok", so a balance that is still low after a restart alerts
+# once more — one honest repeat per restart, never a loop.
+_PROVIDER_BALANCE_LAST_CHECK = 0.0
+_PROVIDER_BALANCE_STATE = "ok"
 # First-order nudge (owner, 15 Nov 2026): users already offered the
 # cheapest test order, so it is offered once and never repeated —
 # including after a decline. In-memory only, like the other
@@ -6845,6 +7258,12 @@ RECEIPT_OFFER = {}
 # "orders": [{"service", "link", "quantity", "total"}]}. One Confirm
 # places them all, each with its own idempotency key.
 PENDING_BATCH = {}
+# A refill awaiting Confirm (15 Nov 2026, feature 3): confirm_id ->
+# {"user_id", "order_id", "service_id", "service_name", "link",
+# "quantity"}. One Confirm calls POST /orders/{id}/refill; the
+# order itself is never re-placed on this path — a re-order after
+# a provider "no refills" answer goes through PENDING instead.
+PENDING_REFILL = {}
 # A split order waiting for its links: telegram_id -> {"platform",
 # "service_hint", "quantity", "count", "links": [...]}. Cleared when
 # the split is confirmed or the user cancels.
@@ -9998,6 +10417,15 @@ def pending_batch_for_user(user_id: int):
     return None, None
 
 
+def pending_refill_for_user(user_id: int):
+    """(confirm_id, refill) of the user's most recent refill
+    awaiting Confirm, or (None, None)."""
+    for confirm_id, refill in reversed(list(PENDING_REFILL.items())):
+        if refill["user_id"] == user_id:
+            return confirm_id, refill
+    return None, None
+
+
 def stop_schedule_keyboard(schedules):
     """Inline buttons to stop one of several repeating orders."""
     buttons = []
@@ -10390,6 +10818,72 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
     return True
 
 
+async def _notify_loyalty_award(app, user_id: int, username,
+                                bonus: float, milestone: int):
+    """The admin report for a credited loyalty bonus (feature 9,
+    William 15 Nov 10:57 EAT): William gets one report naming who
+    got it and how much, every time the bonus is credited. Only
+    on a successful credit (awarded:true) — never on a failed
+    attempt, never when already awarded, never when the endpoint
+    is not installed (the callers only reach this on awarded:true).
+    The username comes from the SERVER reply (best-effort from the
+    auth table); when it is null the report carries the Telegram
+    ID alone rather than inventing a name. The server's
+    idempotency is the dedupe — a repeat check_loyalty call
+    returns already_awarded, so this only ever runs on a fresh
+    award. Never raises."""
+    if app is None:
+        return
+    if username:
+        who = f"@{username} ({user_id})"
+    else:
+        who = f"user {user_id}"
+    await notify_admins(
+        app,
+        t(
+            "loyalty_bonus_admin", "en",
+            user=who, bonus=format_money(bonus),
+            order_number=milestone * 10,
+        ),
+    )
+
+
+async def _loyalty_bonus_line(app, user_id: int) -> str:
+    """The loyalty-bonus line for a delivery message (feature 9,
+    15 Nov 2026), or "". Calls check_loyalty() when the order
+    completes; on awarded:true the line carries the EXACT bonus
+    figure from the reply — never a self-computed figure — and
+    William gets the admin report naming who got it and how much
+    (see _notify_loyalty_award; the username in it comes from the
+    server reply, never invented). A 404 (the endpoint is not
+    live yet) or any failure says nothing about a bonus: the bot
+    never promises credit that is not switched on. Non-milestone
+    and already-awarded replies also say nothing — and send no
+    admin report. Never raises."""
+    try:
+        result = await paxyo.check_loyalty(user_id)
+    except Exception as exc:
+        log.warning("loyalty check failed: %s", exc)
+        return ""
+    if not isinstance(result, dict) or not result.get("awarded"):
+        return ""
+    try:
+        bonus = float(result.get("bonus_etb") or 0)
+        milestone = int(result.get("milestone") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if bonus <= 0 or milestone <= 0:
+        return ""
+    await _notify_loyalty_award(
+        app, user_id, result.get("username"), bonus, milestone
+    )
+    return t(
+        "loyalty_bonus", "en",
+        bonus=format_money(bonus),
+        order_number=milestone * 10,
+    )
+
+
 async def run_delivery_watch_cycle(app, now=None):
     """One pass over the watched orders (ideas batch, 15 Nov 2026):
     a completed order gets its delivery message once (plus the
@@ -10434,6 +10928,9 @@ async def run_delivery_watch_cycle(app, now=None):
                     log.warning("delivery watch services failed: %s", exc)
                     services = []
             text += _crosssell_line(services or [], service)
+            loyalty_line = await _loyalty_bonus_line(app, user_id)
+            if loyalty_line:
+                text += "\n" + loyalty_line
             if str(order_id) not in RATING_ASKED:
                 # Rate your order (ideas batch 2, feature 3, 15 Nov
                 # 2026): ask once, on the delivery message itself —
@@ -11306,6 +11803,175 @@ async def maybe_friday_pattern_offer(update, user_id: int, lang: str,
         )
         return True
     return False
+
+
+def feedback_keyboard(order_id) -> InlineKeyboardMarkup:
+    """👍 / 👎 for the feedback ask. Buttons stay English, like
+    Confirm cards and the rating buttons."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "👍", callback_data=f"feedback:good:{order_id}",
+        ),
+        InlineKeyboardButton(
+            "👎", callback_data=f"feedback:bad:{order_id}",
+        ),
+    ]])
+
+
+async def _first_completed_order(user_id: int):
+    """The user's OLDEST visible completed order (order_id, created
+    datetime), or None. The orders endpoint returns at most 20,
+    newest first, so the oldest visible completed order is the
+    proxy for the first order: when 20+ orders exist and the
+    oldest visible is already >= 7 days old, the first order
+    certainly is too; when it is newer, the user is not due yet.
+    An order with no parseable date cannot prove the first order
+    is old enough, so it is skipped. Never raises."""
+    try:
+        orders = await paxyo.recent_orders(user_id, limit=20) or []
+    except Exception as exc:
+        log.warning("feedback recent orders failed: %s", exc)
+        return None
+    oldest = None
+    oldest_dt = None
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        if str(order.get("status") or "").strip().lower() != "completed":
+            continue
+        created = _parse_order_created_at(order.get("created_at"))
+        if created is None:
+            continue
+        if oldest_dt is None or created < oldest_dt:
+            oldest_dt = created
+            oldest = order
+    if oldest is None:
+        return None
+    return (oldest.get("id") or oldest.get("order_id"), oldest_dt)
+
+
+async def maybe_feedback_ask(update, user_id: int, lang: str,
+                             now=None) -> bool:
+    """The feedback check (feature 10, 15 Nov 2026): 7 days after
+    the user's first completed order, the next time they message
+    the bot, ask once "How was your first order with Paxyo?" with
+    👍/👎 buttons. At most once per user: the in-memory
+    FEEDBACK_ASKED is checked first, then the server's
+    /feedback/asked (the backstop across restarts); the ask is
+    recorded in both right after it is sent. Never while a draft
+    or Confirm card is open (same open-state check as the Friday
+    offer), and never while a Friday offer is itself open and
+    awaiting the user's answer — two asks never stack. Never via
+    the scheduler, never on an order message (the caller only
+    runs this on light intents). A 404 on the asked-endpoint falls back to memory only — never a crash, and
+    the ask still goes out once per process. Returns True when
+    the ask was sent (the caller returns: the ask replaces the
+    light-intent reply for that turn)."""
+    user_id = int(user_id)
+    if user_id in FEEDBACK_ASKED:
+        return False
+    if user_id in FRIDAY_PENDING:
+        # A Friday offer is open, awaiting the user's yes/no — the
+        # feedback ask waits until it is answered, so two asks
+        # never stack on one user in the same conversation. (The
+        # Friday test's second greeting relies on this: the offer
+        # is still open, so the stock greeting answers instead.)
+        return False
+    if _friday_has_open_state(user_id):
+        return False
+    first = await _first_completed_order(user_id)
+    if first is None:
+        return False
+    order_id, created = first
+    now_dt = now or datetime.now(timezone.utc)
+    if (now_dt - created).total_seconds() < FEEDBACK_DAYS * 86400:
+        return False
+    asked = None
+    try:
+        asked = await paxyo.feedback_asked(user_id)
+    except Exception as exc:
+        log.warning("feedback asked check failed: %s", exc)
+        asked = None
+    if asked is True:
+        FEEDBACK_ASKED.add(user_id)
+        return False
+    await reply_message(
+        update.message, t("feedback_ask", lang), lang,
+        reply_markup=feedback_keyboard(order_id),
+    )
+    FEEDBACK_ASKED.add(user_id)
+    try:
+        await paxyo.mark_feedback_asked(user_id)
+    except Exception as exc:
+        log.warning("feedback mark asked failed: %s", exc)
+    return True
+
+
+async def handle_feedback_text(update, text: str, lang: str,
+                               voice=False) -> bool:
+    """The feedback follow-up branch of handle_order_text: True
+    when the message belonged to the feedback flow and has been
+    answered, False when no feedback flow is open. Runs before
+    the classifier, right after the report flow.
+
+    After a 👎 tap the bot asked what went wrong; the next message
+    is filed via report_problem against that first order and
+    confirmed briefly. "cancel" (or "never mind", "stop") drops
+    the flow with nothing filed; a quick-reply tap drops it and
+    runs normally; a bare "yes" is not an answer, so the question
+    is asked again instead of filing one word — all mirroring the
+    report-a-problem flow. A 404 (the support endpoint is not
+    live yet) or any other failure is answered honestly with the
+    t.me/paxyo fallback — the bot never pretends the feedback
+    was filed."""
+    user = update.effective_user
+    flow = FEEDBACK_PENDING.get(user.id)
+    if flow is None:
+        return False
+    if quick_reply_action(text) is not None:
+        FEEDBACK_PENDING.pop(user.id, None)
+        return False
+    if is_cancel_request(text):
+        FEEDBACK_PENDING.pop(user.id, None)
+        await reply_message(
+            update.message, t("feedback_cancelled", lang),
+            lang, voice=voice,
+        )
+        return True
+    order_id = flow.get("order_id")
+    if is_acceptance(text):
+        await reply_message(
+            update.message,
+            t("feedback_bad_ask", lang, order_id=order_id),
+            lang, voice=voice,
+        )
+        return True
+    FEEDBACK_PENDING.pop(user.id, None)
+    # The server caps the message at 2000 characters and rejects
+    # longer input — trim, so a long description still files.
+    message = (text or "").strip()[:2000]
+    result = None
+    if paxyo is not None:
+        try:
+            result = await paxyo.report_problem(
+                user.id, message, order_id=order_id
+            )
+        except Exception as exc:
+            log.warning("feedback report failed: %s", exc)
+            result = None
+    if isinstance(result, dict) and result.get("ok"):
+        await reply_message(
+            update.message,
+            t("feedback_filed", lang, order_id=order_id),
+            lang, voice=voice,
+        )
+    else:
+        await reply_message(
+            update.message,
+            t("feedback_not_live", lang, order_id=order_id),
+            lang, voice=voice,
+        )
+    return True
 
 
 async def _friday_accept_text(user_id: int, pattern, lang: str):
@@ -12266,6 +12932,59 @@ def is_source_question(text: str) -> bool:
     return any(p in s for p in SOURCE_QUESTION_PATTERNS)
 
 
+def is_loyalty_question(text: str) -> bool:
+    """True when the message asks about a loyalty bonus (feature 9,
+    15 Nov 2026): "loyalty" anywhere, or "bonus" together with
+    ordering ("bonus for ordering a lot"). A "bonus code" is a
+    promo-code question, not a loyalty question, and a
+    first-deposit bonus has no ordering word — both stay out."""
+    s = normalize_text(text or "")
+    if "loyalty" in s:
+        return True
+    if "code" in s:
+        return False
+    return "bonus" in s and ("order" in s or "ordering" in s)
+
+
+async def loyalty_answer_text(user_id: int, lang: str, app=None) -> str:
+    """Answer a loyalty-bonus question (feature 9, 15 Nov 2026):
+    404 (the endpoint is not live yet) or any failure answers
+    honestly that the bonus isn't switched on yet; a live endpoint
+    explains the rule (10% of every 10 completed orders' total,
+    credited to the Paxyo balance). The check itself may award a
+    milestone that is already due — the server credits it, and
+    the reply then says so with the EXACT bonus figure from the
+    reply, so an award triggered by the question is never silent;
+    William also gets the admin report for that credit (same as
+    the delivery hook). The bot never credits anything itself."""
+    result = None
+    try:
+        if paxyo is not None:
+            result = await paxyo.check_loyalty(user_id)
+    except Exception as exc:
+        log.warning("loyalty check failed: %s", exc)
+        result = None
+    if result is None:
+        return t("loyalty_not_live", lang)
+    if isinstance(result, dict) and result.get("awarded"):
+        try:
+            bonus = float(result.get("bonus_etb") or 0)
+            milestone = int(result.get("milestone") or 0)
+        except (TypeError, ValueError):
+            bonus, milestone = 0, 0
+        if bonus > 0 and milestone > 0:
+            await _notify_loyalty_award(
+                app, user_id, result.get("username"), bonus, milestone
+            )
+            return t(
+                "loyalty_explained_awarded", lang,
+                bonus=format_money(bonus),
+                order_number=milestone * 10,
+                percent=LOYALTY_BONUS_PERCENT,
+            )
+    return t("loyalty_explained", lang, percent=LOYALTY_BONUS_PERCENT)
+
+
 # The user wants to sell Paxyo's services themselves (next batch,
 # 14 Nov 2026). This is NOT the source question: "are you a
 # reseller?" asks about Paxyo and still deflects. The difference
@@ -13145,7 +13864,50 @@ async def _promo_bonus_line(user_id: int, deposit_id, lang: str) -> str:
     return t("promo_bonus_failed", lang, code=code)
 
 
-async def deposit_status_text(user_id: int, lang: str) -> str:
+async def _maybe_big_deposit_alert(app, deposit, user_id: int,
+                                   username, balance):
+    """One admin alert for a completed deposit of BIG_DEPOSIT_ETB
+    or more (feature 8, 15 Nov 2026): amount, user, method, new
+    balance when known. Admin-only, via notify_admins — never to
+    a customer. Deduped by deposit id in BIG_DEPOSIT_ALERTED: the
+    status path can be called repeatedly for the same deposit (an
+    "I paid" recheck), and each completed deposit alerts exactly
+    once per process. Only ever called from the completed branch,
+    so a failed or pending deposit never alerts. Never raises."""
+    if app is None:
+        return
+    try:
+        amount = float(deposit.get("amount") or 0)
+    except (TypeError, ValueError):
+        return
+    if amount < BIG_DEPOSIT_ETB:
+        return
+    dep_key = str(deposit.get("id") or f"{user_id}:{amount}")
+    if dep_key in BIG_DEPOSIT_ALERTED:
+        return
+    BIG_DEPOSIT_ALERTED.add(dep_key)
+    who = f"@{username} ({user_id})" if username else f"user {user_id}"
+    method = str(
+        deposit.get("method") or deposit.get("payment_method") or "?"
+    )
+    method_label = METHOD_LABELS.get(method.lower(), method)
+    text = t(
+        "big_deposit_alert", "en",
+        amount=format_money(amount), user=who, method=method_label,
+    )
+    if balance is not None:
+        try:
+            text += t(
+                "big_deposit_balance", "en",
+                balance=format_money(balance),
+            )
+        except (TypeError, ValueError):
+            pass
+    await notify_admins(app, text)
+
+
+async def deposit_status_text(user_id: int, lang: str, app=None,
+                              username=None) -> str:
     """Recheck the user's most recent deposit and say what happened,
     in one short message.
 
@@ -13154,7 +13916,13 @@ async def deposit_status_text(user_id: int, lang: str) -> str:
     is used instead. The status call IS the recheck — the server
     re-verifies a pending deposit with Chapa before answering — so
     the bot never credits anything itself; it only reports what the
-    server says, and never invents a failure reason."""
+    server says, and never invents a failure reason.
+
+    `app` (the PTB Application, from the call site's context) lets
+    a completed deposit of BIG_DEPOSIT_ETB or more alert William
+    once — see _maybe_big_deposit_alert. Without it the text is
+    the same, just with no alert (the offline tests call it that
+    way)."""
     deposit_id = LAST_DEPOSIT.get(user_id)
     deposit = None
     if deposit_id is not None:
@@ -13202,6 +13970,13 @@ async def deposit_status_text(user_id: int, lang: str) -> str:
                 "deposit_went_through", lang,
                 amount=amount_text, balance=format_money(balance),
             )
+        # Big-deposit alert (feature 8, 15 Nov 2026): a completed
+        # deposit of BIG_DEPOSIT_ETB or more alerts William once.
+        # Deduped inside _maybe_big_deposit_alert, so a repeated
+        # recheck of the same deposit never re-alerts.
+        await _maybe_big_deposit_alert(
+            app, deposit, user_id, username, balance
+        )
         if promo_line:
             return base + "\n" + promo_line
         return base
@@ -13663,6 +14438,47 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
     )
 
 
+async def _low_balance_shortfall(user_id: int, service, total: float):
+    """(shortfall, balance) in ETB when this order is for the user's
+    usual service and their Paxyo balance is below the order total,
+    else None. "Usual" is the learned usual (feature 5): an
+    established platform+metric — the same platform+metric placed
+    at least twice, or loaded from the server. A one-off order, a
+    different service, no traits at all, a balance that covers the
+    total, or a balance that cannot be read all return None, so no
+    warning is ever shown for them. The warning never blocks the
+    order — the caller shows it and still shows the Confirm card."""
+    user_id = int(user_id)
+    if not _usual_is_established(user_id):
+        return None
+    traits = USER_TRAITS.get(user_id) or {}
+    platform, _hint = _platform_hint_of_service(service or {})
+    kind = kind_from_text(
+        f"{(service or {}).get('name') or ''} "
+        f"{(service or {}).get('category') or ''}"
+    )
+    metric = _trait_slug(kind) if kind else None
+    if (
+        traits.get("usual_platform") != platform
+        or traits.get("usual_metric") != metric
+    ):
+        return None
+    try:
+        bal = await paxyo.balance(user_id)
+    except Exception as exc:
+        log.warning("low-balance check failed: %s", exc)
+        return None
+    if not bal.get("found"):
+        return None
+    try:
+        balance = float(bal.get("balance", 0))
+    except (TypeError, ValueError):
+        return None
+    if balance >= total:
+        return None
+    return (round(total - balance, 2), balance)
+
+
 async def complete_order(message, user_id, merged, lang, voice=False,
                          named_service_id=None, last_service_id=None,
                          note: str = None, ask_metric: bool = True,
@@ -13850,6 +14666,35 @@ async def complete_order(message, user_id, merged, lang, voice=False,
     quantity = int(merged["quantity"])
     rate = float(service.get("rate_etb_per_1000", 0))
     total = estimated_total_etb(rate, quantity)
+
+    # Low-balance warning (15 Nov 2026, feature 1): the user's
+    # usual service, and the balance is short of the total. The
+    # warning goes out BEFORE the Confirm card, names the exact
+    # shortfall, and carries a one-tap deposit button for exactly
+    # that shortfall (callback "depshort:<amount>" — it pre-fills
+    # the deposit flow's amount, then asks for method and phone).
+    # The Confirm card is still shown below it: the user can still
+    # confirm and place the order.
+    _shortfall = await _low_balance_shortfall(user_id, service, total)
+    if _shortfall is not None:
+        _short_amount, _balance = _shortfall
+        await reply_message(
+            message,
+            t(
+                "low_balance_warning", lang,
+                balance=format_money(_balance),
+                shortfall=format_money(_short_amount),
+                total=format_money(total),
+            ),
+            lang, voice=voice,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    t("deposit_webapp_button", lang,
+                      amount=format_money(_short_amount)),
+                    callback_data=f"depshort:{_short_amount:.2f}",
+                )
+            ]]),
+        )
 
     confirm_id = uuid.uuid4().hex[:12]
     PARTIAL.pop(user_id, None)  # the order now lives in PENDING
@@ -14447,6 +15292,71 @@ async def handle_split_text(update, text, split, lang, voice=False):
     await show_batch_confirm(update.message, user.id, ready, lang, voice=voice)
 
 
+def parse_bulk_drafts(text, intent=None):
+    """Several links pasted in one message -> one batch draft per
+    link (15 Nov 2026, feature 2). Returns a list of
+    {"platform", "service_hint", "link", "quantity"} drafts, or
+    None when there are fewer than 2 or more than 5 links.
+
+    The platform comes from each link's own domain
+    (platform_from_link); the metric comes from the message's
+    words ("1000 views ..."), shared across all links. Quantities:
+    a number next to a link belongs to that link ("1000 views to
+    <link1>, 2000 views to <link2>"); a single quantity in the
+    message applies to every link ("1000 views for these three
+    links"). A link with no quantity anywhere gets quantity None
+    and is reported as missing by the batch flow — never guessed.
+    Numbers inside the links themselves are never read as
+    quantities: the text is split around the links first."""
+    links = extract_links(text)
+    if len(links) < 2 or len(links) > 5:
+        return None
+    intent = intent or {}
+    # Segments of text around each link: segment i is before link
+    # i, segment i+1 is after it. Quantities are read per segment,
+    # so a number inside a link can never be mistaken for one.
+    # One rule for the whole message, so a quantity is never
+    # claimed by two links: when the first quantity comes before
+    # the first link ("1000 views to <link1>, 2000 to <link2>"),
+    # each link takes the quantity in its preceding segment; when
+    # it comes after ("<link1> 1000 views, <link2> 2000 views"),
+    # each link takes the quantity in its following segment.
+    parts = re.split(r"https?://\S+|t\.me/\S+", text or "")
+    metric = kind_from_text(text) or kind_from_text(
+        intent.get("service_hint") or ""
+    )
+    shared = quantity_from_text(" ".join(parts))
+    qty_before_link = quantity_from_text(parts[0]) is not None
+    drafts = []
+    for i, link in enumerate(links):
+        if qty_before_link:
+            qty = quantity_from_text(parts[i])
+        else:
+            qty = (
+                quantity_from_text(parts[i + 1])
+                if i + 1 < len(parts) else None
+            )
+        if qty is None:
+            qty = shared
+        platform = platform_from_link(link)
+        if platform is None:
+            platform = (intent.get("platform") or "").strip().lower() or None
+        hint = None
+        if platform and metric:
+            hint = f"{platform} {metric}"
+        elif metric:
+            hint = metric
+        elif intent.get("service_hint"):
+            hint = intent.get("service_hint")
+        drafts.append({
+            "platform": platform,
+            "service_hint": hint,
+            "link": link,
+            "quantity": qty,
+        })
+    return drafts
+
+
 async def handle_batch_text(update, text, intent, lang, voice=False):
     """Several orders in one message, or one quantity split across
     posts. Each order is resolved to a real service and shown on one
@@ -14460,7 +15370,31 @@ async def handle_batch_text(update, text, intent, lang, voice=False):
         return
     orders = intent.get("orders")
     if not orders:
+        # No orders list from the classifier (15 Nov 2026, feature
+        # 2): the user pasted several links in one message. Parse
+        # them locally — platform per link, one quantity for all
+        # links, or a quantity per link — and show the same one
+        # combined Confirm card. More than 5 links: ask the user
+        # to split them into smaller messages, never drop any.
+        links = extract_links(text)
+        if len(links) >= 2:
+            if len(links) > 5:
+                await reply_message(
+                    update.message,
+                    t("bulk_too_many", lang, n=len(links)),
+                    lang, voice=voice,
+                )
+                return
+            orders = parse_bulk_drafts(text, intent)
+    if not orders:
         await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
+        return
+    if len(orders) > 5:
+        await reply_message(
+            update.message,
+            t("bulk_too_many", lang, n=len(orders)),
+            lang, voice=voice,
+        )
         return
     ready, missing = await resolve_batch_drafts(orders, user.id)
     if ready is None:
@@ -14762,13 +15696,290 @@ async def handle_change_order(update, text, intent, lang, voice=False):
     await reply_message(update.message, t("no_order_to_change", lang), lang, voice=voice)
 
 
+# Refill in chat (15 Nov 2026, feature 3): "refill my last
+# order" / "refill order #1841" is a request to refill a finished
+# order — a REAL provider refill through POST /orders/{id}/refill
+# — not the old "it finished short, contact support" flow. The
+# two are told apart by the phrasing: a refill request names the
+# refill and the order ("refill my last order", "refill order
+# #1841"); a short-delivery complaint ("it stopped at 800 out of
+# 1,000, send the rest") keeps the old flow below.
+_REFILL_REQUEST_PATTERNS = (
+    "refill my last order", "refill my latest order",
+    "refill my previous order", "refill my order",
+    "refill the last order", "refill last order",
+    "refill order", "refill #",
+)
+_REFILL_COMPLETED_STATUSES = ("completed", "complete", "done", "success", "paid")
+
+
+def is_refill_request(text: str) -> bool:
+    """True when the message asks to refill a specific order
+    ("refill my last order", "refill order #1841") — as opposed
+    to reporting that an order finished short."""
+    s = " ".join((text or "").strip().lower().split())
+    return any(p in s for p in _REFILL_REQUEST_PATTERNS)
+
+
+def _refill_order_id(text: str):
+    """The order number in "refill order #1841" / "refill #1841",
+    or None when the message names no number (the last order is
+    meant then)."""
+    m = re.search(r"order\s*#?\s*(\d+)", text or "", re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"#\s*(\d+)", text or "")
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _refill_order_status(order) -> str:
+    """The stored status of a recent-order row, lowercased."""
+    return str(
+        (order or {}).get("status")
+        or (order or {}).get("order", {}).get("status", "")
+        or ""
+    ).strip().lower()
+
+
+async def handle_refill_request(update, text, lang, voice=False):
+    """"Refill my last order" / "refill order #1841": resolve the
+    order from the user's own recent orders — completed only — and
+    show a Confirm card. Nothing is refilled until the user
+    confirms. A named order that is not theirs (or not in the
+    recent list) gets an honest not-found; a named order that is
+    not completed yet is refused with its real status; with no
+    completed order at all, the bot says so instead of offering a
+    card for an order that cannot be refilled."""
+    user = update.effective_user
+    wanted = _refill_order_id(text)
+    try:
+        orders = await paxyo.recent_orders(user.id, limit=20)
+    except Exception as exc:
+        log.warning("refill recent_orders failed: %s", exc)
+        await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
+        return
+    if not orders:
+        await reply_message(
+            update.message, t("refill_no_completed", lang), lang, voice=voice
+        )
+        return
+    order = None
+    if wanted is not None:
+        order = next(
+            (o for o in orders
+             if str(o.get("id") or o.get("order_id")) == str(wanted)),
+            None,
+        )
+        if order is None:
+            await reply_message(
+                update.message, t("refill_order_not_found", lang),
+                lang, voice=voice,
+            )
+            return
+    else:
+        order = next(
+            (o for o in orders
+             if _refill_order_status(o) in _REFILL_COMPLETED_STATUSES),
+            None,
+        )
+        if order is None:
+            first = orders[0]
+            await reply_message(
+                update.message,
+                t(
+                    "refill_not_completed", lang,
+                    order_id=first.get("id") or first.get("order_id") or "?",
+                    status=_refill_order_status(first) or "pending",
+                ),
+                lang, voice=voice,
+            )
+            return
+    status = _refill_order_status(order)
+    if status not in _REFILL_COMPLETED_STATUSES:
+        await reply_message(
+            update.message,
+            t(
+                "refill_not_completed", lang,
+                order_id=order.get("id") or order.get("order_id") or "?",
+                status=status or "pending",
+            ),
+            lang, voice=voice,
+        )
+        return
+    order_id = order.get("id") or order.get("order_id")
+    try:
+        service_id = int(order.get("service_id") or 0) or None
+    except (TypeError, ValueError):
+        service_id = None
+    try:
+        quantity = int(order.get("quantity") or 0) or None
+    except (TypeError, ValueError):
+        quantity = None
+    if order_id is None or service_id is None or quantity is None:
+        await reply_message(
+            update.message, t("refill_order_not_found", lang),
+            lang, voice=voice,
+        )
+        return
+    confirm_id = uuid.uuid4().hex[:12]
+    PENDING_REFILL[confirm_id] = {
+        "user_id": user.id,
+        "order_id": order_id,
+        "service_id": service_id,
+        "service_name": str(order.get("service_name") or ""),
+        "link": order.get("link") or "",
+        "quantity": quantity,
+    }
+    service_name = str(order.get("service_name") or "")
+    if service_name:
+        service_name = short_service_name(service_name)
+    else:
+        service_name = f"service {service_id}"
+    # Confirm card: always text — it carries the buttons.
+    await reply_message(
+        update.message,
+        t(
+            "refill_confirm", lang, order_id=order_id,
+            service=service_name, quantity=quantity,
+            link=order.get("link") or "",
+        ),
+        lang, voice=voice,
+        reply_markup=confirm_keyboard(confirm_id),
+    )
+
+
+async def _build_refill_reorder(user_id: int, refill, lang: str):
+    """(card_text, keyboard) for re-placing a refill's order as a
+    brand-new order — same service, quantity and link — or None
+    when the original service can no longer be ordered. The card
+    carries the refill_reorder_note, so the user sees it is a NEW
+    order, never a refill. The PENDING entry is created here, so
+    the card's Confirm button places it through the normal single
+    order path."""
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("refill reorder services failed: %s", exc)
+        return None
+    service, svc_error = resolve_named_service(services, refill["service_id"])
+    if svc_error is not None or service is None:
+        return None
+    quantity = refill["quantity"]
+    error = validate_quantity(quantity, service)
+    if error:
+        return None
+    total = estimated_total_etb(
+        float(service.get("rate_etb_per_1000", 0)), int(quantity)
+    )
+    confirm_id = uuid.uuid4().hex[:12]
+    PENDING[confirm_id] = {
+        "user_id": user_id,
+        "service": service,
+        "link": refill["link"],
+        "quantity": int(quantity),
+        "total": total,
+        "full_name": False,
+    }
+    return (
+        confirm_card_text(
+            lang, service, int(quantity), total, refill["link"],
+            note=t("refill_reorder_note", lang),
+        ),
+        confirm_keyboard(confirm_id),
+    )
+
+
+async def _run_refill_confirm(user_id: int, refill, lang: str,
+                              respond, send_new):
+    """Carry out a confirmed refill. `respond(text, reply_markup)`
+    replaces/answers the refill card (the callback's
+    edit_message_text, or the text-acceptance's reply_text);
+    `send_new(text, reply_markup)` sends a fresh message (the
+    callback's message reply, or the same reply_text). On a real
+    refill the answer names the refill id. On
+    refill_supported:false the honest "no refills for this order"
+    message goes out first and a SECOND Confirm card for a
+    brand-new order of the same service follows — the new order is
+    never called a refill."""
+    order_id = refill["order_id"]
+    try:
+        result = await paxyo.refill_order(order_id, user_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+            reason = ""
+            try:
+                body = exc.response.json()
+                if isinstance(body, dict):
+                    reason = str(
+                        body.get("error") or body.get("message") or ""
+                    )
+            except Exception:
+                reason = ""
+            await respond(
+                t(
+                    "refill_not_refillable", lang,
+                    reason=reason or "it isn't available for this order",
+                )
+            )
+            return
+        log.warning("refill_order rejected: %s", exc.response.status_code)
+        await respond(t("refill_failed", lang))
+        return
+    except Exception as exc:
+        log.warning("refill_order failed: %s", exc)
+        await respond(t("refill_failed", lang))
+        return
+    if result is None:  # 404: the endpoint is not live yet
+        await respond(t("refill_not_ready", lang))
+        return
+    if isinstance(result, dict) and result.get("ok"):
+        refill_id = result.get("refill_id") or "?"
+        await respond(
+            t("refill_done", lang, order_id=order_id, refill_id=refill_id)
+        )
+        return
+    if isinstance(result, dict) and result.get("refill_supported") is False:
+        await respond(t("refill_unsupported", lang))
+        reorder = await _build_refill_reorder(user_id, refill, lang)
+        if reorder is None:
+            await send_new(
+                t(
+                    "refill_not_refillable", lang,
+                    reason="the original service is no longer available",
+                )
+            )
+            return
+        card_text, markup = reorder
+        await send_new(card_text, reply_markup=markup)
+        return
+    reason = ""
+    if isinstance(result, dict):
+        reason = str(result.get("error") or "")
+    await respond(
+        t(
+            "refill_not_refillable", lang,
+            reason=reason or "it isn't available for this order",
+        )
+    )
+
+
 async def handle_refill(update, text, intent, lang, voice=False):
     """'It stopped at 800 out of 1,000, send the rest now.'
 
     The live status is checked first. Still running -> say so with
     the status. Finished short -> point at support for a refill.
     The bot never promises a refill or a refund, and never places a
-    second order without Confirm."""
+    second order without Confirm.
+
+    A message that ASKS for a refill of an order ("refill my last
+    order", "refill order #1841") is not this flow — it goes to
+    handle_refill_request, which shows a Confirm card for a real
+    provider refill of a completed order."""
+    if is_refill_request(text):
+        await handle_refill_request(update, text, lang, voice=voice)
+        return
     user = update.effective_user
     order_id = LAST_ORDER.get(user.id)
     if order_id is None:
@@ -15143,6 +16354,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if await handle_report_text(
         update, text, lang, voice=voice, quoted_text=quoted_text
     ):
+        return
+
+    # Feedback follow-up (feature 10, 15 Nov 2026): the next
+    # message after a 👎 tap on "How was your first order?" — the
+    # answer is filed as a support report against that order, or
+    # the flow is dropped on "cancel" with nothing filed.
+    if await handle_feedback_text(update, text, lang, voice=voice):
         return
 
     # Persistent quick-reply buttons (ideas batch, 15 Nov 2026):
@@ -15533,13 +16751,31 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 return
             await update.message.reply_text(batch_result_text(results, lang))
             return
+        # A "yes" can also confirm a refill awaiting Confirm: refill
+        # the completed order at the provider (or, when the provider
+        # offers no refills, say so honestly and offer a second
+        # Confirm for a brand-new order of the same service).
+        refill_id, refill = pending_refill_for_user(user.id)
+        if refill is not None:
+            PENDING_REFILL.pop(refill_id, None)
+            await _run_refill_confirm(
+                user.id, refill, lang,
+                respond=update.message.reply_text,
+                send_new=update.message.reply_text,
+            )
+            return
         # A "yes" can also accept the offer to check a payment receipt
         # the user sent as a photo: recheck the most recent deposit
         # with Chapa and say what happened.
         if user.id in RECEIPT_OFFER:
             RECEIPT_OFFER.pop(user.id, None)
             await reply_message(
-                update.message, await deposit_status_text(user.id, lang),
+                update.message,
+                await deposit_status_text(
+                    user.id, lang,
+                    app=getattr(context, "application", None),
+                    username=user.username,
+                ),
                 lang, voice=voice,
             )
             return
@@ -15566,7 +16802,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         _dep_id, _dep_draft = pending_deposit_for_user(user.id)
         if _dep_draft is None:
             await reply_message(
-                update.message, await deposit_status_text(user.id, lang),
+                update.message,
+                await deposit_status_text(
+                    user.id, lang,
+                    app=getattr(context, "application", None),
+                    username=user.username,
+                ),
                 lang, voice=voice,
             )
             return
@@ -15576,6 +16817,21 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # intent was injected by the photo handler (already classified).
     if intent is None and is_source_question(text):
         await reply_message(update.message, t("source_question", lang), lang, voice=voice)
+        return
+
+    # Loyalty-bonus question (feature 9, 15 Nov 2026): answered
+    # deterministically, before the classifier — the AI would
+    # otherwise guess the rule or the percentage. A 404 answers
+    # honestly that the bonus isn't switched on yet.
+    if intent is None and is_loyalty_question(text):
+        await reply_message(
+            update.message,
+            await loyalty_answer_text(
+                user.id, lang,
+                app=getattr(context, "application", None),
+            ),
+            lang, voice=voice,
+        )
         return
 
     # "Same as usual" (round 6, 13 Nov 2026): the AI sometimes
@@ -15678,6 +16934,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # who is not chatting.
     if intent_type in ("greeting", "off_topic", "unclear"):
         if await maybe_friday_pattern_offer(update, user.id, lang):
+            return
+        # Feedback check (feature 10, 15 Nov 2026): the same
+        # light-intent gate, after the Friday offer — a user due
+        # for the one-time "how was your first order?" ask gets
+        # it instead of the stock greeting. Never hijacks an order
+        # message, never runs while a draft or Confirm is open
+        # (checked inside), never via the scheduler.
+        if await maybe_feedback_ask(update, user.id, lang):
             return
 
     # A question about an order awaiting Confirm ("how fast would
@@ -15973,7 +17237,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if intent_type == "deposit_status":
         await reply_message(
-            update.message, await deposit_status_text(user.id, lang),
+            update.message,
+            await deposit_status_text(
+                user.id, lang,
+                app=getattr(context, "application", None),
+                username=user.username,
+            ),
             lang, voice=voice,
         )
         return
@@ -16250,6 +17519,20 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "platform": stored_split.get("platform"),
             "service_hint": stored_split.get("service_hint"),
         }, lang, voice=voice)
+        return
+
+    # Bulk orders pasted as links (15 Nov 2026, feature 2): an
+    # "order" message carrying 2 or more links is several orders in
+    # one message, not a single order with the first link — route it
+    # to the batch flow, which shows one combined Confirm card with
+    # the grand total. A delayed order being built keeps its own
+    # routing, and a single-link message is unchanged.
+    if (
+        intent_type == "order"
+        and user.id not in DELAYED_DRAFT
+        and len(extract_links(text)) >= 2
+    ):
+        await handle_batch_text(update, text, intent, lang, voice=voice)
         return
 
     # A one-time delayed order (owner, 14 Nov 2026): "order 10k views
@@ -17447,7 +18730,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # most recent deposit and replace the receipt message with
         # the result (same recheck the text flow uses).
         RECEIPT_OFFER.pop(user.id, None)
-        await query.edit_message_text(await deposit_status_text(user.id, lang))
+        await query.edit_message_text(
+            await deposit_status_text(
+                user.id, lang,
+                app=getattr(context, "application", None),
+                username=user.username,
+            )
+        )
+        return
+
+    if action == "depshort":
+        # One-tap deposit of exactly the shortfall (15 Nov 2026,
+        # feature 1): the low-balance warning's button carries the
+        # shortfall amount. It pre-fills the deposit flow's amount
+        # and asks for the payment method next — the method and
+        # phone are then collected by handle_deposit_text exactly
+        # as if the user had typed the amount themself, and nothing
+        # is created until the deposit Confirm card is tapped. The
+        # order's own Confirm card stays open underneath.
+        try:
+            _amount = float(arg)
+        except (TypeError, ValueError):
+            _amount = None
+        if _amount is None or _amount <= 0:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        DEPOSIT_DRAFT[user.id] = {"amount": _amount}
+        await query.edit_message_text(t("ask_deposit_method", lang))
         return
 
     if action == "start_order":
@@ -17695,6 +19004,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else "rate_thanks_bad",
                 rate_lang,
             )
+        )
+        return
+
+    if action == "feedback":
+        # Feedback check (feature 10, 15 Nov 2026): 👍/👎 on "How
+        # was your first order with Paxyo?" Good thanks them and
+        # ends it; bad asks what went wrong in one message and
+        # opens FEEDBACK_PENDING, so the next message is filed via
+        # report_problem against this first order. The ask is
+        # already recorded as asked (in memory and on the server),
+        # so a tap can never re-ask. Nothing is filed here.
+        verdict, _, fb_order_id = arg.partition(":")
+        if verdict not in ("good", "bad") or not fb_order_id:
+            return
+        fb_lang = LAST_LANG.get(user.id) or lang
+        if verdict == "good":
+            await query.edit_message_text(t("feedback_thanks", fb_lang))
+            return
+        try:
+            fb_order_id = int(fb_order_id)
+        except (TypeError, ValueError):
+            pass
+        FEEDBACK_PENDING[user.id] = {"order_id": fb_order_id}
+        await query.edit_message_text(
+            t("feedback_bad_ask", fb_lang, order_id=fb_order_id)
         )
         return
 
@@ -18059,6 +19393,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(batch_result_text(results, lang))
         return
 
+    refill = PENDING_REFILL.pop(arg, None)
+    if refill is not None:
+        if refill["user_id"] != user.id:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        if action == "cancel":
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        # Confirm tap: refill the completed order at the provider
+        # (or, when the provider offers no refills, say so honestly
+        # and offer a second Confirm for a brand-new order of the
+        # same service instead).
+        await _run_refill_confirm(
+            user.id, refill, lang,
+            respond=query.edit_message_text,
+            send_new=query.message.reply_text,
+        )
+        return
+
     await query.edit_message_text(t("cancelled", lang))
 
 
@@ -18087,6 +19440,17 @@ async def notify_user(app, user_id: int, text: str, reply_markup=None):
         )
     except Exception as exc:
         log.warning("notify_user %s failed: %s", user_id, exc)
+
+
+async def notify_admins(app, text: str):
+    """Send an admin-only alert to every ADMIN_TELEGRAM_IDS id
+    (William, who has started @paxorder_bot). Admin alerts are
+    English only and never name the provider — the price watch
+    and the provider-balance watch use this, never notify_user
+    to a customer. Never raises: one failed send must not stop
+    the others or kill the scheduler loop."""
+    for admin_id in sorted(ADMIN_TELEGRAM_IDS):
+        await notify_user(app, admin_id, text)
 
 
 async def run_one_schedule(app, sched, services_by_id):
@@ -18326,6 +19690,235 @@ async def run_delayed_cycle(app):
         await run_one_delayed(app, item, by_id)
 
 
+def _price_watch_changes(snapshot, services):
+    """Services whose catalogue price moved since the snapshot:
+    [{service_id, name, old_price, new_price}] (ETB per 1000).
+    Prices compare rounded to 4 decimals — the server stores
+    DECIMAL(12,4), so anything finer is storage noise, not a
+    change. Blacklisted services (never sold) are skipped, and a
+    service that is new since the snapshot is not a change — it
+    joins the snapshot silently on the next save."""
+    old = {}
+    for sid, price in (snapshot or {}).items():
+        try:
+            old[int(sid)] = round(float(price), 4)
+        except (TypeError, ValueError):
+            continue
+    changes = []
+    for s in services or []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            sid = int(s.get("service") or 0)
+            new_price = round(float(s.get("rate_etb_per_1000") or 0), 4)
+        except (TypeError, ValueError):
+            continue
+        if sid <= 0 or sid in BLACKLISTED_SERVICES:
+            continue
+        if sid not in old:
+            continue
+        if old[sid] == new_price:
+            continue
+        changes.append({
+            "service_id": sid,
+            "name": s.get("name") or f"service {sid}",
+            "old_price": old[sid],
+            "new_price": new_price,
+        })
+    return changes
+
+
+def _price_watch_alert_text(changes) -> str:
+    """One compact admin alert for the changed services: id, name,
+    old -> new provider rate (USD, price/420, 4 decimals), old ->
+    new Paxyo selling price (ETB), and the margin effect (margin
+    per 1000 = price x 220/420; effect = new margin - old
+    margin)."""
+    lines = [f"⚠️ Provider prices changed ({len(changes)} service"
+             f"{'s' if len(changes) != 1 else ''}):"]
+    for c in changes:
+        old_rate = c["old_price"] / 420
+        new_rate = c["new_price"] / 420
+        effect = (c["new_price"] - c["old_price"]) * 220 / 420
+        lines.append(
+            f"#{c['service_id']} "
+            f"{short_service_name(c['name']) or c['name']}: "
+            f"${old_rate:.4f} → ${new_rate:.4f} "
+            f"({format_money(c['old_price'])} → "
+            f"{format_money(c['new_price'])} ETB), "
+            f"margin {effect:+.2f} ETB/1000"
+        )
+    return "\n".join(lines)
+
+
+async def run_price_watch_cycle(app):
+    """One provider price-change watch pass (feature 6, 15 Nov
+    2026): when the catalogue was REALLY refreshed since the last
+    watch run, compare each price against the stored snapshot and
+    alert William once per change. First run with an empty
+    snapshot stores it WITHOUT alerting (bootstrap). The new
+    snapshot is stored right after alerting, so a change alerts
+    exactly once. Never raises — a failed snapshot fetch skips
+    the cycle and retries next time, never alerts on stale data;
+    a 404 switches the watch off with a log warning."""
+    global _PRICE_WATCH_LAST_REFRESH, _PRICE_WATCH_OFF
+    try:
+        if _PRICE_WATCH_OFF:
+            return
+        count = getattr(paxyo, "services_refresh_count", None)
+        if count is None:
+            # The client does not expose a refresh counter — the
+            # watch cannot tell a fresh catalogue from a cached
+            # one, so it stays off rather than guessing.
+            return
+        if count == _PRICE_WATCH_LAST_REFRESH:
+            return
+        try:
+            services = await paxyo.services()
+        except Exception as exc:
+            log.warning("price watch services failed: %s", exc)
+            return
+        get_snapshot = getattr(paxyo, "get_price_snapshot", None)
+        if get_snapshot is None:
+            _PRICE_WATCH_OFF = True
+            log.warning(
+                "price watch off: client has no get_price_snapshot"
+            )
+            return
+        try:
+            snapshot = await get_snapshot()
+        except Exception as exc:
+            # Any failure that is not a 404: skip this cycle and
+            # retry next time — never alert on stale data.
+            log.warning("price watch snapshot fetch failed: %s", exc)
+            return
+        if snapshot is None:
+            # 404: the endpoint is not live yet — the watch stays
+            # off with an honest log warning, never a crash.
+            _PRICE_WATCH_OFF = True
+            log.warning(
+                "price watch off: GET /price-watch/snapshot "
+                "returned 404 (endpoint not live yet)"
+            )
+            return
+        new_map = {}
+        for s in services or []:
+            if not isinstance(s, dict):
+                continue
+            try:
+                sid = int(s.get("service") or 0)
+                price = round(float(s.get("rate_etb_per_1000") or 0), 4)
+            except (TypeError, ValueError):
+                continue
+            if sid > 0:
+                new_map[str(sid)] = price
+        if not snapshot:
+            # Bootstrap: store the first snapshot silently — every
+            # price would otherwise "change" at once.
+            try:
+                await paxyo.save_price_snapshot(new_map)
+            except Exception as exc:
+                log.warning("price watch bootstrap save failed: %s", exc)
+                return
+            _PRICE_WATCH_LAST_REFRESH = count
+            return
+        changes = _price_watch_changes(snapshot, services)
+        if changes:
+            await notify_admins(app, _price_watch_alert_text(changes))
+        try:
+            saved = await paxyo.save_price_snapshot(new_map)
+        except Exception as exc:
+            # The alert already went out; the save failed, so the
+            # next cycle compares against the older snapshot and
+            # may re-alert once — honest, and it degrades instead
+            # of losing the change entirely.
+            log.warning("price watch snapshot save failed: %s", exc)
+            return
+        if saved is None:
+            _PRICE_WATCH_OFF = True
+            log.warning(
+                "price watch off: POST /price-watch/snapshot "
+                "returned 404 (endpoint not live yet)"
+            )
+            return
+        _PRICE_WATCH_LAST_REFRESH = count
+    except Exception as exc:
+        log.warning("price watch cycle failed: %s", exc)
+
+
+async def run_provider_balance_cycle(app, now=None):
+    """One low-provider-balance check (feature 7, 15 Nov 2026):
+    at most one check per hour, from admin_stats()'s
+    provider_balance_usd (the server reads the provider balance;
+    see server/api-admin-stats.php). State machine: at or above
+    the low threshold ($3) is ok; dropping below it alerts ONCE
+    ("low"); while below it there are no repeats; crossing back
+    above it resets to ok; dropping below $1.00 while already low
+    alerts ONCE more ("critically low"). A missing field or a 404
+    means the watch is off — a log warning, never a crash, never
+    an alert. Never raises."""
+    global _PROVIDER_BALANCE_LAST_CHECK, _PROVIDER_BALANCE_STATE
+    try:
+        import time
+
+        if now is None:
+            now = time.monotonic()
+        if now - _PROVIDER_BALANCE_LAST_CHECK < PROVIDER_BALANCE_CHECK_SECONDS:
+            return
+        _PROVIDER_BALANCE_LAST_CHECK = now
+        try:
+            stats = await paxyo.admin_stats()
+        except Exception as exc:
+            log.warning("provider balance check failed: %s", exc)
+            return
+        if not isinstance(stats, dict) or "provider_balance_usd" not in stats:
+            # 404 (admin_stats() returns None) or an endpoint that
+            # does not report the balance yet: the watch is off.
+            log.warning(
+                "provider balance watch off: /admin/stats has no "
+                "provider_balance_usd (endpoint not live yet)"
+            )
+            return
+        try:
+            balance = float(stats.get("provider_balance_usd"))
+        except (TypeError, ValueError):
+            log.warning(
+                "provider balance watch off: provider_balance_usd "
+                "is not a number: %r", stats.get("provider_balance_usd")
+            )
+            return
+        state = _PROVIDER_BALANCE_STATE
+        if balance >= PROVIDER_LOW_BALANCE_USD:
+            _PROVIDER_BALANCE_STATE = "ok"
+            return
+        if balance >= PROVIDER_CRITICAL_BALANCE_USD:
+            if state == "ok":
+                _PROVIDER_BALANCE_STATE = "low"
+                await notify_admins(
+                    app,
+                    PROVIDER_BALANCE_LOW_TEXT.format(
+                        balance=f"{balance:.2f}"
+                    ),
+                )
+            elif state == "critical":
+                # Climbed back out of critical into low: no alert,
+                # but a later drop below $1 alerts again.
+                _PROVIDER_BALANCE_STATE = "low"
+            return
+        # Below $1.00: one critical alert, however we got here —
+        # a jump straight from ok sends only this one, not both.
+        if state != "critical":
+            _PROVIDER_BALANCE_STATE = "critical"
+            await notify_admins(
+                app,
+                PROVIDER_BALANCE_CRITICAL_TEXT.format(
+                    balance=f"{balance:.2f}"
+                ),
+            )
+    except Exception as exc:
+        log.warning("provider balance cycle failed: %s", exc)
+
+
 async def run_scheduler_cycle(app):
     """One pass over due repeating orders and due one-time delayed
     orders. Never raises."""
@@ -18355,6 +19948,13 @@ async def run_scheduler_cycle(app):
     # for orders the bot placed. Same 60-second cadence as the
     # schedules above, same tolerance for the free tier sleeping.
     await run_delivery_watch_cycle(app)
+    # Provider price-change watch (feature 6, 15 Nov 2026): only
+    # compares when the catalogue was really refreshed; the
+    # snapshot endpoint is the dedupe. Low provider balance
+    # (feature 7): throttled to one check per hour inside the
+    # cycle itself. Both never raise and never message a customer.
+    await run_price_watch_cycle(app)
+    await run_provider_balance_cycle(app)
     # Abandoned-order nudge (feature 4, 15 Nov 2026): one Resume
     # nudge per half-built draft after ~30 quiet minutes. Same
     # 60-second cadence as the delivery watch above.
