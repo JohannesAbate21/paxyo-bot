@@ -14439,30 +14439,17 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
 
 
 async def _low_balance_shortfall(user_id: int, service, total: float):
-    """(shortfall, balance) in ETB when this order is for the user's
-    usual service and their Paxyo balance is below the order total,
-    else None. "Usual" is the learned usual (feature 5): an
-    established platform+metric — the same platform+metric placed
-    at least twice, or loaded from the server. A one-off order, a
-    different service, no traits at all, a balance that covers the
-    total, or a balance that cannot be read all return None, so no
-    warning is ever shown for them. The warning never blocks the
-    order — the caller shows it and still shows the Confirm card."""
+    """(shortfall, balance) in ETB when the user's Paxyo balance is
+    below this order's total, else None. ANY order counts, not only
+    the user's usual: the live test on 15 Nov 2026 showed the
+    usual-only gate silently hid the warning whenever the bot's
+    in-memory traits were wiped by a deploy (traits only survive a
+    restart once the server traits endpoint is installed), so a
+    user ordering something new and unaffordable got no warning at
+    all. A balance that covers the total, or a balance that cannot
+    be read, returns None. The warning never blocks the order —
+    the caller shows it and still shows the Confirm card."""
     user_id = int(user_id)
-    if not _usual_is_established(user_id):
-        return None
-    traits = USER_TRAITS.get(user_id) or {}
-    platform, _hint = _platform_hint_of_service(service or {})
-    kind = kind_from_text(
-        f"{(service or {}).get('name') or ''} "
-        f"{(service or {}).get('category') or ''}"
-    )
-    metric = _trait_slug(kind) if kind else None
-    if (
-        traits.get("usual_platform") != platform
-        or traits.get("usual_metric") != metric
-    ):
-        return None
     try:
         bal = await paxyo.balance(user_id)
     except Exception as exc:

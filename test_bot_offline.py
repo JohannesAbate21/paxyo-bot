@@ -2312,7 +2312,7 @@ class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def tearDown(self):
@@ -2336,7 +2336,7 @@ class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     async def test_due_schedule_places_one_order_and_notifies(self):
@@ -10194,7 +10194,7 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
         # leaks into the next test's cycle.
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
         bot.CHAT_HISTORY.clear()
         bot._CHAT_HISTORY_LOADED = False
@@ -10230,7 +10230,7 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
             store.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
         bot.CHAT_HISTORY.clear()
         bot._CHAT_HISTORY_LOADED = False
@@ -19765,7 +19765,7 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def tearDown(self):
@@ -19796,7 +19796,7 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     async def _send(self, text, intent, paxyo=None, user=None):
@@ -20918,7 +20918,7 @@ class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def tearDown(self):
@@ -20949,7 +20949,7 @@ class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     async def _send(self, text, intent, paxyo=None, user=None):
@@ -23946,10 +23946,12 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
 
 
 class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
-    """Low-balance warning (15 Nov 2026, feature 1): ordering the
-    usual service with a balance below the total warns BEFORE the
-    Confirm card, names the exact shortfall, and offers a one-tap
-    deposit of exactly that shortfall. Confirm still works."""
+    """Low-balance warning (15 Nov 2026, feature 1): ordering any
+    service with a balance below the total warns BEFORE the Confirm
+    card, names the exact shortfall, and offers a one-tap deposit
+    of exactly that shortfall. Confirm still works. (Widened from
+    usual-only after the 15 Nov live test: the usual gate hid the
+    warning whenever a deploy wiped the bot's in-memory traits.)"""
 
     def setUp(self):
         bot.PENDING.clear()
@@ -24090,7 +24092,10 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Please confirm", msg.text_sent[0])
         self.assertNotIn("short", msg.text_sent[0])
 
-    async def test_no_warning_when_order_is_not_the_usual(self):
+    async def test_warning_shows_for_non_usual_order_too(self):
+        # Widened 15 Nov 2026: the warning fires for ANY order the
+        # balance cannot cover, not only the user's usual. A user
+        # ordering something new and unaffordable gets warned too.
         paxyo = FakePaxyo(balance=10.0, traits={
             "usual_platform": "tiktok",
             "usual_metric": "views",
@@ -24101,19 +24106,26 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
             "I want 1000 instagram followers https://instagram.com/p/x",
             self._usual_order_intent(), paxyo=paxyo,
         )
-        self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("Please confirm", msg.text_sent[0])
-        self.assertNotIn("short", msg.text_sent[0])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("32.00 ETB short", msg.text_sent[0])
+        self.assertIn("42.00 ETB", msg.text_sent[0])
+        callbacks = [b.callback_data for row in msg.markups[0].inline_keyboard
+                     for b in row]
+        self.assertIn("depshort:32.00", callbacks)
+        self.assertIn("Please confirm", msg.text_sent[1])
 
-    async def test_no_warning_when_user_has_no_traits(self):
+    async def test_warning_shows_when_user_has_no_traits(self):
+        # Widened 15 Nov 2026: no learned traits (e.g. right after
+        # a deploy wiped the in-memory traits) must not hide the
+        # warning — the balance check alone decides.
         paxyo = FakePaxyo(balance=10.0)
         msg = await self._send(
             "I want 1000 instagram followers https://instagram.com/p/x",
             self._usual_order_intent(), paxyo=paxyo,
         )
-        self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("Please confirm", msg.text_sent[0])
-        self.assertNotIn("short", msg.text_sent[0])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("32.00 ETB short", msg.text_sent[0])
+        self.assertIn("Please confirm", msg.text_sent[1])
 
 
 class TestBulkOrders(unittest.IsolatedAsyncioTestCase):
@@ -24796,7 +24808,7 @@ class TestNewApiClients(unittest.IsolatedAsyncioTestCase):
                 await client.services()  # cache hit: no fetch
                 self.assertEqual(client.services_refresh_count, 1)
                 self.assertEqual(send.call_count, 1)
-                client._services_cached_at = 0.0  # expire the cache
+                client._services_cached_at = -1e9  # expire the cache (0.0 fails on a fresh VM: monotonic < 600s)
                 await client.services()
                 self.assertEqual(client.services_refresh_count, 2)
                 self.assertEqual(send.call_count, 2)
@@ -24819,7 +24831,7 @@ class TestPriceWatch(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def tearDown(self):
@@ -24829,7 +24841,7 @@ class TestPriceWatch(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def _services(self, prices=None):
@@ -25007,7 +25019,7 @@ class TestProviderBalance(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def tearDown(self):
@@ -25017,7 +25029,7 @@ class TestProviderBalance(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     async def _check(self, app, fake, now):
@@ -25156,7 +25168,7 @@ class TestBigDeposit(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def tearDown(self):
@@ -25181,7 +25193,7 @@ class TestBigDeposit(unittest.IsolatedAsyncioTestCase):
         bot.FEEDBACK_PENDING.clear()
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
-        bot._PROVIDER_BALANCE_LAST_CHECK = 0.0
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
 
     def _deposit(self, status="completed", amount=1500, dep_id="dep-1",
