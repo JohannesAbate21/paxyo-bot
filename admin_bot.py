@@ -87,10 +87,14 @@ SAFETY (never break):
   * Reply language: English only.
 
 UNDERSTANDING — deterministic parsing FIRST (regex/patterns for the
-stats questions, broadcast commands, ticker changes, refund
-commands and promo-code creation), AI only for
-free-form questions. The AI never triggers a broadcast, a setting
-write, a refund or a promo-code creation: those go through the
+stats questions (incl. net profit), broadcast commands, ticker
+changes, refund commands, promo-code creation, one order's status,
+and plain-language report commands that run the matching /command
+handler), AI only for
+free-form questions. Common admin typos are normalised before
+matching, so "how much profite did we make" still routes. The AI
+never triggers a broadcast, a setting write, a refund or a
+promo-code creation: those go through the
 deterministic Confirm flow only. The AI
 is minimal — DeepSeek if DEEPSEEK_API_KEY is set, else Gemini if
 GEMINI_API_KEY is set (same keys the order bot already uses); with
@@ -745,6 +749,39 @@ CONFIRM_KEYBOARD = InlineKeyboardMarkup([
 _YES_WORDS = {"yes", "confirm", "send it", "do it", "ok", "okay"}
 _NO_WORDS = {"no", "cancel", "don't send", "dont send", "stop"}
 
+# Typo tolerance for the deterministic parsers (07-admin-english,
+# 15 Nov 2026 — same idea as the order bot's TYPO_MAP, but only
+# the admin words). The keys are the typo'd forms William actually
+# types; the values are what the parsers match on. Applied to the
+# lowercased detection copy inside each parser — never to a value
+# the bot shows back (ticker text, broadcast message), which keeps
+# the user's own words.
+_ADMIN_TYPO_MAP = {
+    "profite": "profit", "revenu": "revenue",
+    "deposite": "deposit", "deposites": "deposits",
+    "broadcst": "broadcast", "refuned": "refund",
+    "prom": "promo", "disput": "dispute",
+    "satisfacion": "satisfaction", "wekly": "weekly",
+    "mornig": "morning", "usrs": "users", "ordrs": "orders",
+    "servise": "service", "tickr": "ticker",
+    "winbak": "winback", "loyalti": "loyalty",
+    "fruad": "fraud", "reprot": "report",
+    "balence": "balance", "mesage": "message",
+    "chnage": "change", "mony": "money", "mad": "made",
+    "tody": "today", "ernd": "earned",
+    "custmers": "customers", "nevr": "never",
+}
+
+
+def _normalize_admin_text(s: str) -> str:
+    """Fix the common admin typos in a lowercased string, one
+    whole word at a time. Input is expected lowercased already."""
+    if not s:
+        return s
+    for bad, good in _ADMIN_TYPO_MAP.items():
+        s = re.sub(r"\b" + bad + r"\b", good, s)
+    return s
+
 
 def _is_confirm(text: str) -> bool:
     return (text or "").strip().lower() in _YES_WORDS
@@ -778,12 +815,26 @@ def parse_days(text: str) -> int:
 
 def parse_stats_question(text: str):
     """Deterministic stats-question parser. Returns
-    {"kind": revenue|users|orders|deposits|top_service|summary,
+    {"kind": revenue|profit|users|orders|deposits|top_service|summary,
      "days": N, "yesterday": bool} or None when the message is not
     a stats question. "Yesterday" is recognised but NOT supported
     by the endpoint (windows end today) — the answer says so."""
-    s = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    s = _normalize_admin_text(re.sub(r"\s+", " ", (text or "").lower()).strip())
     if not s:
+        return None
+    # Questions the stats endpoint cannot answer (07-admin-english,
+    # 15 Nov 2026): pending / big / threshold deposits, per-user
+    # deposit counts, and anything about the provider. They fall
+    # through to the AI, which says so honestly, instead of the
+    # bot answering with the wrong figure (e.g. total deposits
+    # for "how many users never deposited").
+    if (
+        "pending" in s
+        or "big deposit" in s
+        or "provider" in s
+        or ("users" in s and "deposit" in s)
+        or re.search(r"over\s+\d+", s)
+    ):
         return None
     yesterday = "yesterday" in s
     days = parse_days(s)
@@ -815,8 +866,22 @@ def parse_stats_question(text: str):
         return {"kind": "users", "days": days, "yesterday": yesterday}
     if "how many orders" in s:
         return {"kind": "orders", "days": days, "yesterday": yesterday}
+    # Net profit (07-admin-english, 15 Nov 2026): "how much profit",
+    # "what is our net profit". Checked BEFORE revenue — "how much
+    # profit did we make" would match revenue's "how much"+"make".
+    # The word-boundary check keeps "profitable" out: "most
+    # profitable services" is a services question, not a profit
+    # figure. The shape guard keeps "top 10 by profit" out too —
+    # that is the profitable-services list, handled by the plain
+    # -language report router.
+    if re.search(r"\bprofit\b", s) and (
+        "how much" in s or "what" in s or "net profit" in s
+        or s.startswith("profit") or "show" in s
+    ):
+        return {"kind": "profit", "days": days, "yesterday": yesterday}
     if (
         ("how much" in s and ("made" in s or "make" in s or "earn" in s))
+        or ("earn" in s and ("we" in s or "did" in s))
         or "revenue" in s
         or "earnings" in s
         or "how much money" in s
@@ -854,11 +919,12 @@ def parse_broadcast_command(text: str):
     s = re.sub(r"\s+", " ", (text or "").strip())
     if not s:
         return None
-    low = s.lower()
-    if "send" not in low and "broadcast" not in low:
+    low = _normalize_admin_text(s.lower())
+    if "send" not in low and "broadcast" not in low \
+            and "message" not in low and "tell" not in low:
         return None
     head, message = _split_broadcast_message(s)
-    head_low = head.lower()
+    head_low = _normalize_admin_text(head.lower())
     segment = None
     service_id = None
     service_name = None
@@ -946,12 +1012,16 @@ def resolve_service_id(name: str, services):
 
 def parse_ticker_change(text: str):
     """Deterministic ticker-change parser. Returns the new ticker
-    text, or None when the message is not a ticker change."""
+    text, or None when the message is not a ticker change. The
+    keyword match is typo-tolerant (chnage, tickr/ticke) and
+    "announcement" means the ticker too (07-admin-english, 15 Nov
+    2026); the VALUE is always taken from the user's own words,
+    never from a normalised copy."""
     s = re.sub(r"\s+", " ", (text or "").strip())
     if not s:
         return None
     m = re.search(
-        r"(?:change|set|update)\s+(?:the\s+)?ticker"
+        r"(?:change|chnage|set|update)\s+(?:the\s+)?(?:tick\w*|announcement)"
         r"(?:\s+(?:display|text))?\s+to\s+(.+)$",
         s,
         re.IGNORECASE,
@@ -970,7 +1040,10 @@ def parse_refund_command(text: str):
     s = re.sub(r"\s+", " ", (text or "").strip())
     if not s:
         return None
-    m = re.search(r"\brefund\s+(?:order\s+)?#?(\d+)\b", s, re.IGNORECASE)
+    m = re.search(
+        r"\brefund\s+(?:order\s+)?#?(\d+)\b",
+        _normalize_admin_text(s.lower()), re.IGNORECASE,
+    )
     if not m:
         return None
     try:
@@ -995,7 +1068,9 @@ def parse_promo_create_command(text: str):
     None when neither was given — the handler then asks for one,
     plainly. The code keeps its raw shape for validate_promo_create,
     which refuses bad ones before any Confirm."""
-    s = re.sub(r"\s+", " ", (text or "").strip())
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip()).lower()
+    )
     if not s:
         return None
     m = re.search(
@@ -1050,11 +1125,15 @@ def parse_promo_create_command(text: str):
 
 
 def parse_promo_list_command(text: str):
-    """"/promo list" / "list promo codes" / "show promo codes" ->
-    True, else None. (25, 15 Nov 2026.)"""
-    s = re.sub(r"\s+", " ", (text or "").strip().lower())
+    """"/promo list" / "list promo codes" / "show promo codes" /
+    "show me the promo codes" / "list all promo codes" ->
+    True, else None. (25, 15 Nov 2026; "me"/"all" added with
+    07-admin-english, 15 Nov 2026.)"""
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip().lower())
+    )
     if re.fullmatch(r"/promo\s+list", s) or re.fullmatch(
-        r"(?:list|show|all)\s+(?:the\s+)?promo\s+codes?", s
+        r"(?:list|show|all)\s+(?:all\s+)?(?:me\s+)?(?:the\s+)?promo\s+codes?", s
     ):
         return True
     return None
@@ -1064,7 +1143,9 @@ def parse_promo_off_command(text: str):
     """"/promo off CODE" / "turn off promo code CODE" / "disable
     promo code CODE" -> {"code": "CODE"}, else None.
     (25, 15 Nov 2026.)"""
-    s = re.sub(r"\s+", " ", (text or "").strip())
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip()).lower()
+    )
     m = re.search(
         r"(?:/promo\s+off|turn\s+off|disable|deactivate)\s+(?:promo\s+code\s+)?([A-Za-z0-9]+)",
         s,
@@ -1077,10 +1158,13 @@ def parse_promo_off_command(text: str):
 
 def parse_dispute_close_command(text: str):
     """"/disputes close 3" / "close dispute #3" / "close dispute 3"
-    -> {"dispute_id": 3}, else None. (15, 15 Nov 2026.)"""
-    s = re.sub(r"\s+", " ", (text or "").strip())
+    / "resolve dispute #3" -> {"dispute_id": 3}, else None.
+    (15, 15 Nov 2026; "resolve" added with 07-admin-english.)"""
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip()).lower()
+    )
     m = re.search(
-        r"close\s+dispute\s+#?(\d+)", s, re.IGNORECASE
+        r"(?:close|resolve)\s+dispute\s+#?(\d+)", s, re.IGNORECASE
     )
     if not m:
         return None
@@ -1088,6 +1172,136 @@ def parse_dispute_close_command(text: str):
         return {"dispute_id": int(m.group(1))}
     except ValueError:
         return None
+
+
+def parse_order_status_command(text: str):
+    """One order's status in plain words (07-admin-english,
+    15 Nov 2026): "what is the status of order #1841",
+    "check order #1841", "order 1841 status", "where is order
+    #1841", "is order #1841 done" -> {"order_id": 1841}. None
+    when there is no order id, or when the message is a refund
+    or a cancel — those are different flows, and a refund must
+    never be read as a status check."""
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip()).lower()
+    )
+    if not s or "refund" in s or "cancel" in s:
+        return None
+    if not (
+        "status" in s or "check" in s or "where is" in s
+        or "done" in s or "finished" in s or "what happened" in s
+    ):
+        return None
+    m = re.search(r"\border\s+#?(\d+)\b", s)
+    if not m:
+        return None
+    try:
+        order_id = int(m.group(1))
+    except ValueError:
+        return None
+    if order_id <= 0:
+        return None
+    return {"order_id": order_id}
+
+
+def parse_admin_report_command(text: str):
+    """Plain-language routes to the existing /command reports
+    (07-admin-english, 15 Nov 2026 — same precedent as the
+    plain-language promo list/off and dispute-close steps in
+    on_text). Returns one of "profitable" | "satisfaction" |
+    "weekly" | "deposits_by_method" | "disputes" | "morning" |
+    "winbacks" | "help", or None. Keyword checks only — the
+    caller runs the matching /command handler, so the behaviour
+    is exactly the command's behaviour."""
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip()).lower()
+    )
+    if not s:
+        return None
+    if (
+        "went quiet" in s
+        or "gone quiet" in s
+        or "quiet users" in s
+        or "win back" in s
+        or "winback" in s
+        or "hasn't ordered" in s
+        or "has not ordered" in s
+        or "stopped ordering" in s
+        or "no orders in" in s
+    ):
+        return "winbacks"
+    if "dispute" in s and (
+        "open" in s or "any" in s or "show" in s or "list" in s
+        or "how many" in s or "are there" in s
+    ):
+        return "disputes"
+    if (
+        "morning report" in s
+        or "morning money" in s
+        or "yesterday's numbers" in s
+        or "yesterday's money" in s
+        or "yesterday's report" in s
+    ):
+        return "morning"
+    if (
+        "weekly report" in s
+        or "weekly growth" in s
+        or "weekly summary" in s
+        or "week's report" in s
+        or "week's numbers" in s
+        or "week report" in s
+        or "vs last week" in s
+        or "this week vs" in s
+    ):
+        return "weekly"
+    if (
+        "satisfaction" in s
+        or "feedback score" in s
+        or "feedback" in s
+        or "rating" in s
+        or "rate us" in s
+        or "reviews" in s
+        or "thumbs" in s
+        or "how satisfied" in s
+        or "what do users think" in s
+        or "what do users say" in s
+        or "happy" in s
+    ):
+        return "satisfaction"
+    if (
+        "most profitable" in s
+        or "profitable services" in s
+        or "top 10 by profit" in s
+        or "make the most" in s
+        or "earn the most" in s
+        or "best earning" in s
+    ):
+        return "profitable"
+    if (
+        "deposits by method" in s
+        or "deposits by payment method" in s
+        or "deposit breakdown" in s
+        or "which payment method" in s
+        or "payment method brings" in s
+        or "came in by" in s
+        or "came by" in s
+        or "by telebirr" in s
+        or "by cbe" in s
+        or "by m-pesa" in s
+        or "by mpesa" in s
+    ):
+        return "deposits_by_method"
+    if (
+        s.strip() in ("help", "help please")
+        or "what can you do" in s
+        or "what can this bot do" in s
+        or "what you can do" in s
+        or "your commands" in s
+        or "show commands" in s
+        or "list your commands" in s
+    ):
+        return "help"
+    return None
 
 
 def validate_promo_create(parsed: dict):
@@ -1274,7 +1488,21 @@ ADMIN_AI_SYSTEM = (
     "names, buying costs, secrets, or the words 'SMM panel'. Never "
     "claim you sent a message, changed a setting, refunded an order "
     "or created a promo code — sending, changing, refunding and "
-    "creating only happen after the owner taps Confirm."
+    "creating only happen after the owner taps Confirm. "
+    "Examples of what you can do in chat: \"How much did we make "
+    "today?\" (live stats), \"Show me the most profitable services\", "
+    "\"Who went quiet?\", \"Morning report\", \"Refund order #1841\" "
+    "(preview, then Confirm). "
+    "Things you cannot do in chat: list orders or users, look up "
+    "one user's balance, list resellers, list loyalty bonuses, list "
+    "fraud flags, or list confused chats — those live in the admin "
+    "panel; say so honestly and never invent a figure. You can look "
+    "up ONE order by its number. You cannot cancel an order from "
+    "chat — offer the refund flow instead. Only the ticker can be "
+    "changed in chat; the price multiplier is changed in Settings "
+    "on the admin panel. You never quote service prices in chat. "
+    "To count users who never deposited, offer a broadcast — the "
+    "broadcast preview shows the count."
 )
 
 
@@ -1372,6 +1600,16 @@ def answer_stats(stats, question: dict) -> str:
     new_users = int(stats.get("new_users") or 0)
     if kind == "revenue":
         return f"{label}: revenue {format_money(revenue)} ETB."
+    if kind == "profit":
+        if "net_profit_etb" not in stats:
+            return (
+                "The net profit figure is not available yet — the "
+                "stats endpoint does not report it."
+            )
+        return (
+            f"{label}: net profit "
+            f"{format_money(stats.get('net_profit_etb') or 0)} ETB."
+        )
     if kind == "users":
         return f"{label}: {new_users} new users."
     if kind == "orders":
@@ -1397,6 +1635,12 @@ def answer_stats(stats, question: dict) -> str:
     lines = [
         f"{label}:",
         f"Revenue: {format_money(revenue)} ETB",
+    ]
+    if "net_profit_etb" in stats:
+        lines.append(
+            f"Net profit: {format_money(stats.get('net_profit_etb') or 0)} ETB"
+        )
+    lines += [
         f"Orders: {orders} ({completed} completed)",
         f"New users: {new_users}",
     ]
@@ -1789,6 +2033,23 @@ def _refund_preview(order: dict, order_id: int) -> str:
         "Tap Confirm to refund it, or Cancel.",
     ]
     return "\n".join(lines)
+
+
+def _order_status_text(order: dict, order_id: int) -> str:
+    """One order's status, read-only (07-admin-english, 15 Nov
+    2026): id, service, quantity, total, status. No preview, no
+    Confirm — nothing changes here."""
+    total = _order_total(order)
+    quantity = order.get("quantity")
+    return "\n".join([
+        f"Order #{order_id}:",
+        f"Service: {_order_service_label(order)}"
+        + (f" ×{quantity}" if quantity is not None else ""),
+        f"Total: {format_money(total)} ETB"
+        if total is not None
+        else "Total: ?",
+        f"Status: {order.get('status') or '?'}",
+    ])
 
 
 def _promo_preview(pending: dict) -> str:
@@ -2245,7 +2506,7 @@ CAPABILITIES = (
     "• Disputes — /disputes (open problems from users; close one "
     "with \"close dispute #<id>\", you confirm first)\n"
     "• Most profitable services — /profitable (top 10 by profit)\n"
-    "• Deposits by method — /deposits-by-method (Telebirr, CBE, "
+    "• Deposits by method — /deposits_by_method (Telebirr, CBE, "
     "M-Pesa, CBE Birr; last 7 days + all time)\n"
     "• Satisfaction — /satisfaction (the 👍/👎 feedback score; "
     "also in the morning report)\n"
@@ -2379,7 +2640,7 @@ async def profitable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def deposits_by_method_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ /deposits-by-method — completed deposits broken down by
+    """ /deposits_by_method — completed deposits broken down by
     method (18, 15 Nov 2026), last 7 days + all time."""
     user = update.effective_user
     if not is_admin_user(user.id):
@@ -2521,7 +2782,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "at 8am. /weekly shows this week vs last week — it is also "
         "sent automatically once a week, Monday 8am. /disputes "
         "lists open problems from users. /profitable, "
-        "/deposits-by-method and /satisfaction show the most "
+        "/deposits_by_method and /satisfaction show the most "
         "profitable services, deposits by payment method, and the "
         "feedback score."
     )
@@ -2797,6 +3058,54 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 5c. One order's status in plain language (07-admin-english,
+    # 15 Nov 2026) — "what is the status of order #1841". Read-only
+    # lookup, no preview, no Confirm. After the refund step on
+    # purpose: "refund order #1841" must never be read as a status
+    # check (the parser refuses refund/cancel wordings).
+    order_status = parse_order_status_command(text)
+    if order_status is not None:
+        order_id = order_status["order_id"]
+        try:
+            order = await admin_api.get_order(order_id)
+        except Exception as exc:
+            log.warning("get_order failed: %s", exc)
+            await update.message.reply_text(
+                f"Could not look up order #{order_id} — please try again."
+            )
+            return
+        if order is None:
+            await update.message.reply_text(
+                "The order lookup is not connected yet — "
+                f"I couldn't look up order #{order_id}."
+            )
+            return
+        await update.message.reply_text(
+            _order_status_text(order, order_id)
+        )
+        return
+
+    # 5d. Plain-language report commands (07-admin-english,
+    # 15 Nov 2026) — "show me the most profitable services",
+    # "who went quiet", "morning report". Each runs the matching
+    # /command handler with the same update, so the behaviour is
+    # exactly the command's behaviour (same fetch, same honest
+    # "not connected yet" when the endpoint is not live).
+    report = parse_admin_report_command(text)
+    if report is not None:
+        handler = {
+            "profitable": profitable_cmd,
+            "satisfaction": satisfaction_cmd,
+            "weekly": weekly_cmd,
+            "deposits_by_method": deposits_by_method_cmd,
+            "disputes": disputes_cmd,
+            "morning": morning_cmd,
+            "winbacks": winbacks_cmd,
+            "help": help_cmd,
+        }[report]
+        await handler(update, context)
+        return
+
     # 6. Free-form — AI when a key is configured, else the short reply.
     #    The AI can never trigger a broadcast, a setting write, a
     #    refund or a promo-code creation.
@@ -2872,7 +3181,7 @@ def build_application():
     app.add_handler(CommandHandler("morning", morning_cmd))
     app.add_handler(CommandHandler("disputes", disputes_cmd))
     app.add_handler(CommandHandler("profitable", profitable_cmd))
-    app.add_handler(CommandHandler("deposits-by-method", deposits_by_method_cmd))
+    app.add_handler(CommandHandler("deposits_by_method", deposits_by_method_cmd))
     app.add_handler(CommandHandler("satisfaction", satisfaction_cmd))
     app.add_handler(CommandHandler("weekly", weekly_cmd))
     app.add_handler(CommandHandler("promo", promo_cmd))
