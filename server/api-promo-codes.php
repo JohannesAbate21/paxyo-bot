@@ -6,31 +6,41 @@
 //
 // WHAT IT ADDS (all behind the existing X-Bot-Secret check in bot.php):
 //   POST /api/bot/promo-codes/validate  {telegram_id, code}
-//     -> {"ok":true,"percent":20,"message":"...","already_used":false}
+//     -> {"ok":true,"percent":20,"fixed_etb":null,"message":"...",
+//         "already_used":false}
 //        Checks the code exists, is active, is not expired, is not
 //        over max_uses, and has NOT already been redeemed by this
 //        telegram_id. A redeemed code is NOT an error to the user —
 //        it is "already used": ok:false, already_used:true, with a
 //        plain message the bot can show. All business failures
 //        return HTTP 200 with ok:false (only missing fields are
-//        400), so the bot can display the message directly.
+//        400), so the bot can display the message directly. A code
+//        is either a PERCENT code (percent 1..100, fixed_etb null)
+//        or a FIXED code (fixed_etb >= 1, percent null) — never
+//        both. The validate reply carries both fields so the bot
+//        can show the right bonus ("20% bonus" vs "100.00 ETB
+//        bonus").
 //   POST /api/bot/promo-codes/redeem  {telegram_id, code, deposit_id}
-//     -> {"ok":true,"bonus_etb":20.00,"percent":20,"code":"...",
-//         "deposit_id":N,"duplicate":false}
-//        Credits bonus = deposit amount x percent to the user's
-//        Paxyo balance, ONCE, in a transaction. Idempotent by
+//     -> {"ok":true,"bonus_etb":20.00,"percent":20,"fixed_etb":null,
+//         "code":"...","deposit_id":N,"duplicate":false}
+//        Credits the bonus to the user's Paxyo balance, ONCE, in a
+//        transaction. Percent code: bonus = deposit amount x
+//        percent. Fixed code: bonus = fixed_etb, CAPPED at the
+//        deposit amount (see the money rule below). Idempotent by
 //        deposit_id: a repeat call returns the recorded bonus with
 //        duplicate:true and NEVER credits a second time. The deposit
 //        must be status 'completed' and belong to telegram_id — a
 //        pending or failed deposit pays nothing.
-//   POST /api/bot/promo-codes  {code, percent, active?, expires_at?,
-//                               max_uses?}
-//     -> {"ok":true,"code":"...","percent":20,"active":true,
-//         "expires_at":null,"max_uses":null}
-//        Creates a code. Gated by X-Bot-Secret and intended to be
-//        called by the ADMIN BOT (or the admin panel server-side)
-//        AFTER William confirms the code in chat — the same gate
-//        the admin settings endpoint (api-admin-settings.php) uses.
+//   POST /api/bot/promo-codes  {code, percent?, fixed_etb?,
+//                               active?, expires_at?, max_uses?}
+//     -> {"ok":true,"code":"...","percent":20,"fixed_etb":null,
+//         "active":true,"expires_at":null,"max_uses":null}
+//        Creates a code. percent XOR fixed_etb — exactly one must
+//        be given (both -> 400, neither -> 400). Gated by
+//        X-Bot-Secret and intended to be called by the ADMIN BOT
+//        (or the admin panel server-side) AFTER William confirms
+//        the code in chat — the same gate the admin settings
+//        endpoint (api-admin-settings.php) uses.
 //        See "CODE CREATION — GATE DECISION" below.
 //   prc_maybe_redeem($db, $telegram_id, $code, $deposit_id, $amount)
 //     -> NOT an endpoint. Called from bot_dep_status() (see
@@ -47,6 +57,16 @@
 //   per the Paxyo Terms. A code deactivated or expired between the
 //   deposit and the payment pays NOTHING — the hook re-validates
 //   at credit time, it does not trust the earlier validate call.
+//   FIXED BONUS CAP (round 3, 15 Nov 2026 — OPEN QUESTION for
+//   William): a fixed-ETB bonus is CAPPED at the deposit amount —
+//   a "100 ETB bonus" code on a 10 ETB deposit pays 10.00 ETB,
+//   never 100. That is the conservative default: it keeps the
+//   "never creates money from nothing" rule true for fixed codes
+//   too (a 100 ETB bonus on a 10 ETB deposit would be 90 ETB out
+//   of nothing). If William wants fixed bonuses paid in full
+//   regardless of the deposit size, remove the min() in
+//   prc_maybe_redeem() step 4 — one line. Until he says so, the
+//   cap stays.
 //
 // CODE CREATION — GATE DECISION (investigated, api-admin-stats.php
 // / api-admin-settings.php):
@@ -69,7 +89,10 @@
 //
 // TABLES (created automatically on first call, utf8mb4):
 //   bot_promo_codes       code VARCHAR(32) PRIMARY KEY, percent INT
-//                         (1..100), active TINYINT DEFAULT 1,
+//                         NULL (1..100, null for a fixed code),
+//                         fixed_etb DECIMAL(10,2) NULL (null for a
+//                         percent code; added round 3, 15 Nov 2026),
+//                         active TINYINT DEFAULT 1,
 //                         expires_at DATETIME NULL,
 //                         max_uses INT NULL (NULL = unlimited),
 //                         created_at.
@@ -203,6 +226,11 @@
 //       — William should only create one deliberately. There is no
 //       separate "max bonus" cap in this file; if he wants one, add
 //       a max_bonus_etb column and clamp in prc_maybe_redeem().
+//       FIXED codes (round 3, 15 Nov 2026): fixed_etb is a decimal
+//       >= 1 ETB, stored in bot_promo_codes.fixed_etb. A code is
+//       either percent or fixed — never both, never neither. The
+//       fixed bonus is capped at the deposit amount (see the money
+//       rule above) — that cap is an OPEN QUESTION for William.
 // ============================================================================
 
 // --- small helpers (prc_ prefix so nothing collides with bot.php) ----------
@@ -233,12 +261,40 @@ function prc_ensure_tables($db) {
     if (method_exists($db, 'set_charset')) $db->set_charset('utf8mb4');
     $db->query("CREATE TABLE IF NOT EXISTS bot_promo_codes (
         code VARCHAR(32) NOT NULL PRIMARY KEY,
-        percent INT NOT NULL,
+        percent INT NULL,
+        fixed_etb DECIMAL(10,2) NULL,
         active TINYINT(1) NOT NULL DEFAULT 1,
         expires_at DATETIME NULL,
         max_uses INT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    // Round 3 (15 Nov 2026): fixed-ETB codes. A table created by an
+    // older version of this file has no fixed_etb column — add it.
+    // (The ALTER is conditional, so it is safe to run on every call.)
+    $has_fixed = false;
+    try {
+        $stmt = $db->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1');
+        $t = 'bot_promo_codes';
+        $c = 'fixed_etb';
+        $stmt->bind_param('ss', $t, $c);
+        $stmt->execute();
+        $has_fixed = $stmt->get_result()->fetch_assoc() !== null;
+        $stmt->close();
+    } catch (mysqli_sql_exception $e) { /* fall through */ }
+    if (!$has_fixed) {
+        $db->query('ALTER TABLE bot_promo_codes ADD COLUMN fixed_etb DECIMAL(10,2) NULL AFTER percent');
+    }
+    // Older tables also had percent NOT NULL — a fixed code stores
+    // percent NULL, so relax that too when the column forbids it.
+    try {
+        $stmt = $db->prepare("SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bot_promo_codes' AND COLUMN_NAME = 'percent' LIMIT 1");
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($row && strtoupper((string)$row['IS_NULLABLE']) === 'NO') {
+            $db->query('ALTER TABLE bot_promo_codes MODIFY COLUMN percent INT NULL');
+        }
+    } catch (mysqli_sql_exception $e) { /* fall through */ }
     $db->query("CREATE TABLE IF NOT EXISTS bot_promo_redemptions (
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         telegram_id BIGINT NOT NULL,
@@ -262,12 +318,24 @@ function prc_code_ok($code) {
 }
 
 function prc_load_code($db, $code) {
-    $stmt = $db->prepare('SELECT code, percent, active, expires_at, max_uses, created_at FROM bot_promo_codes WHERE code = ? LIMIT 1');
+    $stmt = $db->prepare('SELECT code, percent, fixed_etb, active, expires_at, max_uses, created_at FROM bot_promo_codes WHERE code = ? LIMIT 1');
     $stmt->bind_param('s', $code);
     $stmt->execute();
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     return $row ?: null;
+}
+
+// The bonus a code carries, for display: "20%" for a percent code,
+// "100.00 ETB" for a fixed code. Returns [percent|null,
+// fixed_etb|null, label].
+function prc_bonus_display($row) {
+    $percent = $row['percent'] !== null ? (int)$row['percent'] : null;
+    $fixed = isset($row['fixed_etb']) && $row['fixed_etb'] !== null ? (float)$row['fixed_etb'] : null;
+    if ($fixed !== null) {
+        return [$percent, $fixed, number_format($fixed, 2) . ' ETB'];
+    }
+    return [$percent, $fixed, ($percent !== null ? $percent . '%' : 'no bonus')];
 }
 
 function prc_redemption_by_deposit($db, $deposit_id) {
@@ -339,13 +407,15 @@ function bot_prc_validate() {
     $already_used = false;
     list($row, $msg) = prc_check_usable($db, $telegram_id, $code, $already_used);
     if ($msg !== null) {
-        bot_ok(['ok' => false, 'percent' => null, 'message' => $msg, 'already_used' => $already_used]);
+        bot_ok(['ok' => false, 'percent' => null, 'fixed_etb' => null, 'message' => $msg, 'already_used' => $already_used]);
         return;
     }
+    list($percent, $fixed, $label) = prc_bonus_display($row);
     bot_ok([
         'ok' => true,
-        'percent' => (int)$row['percent'],
-        'message' => 'Promo code valid: ' . (int)$row['percent'] . '% bonus on your deposit.',
+        'percent' => $percent,
+        'fixed_etb' => $fixed,
+        'message' => 'Promo code valid: ' . $label . ' bonus on your deposit.',
         'already_used' => false,
     ]);
 }
@@ -383,7 +453,7 @@ function prc_maybe_redeem($db, $telegram_id, $code, $deposit_id, $amount) {
 
         // 2. Lock the code row so two concurrent redeems of a
         //    limited code cannot both pass the max_uses check.
-        $stmt = $db->prepare('SELECT code, percent, active, expires_at, max_uses FROM bot_promo_codes WHERE code = ? FOR UPDATE');
+        $stmt = $db->prepare('SELECT code, percent, fixed_etb, active, expires_at, max_uses FROM bot_promo_codes WHERE code = ? FOR UPDATE');
         $stmt->bind_param('s', $code);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
@@ -406,8 +476,17 @@ function prc_maybe_redeem($db, $telegram_id, $code, $deposit_id, $amount) {
             return ['paid' => false, 'bonus' => 0.0, 'duplicate' => false, 'reason' => 'user already redeemed this code'];
         }
 
-        // 4. The bonus: deposit amount x percent, rounded to 2dp.
-        $bonus = round($amount * ((int)$row['percent'] / 100), 2);
+        // 4. The bonus. Percent code: deposit amount x percent.
+        //    Fixed code: the fixed amount, CAPPED at the deposit
+        //    amount — a "100 ETB bonus" on a 10 ETB deposit pays
+        //    10.00 ETB, never 100 (see the money rule in the
+        //    header — the cap is an OPEN QUESTION for William).
+        $fixed = isset($row['fixed_etb']) && $row['fixed_etb'] !== null ? (float)$row['fixed_etb'] : null;
+        if ($fixed !== null) {
+            $bonus = round(min($fixed, $amount), 2);
+        } else {
+            $bonus = round($amount * ((int)$row['percent'] / 100), 2);
+        }
         if ($bonus <= 0) {
             return ['paid' => false, 'bonus' => 0.0, 'duplicate' => false, 'reason' => 'bonus rounds to zero'];
         }
@@ -508,10 +587,12 @@ function bot_prc_redeem() {
     $db->commit();
 
     $row = prc_load_code($db, $code);
+    list($percent, $fixed, $label) = $row ? prc_bonus_display($row) : [null, null, ''];
     bot_ok([
         'ok' => true,
         'bonus_etb' => round($res['bonus'], 2),
-        'percent' => $row ? (int)$row['percent'] : null,
+        'percent' => $percent,
+        'fixed_etb' => $fixed,
         'code' => $code,
         'deposit_id' => $deposit_id,
         'duplicate' => $res['duplicate'],
@@ -520,24 +601,48 @@ function bot_prc_redeem() {
 
 // --- POST /api/bot/promo-codes (create) -------------------------------------
 // Body: {"code":"WELCOME10","percent":10,"active":true,
-//        "expires_at":"2026-12-31 23:59:59"|null,"max_uses":100|null}.
-// Called by the ADMIN BOT after William confirms the code in chat
-// (see "CODE CREATION — GATE DECISION" in the header). Duplicate
-// code -> 409, nothing changed. To deactivate a code later, run:
+//        "expires_at":"2026-12-31 23:59:59"|null,"max_uses":100|null}
+//   or: {"code":"GIFT100","fixed_etb":100,"active":true,
+//        "expires_at":null,"max_uses":null}.
+// percent XOR fixed_etb — exactly one must be given (both -> 400,
+// neither -> 400). A percent code pays deposit x percent; a fixed
+// code pays fixed_etb, capped at the deposit amount (see the money
+// rule in the header). Called by the ADMIN BOT after William
+// confirms the code in chat (see "CODE CREATION — GATE DECISION"
+// in the header). Duplicate code -> 409, nothing changed. To
+// deactivate a code later, use POST /promo-codes/{code}/off
+// (api-promo-admin.php) or run:
 //   UPDATE bot_promo_codes SET active = 0 WHERE code = '...';
-// (No deactivate endpoint — deactivation is an admin-panel action,
-// not a chat action.)
 
 function bot_prc_create() {
     $in = prc_json_body();
     $code = prc_norm_code($in['code'] ?? '');
     if ($code === '' || !prc_code_ok($code)) prc_fail(400, 'code must be 3-32 letters, digits, _ or -.');
-    $percent = $in['percent'] ?? null;
-    if (!is_int($percent) && !(is_string($percent) && preg_match('/^\d+$/', $percent))) {
-        prc_fail(400, 'percent must be an integer between 1 and 100.');
+    // Percent XOR fixed: exactly one bonus must be given.
+    $has_percent = isset($in['percent']) && $in['percent'] !== null && trim((string)$in['percent']) !== '';
+    $has_fixed = isset($in['fixed_etb']) && $in['fixed_etb'] !== null && trim((string)$in['fixed_etb']) !== '';
+    if ($has_percent && $has_fixed) {
+        prc_fail(400, 'Give either a percent or a fixed amount, not both.');
     }
-    $percent = (int)$percent;
-    if ($percent < 1 || $percent > 100) prc_fail(400, 'percent must be an integer between 1 and 100.');
+    if (!$has_percent && !$has_fixed) {
+        prc_fail(400, 'Give a percent (1-100) or a fixed amount in ETB.');
+    }
+    $percent = null;
+    if ($has_percent) {
+        if (!is_int($in['percent']) && !(is_string($in['percent']) && preg_match('/^\d+$/', (string)$in['percent']))) {
+            prc_fail(400, 'percent must be an integer between 1 and 100.');
+        }
+        $percent = (int)$in['percent'];
+        if ($percent < 1 || $percent > 100) prc_fail(400, 'percent must be an integer between 1 and 100.');
+    }
+    $fixed = null;
+    if ($has_fixed) {
+        if (!is_numeric($in['fixed_etb'])) {
+            prc_fail(400, 'fixed_etb must be a number of at least 1 ETB.');
+        }
+        $fixed = round((float)$in['fixed_etb'], 2);
+        if ($fixed < 1) prc_fail(400, 'fixed_etb must be at least 1 ETB.');
+    }
     $active = isset($in['active']) ? ((int)(bool)$in['active']) : 1;
     $expires_at = null;
     if (isset($in['expires_at']) && $in['expires_at'] !== null && trim((string)$in['expires_at']) !== '') {
@@ -558,10 +663,11 @@ function bot_prc_create() {
     if ($db === null) prc_fail(500, 'Database is not available.');
     prc_ensure_tables($db);
 
-    $stmt = $db->prepare('INSERT INTO bot_promo_codes (code, percent, active, expires_at, max_uses) VALUES (?, ?, ?, ?, ?)');
-    // bind_param needs variables, and a NULL max_uses binds as NULL
-    // with the 'i' type when the variable holds null.
-    $stmt->bind_param('siisi', $code, $percent, $active, $expires_at, $max_uses);
+    $stmt = $db->prepare('INSERT INTO bot_promo_codes (code, percent, fixed_etb, active, expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?)');
+    // bind_param needs variables, and NULL percent / fixed_etb /
+    // max_uses bind as NULL with the 'i'/'d' types when the variable
+    // holds null.
+    $stmt->bind_param('sidisi', $code, $percent, $fixed, $active, $expires_at, $max_uses);
     $inserted = false;
     $duplicate = false;
     try {
@@ -579,6 +685,7 @@ function bot_prc_create() {
         'ok' => true,
         'code' => $code,
         'percent' => $percent,
+        'fixed_etb' => $fixed,
         'active' => ($active === 1),
         'expires_at' => $expires_at,
         'max_uses' => $max_uses,
@@ -669,7 +776,41 @@ function bot_prc_create() {
 //     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
 //     -d '{"code":"BADPCT","percent":0}'
 //   -> expect {"success":false,"error":"percent must be an integer between 1 and 100."}
-//   # 10. hook check (only after the hook patch is installed): make a
+//   # 10. FIXED code (round 3): create a 100 ETB code:
+//   curl -s -X POST https://paxyo.et/api/bot/promo-codes \
+//     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
+//     -d '{"code":"FIXED100","fixed_etb":100}'
+//   -> expect {"success":true,"ok":true,"code":"FIXED100","percent":null,
+//      "fixed_etb":100,"active":true,"expires_at":null,"max_uses":null}
+//   # 11. validate the fixed code -> ok:true, fixed_etb shown:
+//   curl -s -X POST https://paxyo.et/api/bot/promo-codes/validate \
+//     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
+//     -d '{"telegram_id":779060335,"code":"FIXED100"}'
+//   -> expect {"success":true,"ok":true,"percent":null,"fixed_etb":100,
+//      "message":"Promo code valid: 100.00 ETB bonus on your deposit.","already_used":false}
+//   # 12. create with BOTH percent and fixed_etb -> 400:
+//   curl -s -X POST https://paxyo.et/api/bot/promo-codes \
+//     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
+//     -d '{"code":"BOTH99","percent":10,"fixed_etb":100}'
+//   -> expect {"success":false,"error":"Give either a percent or a fixed amount, not both."}
+//   # 13. create with NEITHER -> 400:
+//   curl -s -X POST https://paxyo.et/api/bot/promo-codes \
+//     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
+//     -d '{"code":"NONE99"}'
+//   -> expect {"success":false,"error":"Give a percent (1-100) or a fixed amount in ETB."}
+//   # 14. redeem the fixed code on a REAL completed test deposit id
+//   #    F (amount A): the bonus must be min(100, A) — on a 10 ETB
+//   #    deposit it pays 10.00, NOT 100 (the cap — see the money
+//   #    rule). The once-per-user rule is per (user, code), so the
+//   #    same test user CAN redeem FIXED100 even after redeeming
+//   #    TEST10 in step 5 — but F must be a DIFFERENT deposit than
+//   #    D (one bonus per deposit):
+//   curl -s -X POST https://paxyo.et/api/bot/promo-codes/redeem \
+//     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
+//     -d '{"telegram_id":779060335,"code":"FIXED100","deposit_id":F}'
+//   -> expect {"success":true,"ok":true,"bonus_etb":<min(100, A)>,
+//      "percent":null,"fixed_etb":100,"code":"FIXED100","deposit_id":F,"duplicate":false}
+//   # 15. hook check (only after the hook patch is installed): make a
 //   #    NEW small test deposit carrying the code (bot sends
 //   #    promo_code with the deposit create — see "PROMO-CODE
 //   #    CARRY"), complete it, then check:
@@ -681,7 +822,7 @@ function bot_prc_create() {
 //   #       redeemed TEST10 once and the once-per-user rule will
 //   #       correctly refuse a second bonus.)
 //   Then DELETE the test rows and confirm they are gone:
-//   mysql -e "DELETE FROM bot_promo_redemptions WHERE code='TEST10'; DELETE FROM bot_promo_codes WHERE code='TEST10'; SELECT COUNT(*) FROM bot_promo_codes WHERE code='TEST10'; SELECT COUNT(*) FROM bot_promo_redemptions WHERE code='TEST10';"
+//   mysql -e "DELETE FROM bot_promo_redemptions WHERE code IN ('TEST10','FIXED100'); DELETE FROM bot_promo_codes WHERE code IN ('TEST10','FIXED100'); SELECT COUNT(*) FROM bot_promo_codes WHERE code IN ('TEST10','FIXED100'); SELECT COUNT(*) FROM bot_promo_redemptions WHERE code IN ('TEST10','FIXED100');"
 //   (use the same MySQL credentials db.php uses; never print them.)
 //   NOTE: the bonus credited in step 5 stays in the test account's
 //   balance (it is real Paxyo balance, like a refund). Note the

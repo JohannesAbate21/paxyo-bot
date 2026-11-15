@@ -51,7 +51,7 @@
 //   bot_user_traits  telegram_id BIGINT PK, traits TEXT (JSON object,
 //                    '{}' when nothing learned yet), updated_at
 //
-// THE TRAIT SET — deliberately SMALL (5 fields). The server stores
+// THE TRAIT SET — deliberately SMALL (6 fields). The server stores
 // ONLY what the bot sends; it NEVER invents a trait, never infers
 // one from an order, and never fills in a default. A field is null
 // until the bot has actually learned it from the user's own
@@ -71,6 +71,17 @@
 //                    stores the plain number, not a band label.
 //   usual_service_id INT, > 0 — the catalogue service this user
 //                    usually orders (drives "same as usual").
+//   last_deposit_method (round 3, 15 Nov 2026) — the method of the
+//                    user's last SUCCESSFUL deposit: 'telebirr' |
+//                    'cbe' | 'cbebirr' | 'mpesa'. Written by the bot
+//                    when a deposit completes (feature 23, "remember
+//                    deposit method"); read back to offer it first
+//                    ("Telebirr again?"). It is a FACT about the
+//                    user's last deposit, not a preference — the bot
+//                    never writes it from a guess, only from a
+//                    completed deposit's own method. A user who
+//                    picks "use a different method" does not clear
+//                    it (the next completed deposit overwrites it).
 //
 // LANGUAGE — REUSED, NOT DUPLICATED: the bot already stores the
 // user's language in bot_sessions.lang, and that stays the single
@@ -226,6 +237,21 @@ function trt_validate_traits($in) {
             return [null, 'usual_service_id must be an integer, or null.'];
         }
     }
+    // last_deposit_method (round 3, 15 Nov 2026, feature 23): the
+    // method of the user's last successful deposit. Only the four
+    // methods the deposit flow knows are accepted — a junk value
+    // fails the whole save, like every other known field. The bot
+    // writes this only from a completed deposit's own method, never
+    // from a guess. Null clears it.
+    if (isset($in['last_deposit_method'])) {
+        if ($in['last_deposit_method'] === null) {
+            $cleaned['last_deposit_method'] = null;
+        } elseif (is_string($in['last_deposit_method']) && in_array($in['last_deposit_method'], ['telebirr', 'cbe', 'cbebirr', 'mpesa'], true)) {
+            $cleaned['last_deposit_method'] = $in['last_deposit_method'];
+        } else {
+            return [null, 'last_deposit_method must be "telebirr", "cbe", "cbebirr" or "mpesa", or null.'];
+        }
+    }
     return [$cleaned, null];
 }
 
@@ -376,6 +402,17 @@ function bot_trt_clear() {
 //     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
 //     -d '{"telegram_id":779060335,"traits":{"tone":"sarcastic"}}'
 //   -> expect {"success":false,"error":"tone must be \"brief\", \"chatty\", \"formal\" or null.",...}
+//   # 6b. last_deposit_method (round 3, feature 23): save it, and
+//   #    prove the other traits SURVIVE the merge:
+//   curl -s -X POST https://paxyo.et/api/bot/user-traits \
+//     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
+//     -d '{"telegram_id":779060335,"traits":{"last_deposit_method":"telebirr"}}'
+//   -> expect {"success":true,"ok":true,"traits":{"usual_platform":"tiktok","usual_quantity":1000,"last_deposit_method":"telebirr"},"updated_at":"..."}
+//   # 6c. an unknown method value -> 400, nothing stored/changed:
+//   curl -s -X POST https://paxyo.et/api/bot/user-traits \
+//     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
+//     -d '{"telegram_id":779060335,"traits":{"last_deposit_method":"paypal"}}'
+//   -> expect {"success":false,"error":"last_deposit_method must be \"telebirr\", \"cbe\", \"cbebirr\" or \"mpesa\", or null.",...}
 //   # 7. unknown field -> dropped, save still succeeds:
 //   curl -s -X POST https://paxyo.et/api/bot/user-traits \
 //     -H "X-Bot-Secret: $SECRET" -H 'Content-Type: application/json' \
