@@ -76,6 +76,14 @@
 //   - Add the same bot_rate_limit(...) call the other user endpoints
 //     use to the dispatch line (copy the exact call from the orders
 //     handler — the signature was not visible from outside the server).
+//   - SMM BRANCH (15 Nov 2026, api-order-smm.php): after the order
+//     row is loaded, an order with a bot_smm_orders row is cancelled
+//     at SMM via smm_cancel() (which re-checks via smm_order_status())
+//     instead of GodOfPanel. The branch is guarded by
+//     function_exists('smm_is_smm_order'): when api-order-smm.php is
+//     not installed yet, an SMM order falls through to the GodOfPanel
+//     path and fails honestly with the provider's error. GodOfPanel
+//     behaviour is unchanged.
 //
 // ASSUMPTIONS — TO VERIFY ON THE SERVER DURING INSTALL (same as the
 //   rescue file — see its A1–A9; the ones that matter here):
@@ -370,6 +378,16 @@ function can_provider_cancel($provider_order_id) {
     return ['confirmed' => false, 'provider_status' => null, 'not_cancellable' => false, 'error' => 'Provider reply was not understood. No refund was made.'];
 }
 
+// SMM branch (api-order-smm.php): cancel an SMM order at SMM,
+// with the same return shape as can_provider_cancel(). When the
+// SMM file is not installed yet, smm_cancel() does not exist and
+// the call falls back to the GodOfPanel path, which fails honestly
+// with the provider's error — never silently.
+function can_provider_cancel_smm($provider_order_id) {
+    if (!function_exists('smm_cancel')) return can_provider_cancel($provider_order_id);
+    return smm_cancel($provider_order_id);
+}
+
 // --- POST /api/bot/orders/{id}/cancel --------------------------------------
 
 function bot_can_cancel_order($order_id) {
@@ -432,9 +450,18 @@ function bot_can_cancel_order($order_id) {
     }
     $provider_order_id = (string)$provider_order_id;
 
+    // SMM branch (api-order-smm.php): an SMM order is cancelled at
+    // SMM, not GodOfPanel. Guarded by function_exists — when the SMM
+    // file is not installed yet, smm_is_smm_order() does not exist,
+    // $is_smm is false, and the order falls through to the GodOfPanel
+    // path below, which fails honestly with the provider's error.
+    $is_smm = function_exists('smm_is_smm_order') && smm_is_smm_order($db, $order_id);
+
     // 3. Cancel at the provider. No balance is touched on any
     //    failure path below.
-    $cancel = can_provider_cancel($provider_order_id);
+    $cancel = $is_smm
+        ? can_provider_cancel_smm($provider_order_id)
+        : can_provider_cancel($provider_order_id);
     if (!$cancel['confirmed']) {
         // Race check: a concurrent duplicate call may have refunded
         // already while this call was talking to the provider.

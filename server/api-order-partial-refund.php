@@ -77,6 +77,15 @@
 //   - Add the same bot_rate_limit(...) call the other user endpoints
 //     use to the dispatch line (copy the exact call from the orders
 //     handler — the signature was not visible from outside the server).
+//   - SMM BRANCH (15 Nov 2026, api-order-smm.php): after the order
+//     row is loaded, an order with a bot_smm_orders row has its
+//     status + remains read at SMM via smm_order_status() instead of
+//     GodOfPanel. Refund math is unchanged (pro-rata on the stored
+//     total and quantity; delivered falls back to quantity -
+//     remains, as it does for GodOfPanel when delivered is missing).
+//     Guarded by function_exists: when api-order-smm.php is not
+//     installed yet, an SMM order falls through to the GodOfPanel
+//     read and fails honestly. GodOfPanel behaviour is unchanged.
 //
 // ASSUMPTIONS — TO VERIFY ON THE SERVER DURING INSTALL:
 //   A1. orders table: id, telegram_id (owner), total (the ETB total
@@ -288,6 +297,27 @@ function par_provider_status_full($provider_order_id) {
     ];
 }
 
+// SMM branch (api-order-smm.php): read an SMM order's status +
+// remains at SMM, with the same return shape as
+// par_provider_status_full() (delivered is always null for SMM —
+// the status reply carries no delivered count, so the handler's
+// quantity - remains fallback applies, exactly as for GodOfPanel
+// when delivered is missing). When the SMM file is not installed
+// yet, smm_order_status() does not exist and the call falls back
+// to the GodOfPanel read, which fails honestly with the provider's
+// error — never silently.
+function par_provider_status_smm($provider_order_id) {
+    if (!function_exists('smm_order_status')) return par_provider_status_full($provider_order_id);
+    $live = smm_order_status($provider_order_id);
+    if ($live === null) return null;
+    if (!empty($live['error'])) return null;
+    return [
+        'status' => $live['status'] !== null ? $live['status'] : '',
+        'remains' => $live['remains'],
+        'delivered' => null,
+    ];
+}
+
 // --- POST /api/bot/orders/{id}/partial-refund -------------------------------
 
 function bot_par_partial_refund($order_id) {
@@ -347,10 +377,20 @@ function bot_par_partial_refund($order_id) {
     }
     $provider_order_id = (string)$provider_order_id;
 
+    // SMM branch (api-order-smm.php): an SMM order's status +
+    // remains are read at SMM, not GodOfPanel. Guarded by
+    // function_exists — when the SMM file is not installed yet,
+    // smm_is_smm_order() does not exist, $is_smm is false, and the
+    // order falls through to the GodOfPanel read below, which fails
+    // honestly with the provider's error. Refund math is unchanged.
+    $is_smm = function_exists('smm_is_smm_order') && smm_is_smm_order($db, $order_id);
+
     // 3. The provider's status is the authority. Only "partial"
     //    proceeds; anything else is an honest 409, and an
     //    unreachable provider is a 502 (the bot may retry later).
-    $provider = par_provider_status_full($provider_order_id);
+    $provider = $is_smm
+        ? par_provider_status_smm($provider_order_id)
+        : par_provider_status_full($provider_order_id);
     if ($provider === null) {
         par_fail(502, 'Provider did not answer. No refund was made.');
     }

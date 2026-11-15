@@ -71,6 +71,11 @@
 //                    stores the plain number, not a band label.
 //   usual_service_id INT, > 0 — the catalogue service this user
 //                    usually orders (drives "same as usual").
+//                    Since the second provider (15 Nov 2026) it may
+//                    also be a combined id string "gop:<id>" /
+//                    "smm:<id>" — the bot learns it from the placed
+//                    service, and the fallback resolves it exactly;
+//                    a bare integer still reads as GodOfPanel.
 //   last_deposit_method (round 3, 15 Nov 2026) — the method of the
 //                    user's last SUCCESSFUL deposit: 'telebirr' |
 //                    'cbe' | 'cbebirr' | 'mpesa'. Written by the bot
@@ -223,10 +228,16 @@ function trt_validate_traits($in) {
             return [null, 'usual_quantity must be an integer, or null.'];
         }
     }
-    // usual_service_id: a catalogue service id, positive integer.
+    // usual_service_id: a catalogue service id, positive integer,
+    // or a combined id "gop:<id>" / "smm:<id>" (second provider,
+    // 15 Nov 2026) — the bot learns it from the placed service and
+    // the fallback resolves it exactly; a bare integer still reads
+    // as GodOfPanel, like before.
     if (isset($in['usual_service_id'])) {
         if ($in['usual_service_id'] === null) {
             $cleaned['usual_service_id'] = null;
+        } elseif (is_string($in['usual_service_id']) && preg_match('/^(gop|smm):[1-9][0-9]*$/', $in['usual_service_id'])) {
+            $cleaned['usual_service_id'] = $in['usual_service_id'];
         } elseif (is_int($in['usual_service_id']) || (is_string($in['usual_service_id']) && preg_match('/^\d+$/', $in['usual_service_id']))) {
             $sid = (int)$in['usual_service_id'];
             if ($sid < 1) {
@@ -234,7 +245,7 @@ function trt_validate_traits($in) {
             }
             $cleaned['usual_service_id'] = $sid;
         } else {
-            return [null, 'usual_service_id must be an integer, or null.'];
+            return [null, 'usual_service_id must be an integer or a combined id ("gop:<id>" / "smm:<id>"), or null.'];
         }
     }
     // last_deposit_method (round 3, 15 Nov 2026, feature 23): the
