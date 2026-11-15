@@ -14,9 +14,23 @@
 //         "revenue_etb":486.20,"new_users":3,
 //         "top_service":"TikTok Video Views","top_quantity":5400,
 //         "days":1,"from":"2026-11-15",
-//         "deposits_count":4,"deposits_etb":1250.00}
+//         "deposits_count":4,"deposits_etb":1250.00,
+//         "net_profit_etb":256.62,
+//         "provider_balance_usd":5.63}
 //     bot_ok() adds "success":true around it, as on every other
 //     endpoint; the bot reads the named keys and ignores the rest.
+//     net_profit_etb is gross revenue minus provider cost:
+//     the selling price is provider rate x 420 ETB and the owner
+//     buys 1 USD for 200 ETB, so provider cost = revenue x
+//     200/420 and net profit = revenue x 220/420. (A6 below.)
+//     provider_balance_usd is the PROVIDER's live balance in USD
+//     (feature 7, 15 Nov 2026 — the bot's low-provider-balance
+//     watch reads it, throttled to one check per hour, and alerts
+//     William below $3, again below $1). The field is OMITTED
+//     when the provider cannot be reached — the stats reply stays
+//     whole, and the bot's watch stays off with a log warning
+//     instead of alerting on a missing number. See
+//     adm_provider_balance() below (A9).
 //
 //   GET /api/bot/admin/stats?days=7 — same record for the last 7
 //     calendar days in EAT (today included). `days` is clamped to
@@ -26,6 +40,26 @@
 //     the COMPLETED deposits in the window (count and total ETB);
 //     a deposit is money in, not revenue, so it is reported
 //     separately from revenue_etb and never added to it.
+//
+//   GET /api/bot/admin/stats?day=yesterday — the SAME record for
+//     yesterday's EAT calendar day ONLY (date = today in EAT,
+//     from = yesterday, days = 1, day = "yesterday" in the
+//     response). The ?days=N windows always end today, so
+//     yesterday alone needs this parameter. The admin bot's
+//     morning report uses it. Any other `day` value is ignored
+//     (behaves as the plain ?days=N window).
+//
+//   GET /api/bot/admin/morning-sent?date=YYYY-MM-DD
+//     -> {"date":"2026-11-15","sent":false}
+//   POST /api/bot/admin/morning-sent {"date":"2026-11-15"}
+//     -> {"ok":true,"date":"2026-11-15","sent":true}
+//     The once-a-day marker for the admin bot's automatic 8am
+//     morning report: the bot checks GET before sending and
+//     writes POST after sending, so a restart after 8am cannot
+//     double-send. Table bot_morning_sent (date PK) is created
+//     by this file itself. POST is idempotent (a re-mark only
+//     refreshes sent_at). A missing/invalid date behaves as
+//     today in EAT on GET, and is a 400 on POST.
 //
 // WINDOW DECISION — TODAY (not last 24h), in Africa/Addis_Ababa:
 //   * date         = today's date in EAT (YYYY-MM-DD).
@@ -109,12 +143,37 @@
 //       'services' and SHOW COLUMNS FROM services on install.
 //   A6. Revenue is the SUM of orders.total for completed orders
 //       only — deposits are NOT revenue (a deposit is money in,
-//       an order is money earned). Provider cost is NOT subtracted
-//       here; the digest shows gross revenue, as build_digest_text
-//       expects. Net profit stays an admin-dashboard figure.
+//       an order is money earned). Provider cost IS subtracted
+//       for net_profit_etb: the selling price is provider rate x
+//       420 ETB and the owner buys 1 USD for 200 ETB, so the
+//       provider cost of a completed order is its total x 200/420
+//       and net profit is revenue x 220/420. The 420 multiplier
+//       is editable in Paxyo Settings — if William ever changes
+//       it, this 220/420 split must change with it (it is NOT
+//       read from settings here; the settings table was not
+//       visible from outside the server). Net profit stays an
+//       admin figure — it is never shown to customers.
 //   A7. EAT is UTC+3 all year (no daylight saving in Ethiopia),
 //       so the UTC bounds are a fixed -3h shift. If the server
 //       ever moves time zones, only adm_today_window() changes.
+//   A8. bot_morning_sent holds one row per date the morning
+//       report was sent (sent_date DATE PK). The admin bot is the
+//       only writer; the GET/POST handlers below are the only
+//       readers/writers of it.
+//   A9. PROVIDER BALANCE (feature 7, 15 Nov 2026): the provider
+//       balance action is action=balance on the GodOfPanel v2 API
+//       (key in the query string, POST with an empty body — the
+//       provider rejects a POST body with "Invalid API key").
+//       Reply shape {"balance": "5.6257050", "currency": "USD"}
+//       (verified 2026-11-12 in the connector doc). The call
+//       prefers bot.php's godofpanel_call('balance') helper when
+//       it exists (same pattern as api-order-rescue.php) and
+//       falls back to a direct curl call; the key lookup mirrors
+//       res_provider_key(). A failed provider call OMITS the
+//       field — it never fails the stats call and never reports
+//       a fake balance. TO VERIFY: confirm the helper name / key
+//       constant bot.php actually uses, and check the live reply
+//       carries provider_balance_usd (curl test below).
 //
 // NOTES FOR THE INSTALLER (check these against the live files first):
 //   - bot_ok() is used for the success reply (it adds
@@ -131,9 +190,14 @@
 //     times a day (one /digest tap), so a per-telegram_id limit
 //     does not fit — rate-limit it as a secret-only endpoint, or
 //     leave the limit off and note it here.
-//   - Read-only: no table is created, no row is written. The
-//     only writes are SET time_zone on the session.
-//   - All money is in ETB; revenue_etb is rounded to 2 decimals.
+//   - Read-only except POST /admin/morning-sent: GET /admin/stats
+//     creates no table and writes no row (only SET time_zone on
+//     the session). The morning-sent handlers create the
+//     bot_morning_sent table (CREATE TABLE IF NOT EXISTS) and
+//     POST writes one row per date, idempotently — that is the
+//     only write in this file.
+//   - All money is in ETB; revenue_etb / net_profit_etb are
+//     rounded to 2 decimals.
 // ============================================================================
 
 // --- small helpers (adm_ prefix so nothing collides with bot.php) -----------
@@ -182,6 +246,29 @@ function adm_window($days) {
         'date' => $now->format('Y-m-d'),
         'from' => (clone $start_eat)->setTimezone($tz)->format('Y-m-d'),
         'days' => $days,
+        'start_utc' => $start_eat->format('Y-m-d H:i:s'),
+        'end_utc' => $end_eat->format('Y-m-d H:i:s'),
+    ];
+}
+
+// Yesterday's EAT calendar day ONLY, as a window the same shape
+// as adm_window() returns: `date` is today in EAT, `from` is
+// yesterday, `days` is 1, and the UTC bounds cover
+// [yesterday 00:00 EAT, today 00:00 EAT). Used by
+// GET /admin/stats?day=yesterday for the morning report.
+function adm_day_window() {
+    $tz = new DateTimeZone('Africa/Addis_Ababa');
+    $now = new DateTime('now', $tz);
+    $start_eat = new DateTime($now->format('Y-m-d') . ' 00:00:00', $tz);
+    $start_eat->modify('-1 day');
+    $end_eat = new DateTime($now->format('Y-m-d') . ' 00:00:00', $tz);
+    $utc = new DateTimeZone('UTC');
+    $start_eat->setTimezone($utc);
+    $end_eat->setTimezone($utc);
+    return [
+        'date' => $now->format('Y-m-d'),
+        'from' => (clone $start_eat)->setTimezone($tz)->format('Y-m-d'),
+        'days' => 1,
         'start_utc' => $start_eat->format('Y-m-d H:i:s'),
         'end_utc' => $end_eat->format('Y-m-d H:i:s'),
     ];
@@ -253,6 +340,83 @@ function adm_scalar($db, $sql, $types, $params, $default) {
     }
 }
 
+// --- provider balance (feature 7, 15 Nov 2026) -------------------------
+// The bot's low-provider-balance watch reads provider_balance_usd
+// from GET /admin/stats. The provider balance action is
+// action=balance on the GodOfPanel v2 API (key in the query
+// string, POST with an empty body — the same call style as
+// api-order-rescue.php); the reply is {"balance": "5.6257050",
+// "currency": "USD"} (verified 2026-11-12 in the connector doc).
+// If the provider cannot be reached, the key is missing, or the
+// reply has no numeric balance, adm_provider_balance() returns
+// null and the field is OMITTED from the stats reply — the stats
+// call must never break because the provider is unreachable.
+
+function adm_provider_key() {
+    // TO VERIFY (same as api-order-rescue.php A3): keep only the
+    // constant bot.php actually uses for the provider key when
+    // placing orders; delete the rest.
+    foreach (['GODOPANEL_API_KEY', 'GOD_OF_PANEL_API_KEY', 'PROVIDER_API_KEY', 'PANEL_API_KEY'] as $name) {
+        if (defined($name) && constant($name) !== '') return (string)constant($name);
+    }
+    $env = getenv('GODOFPANEL_API_KEY');
+    if ($env !== false && $env !== '') return $env;
+    return null;
+}
+
+function adm_provider_base() {
+    if (defined('GODOPANEL_API_URL') && GODOPANEL_API_URL !== '') return rtrim(GODOPANEL_API_URL, '/');
+    $env = getenv('GODOFPANEL_API_URL');
+    if ($env !== false && $env !== '') return rtrim($env, '/');
+    return 'https://godofpanel.com/api/v2';
+}
+
+// One raw provider call. Params go in the URL query string (the
+// provider rejects a POST body with "Invalid API key"). Returns the
+// decoded JSON reply as an array, or null when the provider could
+// not be reached / did not answer JSON.
+function adm_provider_raw($action, $params) {
+    $key = adm_provider_key();
+    if ($key === null) return null;
+    $query = array_merge(['key' => $key, 'action' => $action], $params);
+    $url = adm_provider_base() . '?' . http_build_query($query);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => '',
+        CURLOPT_TIMEOUT => 30,
+    ]);
+    $raw = curl_exec($ch);
+    curl_close($ch);
+    if (!is_string($raw) || $raw === '') return null;
+    $res = json_decode($raw, true);
+    return is_array($res) ? $res : null;
+}
+
+// The provider's current balance in USD (float), or null when it
+// cannot be read. Uses bot.php's godofpanel_call('balance')
+// helper when it exists, else the direct call above. Never throws.
+function adm_provider_balance() {
+    // TO VERIFY (same as api-order-rescue.php A2): if bot.php's
+    // helper exists, use it here too.
+    if (function_exists('godofpanel_call')) {
+        try {
+            $res = godofpanel_call('balance', []);
+        } catch (Throwable $e) {
+            $res = null;
+        }
+        if (is_array($res) && isset($res['balance']) && is_numeric($res['balance'])) {
+            return (float)$res['balance'];
+        }
+        // Helper existed but gave nothing usable — fall through to
+        // the direct call below rather than guessing.
+    }
+    $res = adm_provider_raw('balance', []);
+    if ($res === null || !isset($res['balance']) || !is_numeric($res['balance'])) return null;
+    return (float)$res['balance'];
+}
+
 // --- GET /api/bot/admin/stats ------------------------------------------------
 
 function bot_admin_stats() {
@@ -263,11 +427,18 @@ function bot_admin_stats() {
 
     // ?days=N — the last N calendar days in EAT, today included.
     // Default 1 (today). Clamped to 1..90 inside adm_window().
+    // ?day=yesterday — yesterday's EAT calendar day only (the
+    // morning report). Any other `day` value is ignored.
     $days = 1;
     if (isset($_GET['days']) && is_numeric($_GET['days'])) {
         $days = (int)$_GET['days'];
     }
-    $win = adm_window($days);
+    $day = strtolower(trim((string)($_GET['day'] ?? '')));
+    if ($day === 'yesterday') {
+        $win = adm_day_window();
+    } else {
+        $win = adm_window($days);
+    }
     $date = $win['date'];
     $start = $win['start_utc'];
     $end = $win['end_utc'];
@@ -297,6 +468,13 @@ function bot_admin_stats() {
         "SELECT COALESCE(SUM(total), 0) FROM orders WHERE status = 'completed' AND created_at >= ? AND created_at < ?",
         'ss', [$start, $end], 0
     );
+
+    // Net profit: revenue minus provider cost. The selling price
+    // is provider rate x 420 ETB and the owner buys 1 USD for
+    // 200 ETB, so provider cost = revenue x 200/420 and net
+    // profit = revenue x 220/420 (see A6). If William ever
+    // changes the 420 multiplier in Settings, this split must
+    // change with it — it is NOT read from settings here.
 
     // New users today (auth rows created today). If auth has no
     // created_at column, this reads 0 — see A3.
@@ -385,19 +563,34 @@ function bot_admin_stats() {
         );
     }
 
-    bot_ok([
+    $out = [
         'date' => $date,
         'from' => $win['from'],
         'days' => $win['days'],
         'orders' => $orders,
         'completed' => $completed,
         'revenue_etb' => round($revenue, 2),
+        'net_profit_etb' => round($revenue * 220 / 420, 2),
         'new_users' => $new_users,
         'top_service' => $top_service,
         'top_quantity' => $top_quantity,
         'deposits_count' => $deposits_count,
         'deposits_etb' => round($deposits_etb, 2),
-    ]);
+    ];
+    // Provider balance in USD (feature 7, 15 Nov 2026): read live
+    // from the provider on every stats call — the bot throttles
+    // its checks to one per hour, so this costs at most one
+    // provider call per hour. When the provider cannot be reached
+    // the field is OMITTED (never a fake 0, never a 500): the
+    // bot's watch then stays off with a log warning.
+    $provider_balance = adm_provider_balance();
+    if ($provider_balance !== null) {
+        $out['provider_balance_usd'] = round($provider_balance, 2);
+    }
+    if ($day === 'yesterday') {
+        $out['day'] = 'yesterday';
+    }
+    bot_ok($out);
 }
 
 // Resolve a service id to its display name via the services table.
@@ -424,29 +617,149 @@ function adm_service_name($db, $service_id) {
     return 'Service #' . $service_id;
 }
 
+// --- morning-sent marker (bot_morning_sent) ----------------------------------
+
+function adm_json_body() {
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : [];
+}
+
+function adm_ensure_morning_table($db) {
+    if (method_exists($db, 'set_charset')) $db->set_charset('utf8mb4');
+    $db->query("CREATE TABLE IF NOT EXISTS bot_morning_sent (
+        sent_date DATE NOT NULL PRIMARY KEY,
+        sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+}
+
+// Is $value a real YYYY-MM-DD date? Returns the string, or null.
+function adm_valid_date($value) {
+    $value = trim((string)$value);
+    if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $m)) return null;
+    if (!checkdate((int)$m[2], (int)$m[3], (int)$m[1])) return null;
+    return $value;
+}
+
+// Today's date in EAT (YYYY-MM-DD).
+function adm_today_eat() {
+    $tz = new DateTimeZone('Africa/Addis_Ababa');
+    return (new DateTime('now', $tz))->format('Y-m-d');
+}
+
+// --- GET /api/bot/admin/morning-sent ------------------------------------------
+
+function bot_morning_sent_get() {
+    if ($_SERVER['REQUEST_METHOD'] !== 'GET') adm_fail(405, 'Method not allowed.');
+
+    $db = adm_db();
+    if ($db === null) adm_fail(500, 'Database is not available.');
+
+    // ?date=YYYY-MM-DD; missing/invalid behaves as today in EAT.
+    $date = adm_valid_date($_GET['date'] ?? '') ?? adm_today_eat();
+    adm_ensure_morning_table($db);
+
+    $sent = false;
+    try {
+        $stmt = $db->prepare('SELECT 1 FROM bot_morning_sent WHERE sent_date = ? LIMIT 1');
+        $stmt->bind_param('s', $date);
+        $stmt->execute();
+        $sent = $stmt->get_result()->fetch_assoc() !== null;
+        $stmt->close();
+    } catch (mysqli_sql_exception $e) { /* degrade: not sent */ }
+
+    bot_ok(['date' => $date, 'sent' => $sent]);
+}
+
+// --- POST /api/bot/admin/morning-sent -----------------------------------------
+
+function bot_morning_sent_mark() {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') adm_fail(405, 'Method not allowed.');
+
+    $db = adm_db();
+    if ($db === null) adm_fail(500, 'Database is not available.');
+
+    $in = adm_json_body();
+    $date = adm_valid_date($in['date'] ?? '');
+    if ($date === null) adm_fail(400, 'date must be YYYY-MM-DD.');
+
+    adm_ensure_morning_table($db);
+
+    // Idempotent: a re-mark only refreshes sent_at.
+    try {
+        $stmt = $db->prepare(
+            'INSERT INTO bot_morning_sent (sent_date) VALUES (?) '
+            . 'ON DUPLICATE KEY UPDATE sent_at = NOW()'
+        );
+        $stmt->bind_param('s', $date);
+        if (!$stmt->execute()) {
+            $stmt->close();
+            adm_fail(500, 'Could not mark the morning report as sent.');
+        }
+        $stmt->close();
+    } catch (mysqli_sql_exception $e) {
+        adm_fail(500, 'Could not mark the morning report as sent.');
+    }
+
+    bot_ok(['ok' => true, 'date' => $date, 'sent' => true]);
+}
+
 // ============================================================================
-// DISPATCH — insert this line in bot.php BEFORE the 404 fallback:
+// DISPATCH — insert these lines in bot.php BEFORE the 404 fallback:
 //   $bp = $_GET['bot_path'] ?? '';
 //   if ($bp === 'admin/stats' && $_SERVER['REQUEST_METHOD'] === 'GET') { bot_admin_stats(); }
+//   if ($bp === 'admin/morning-sent' && $_SERVER['REQUEST_METHOD'] === 'GET') { bot_morning_sent_get(); }
+//   if ($bp === 'admin/morning-sent' && $_SERVER['REQUEST_METHOD'] === 'POST') { bot_morning_sent_mark(); }
 //
-// LIVE CURL TEST (read-only GET — no money moves, no rows written):
+// LIVE CURL TEST (GET /admin/stats is read-only — no money moves,
+// no rows are written):
 //   SECRET=$(php -r 'require "config_secret.php"; echo BOT_API_SECRET;')
 //   curl -s "https://paxyo.et/api/bot/admin/stats" -H "X-Bot-Secret: $SECRET"
 //   -> expect {"success":true,"date":"YYYY-MM-DD","from":"YYYY-MM-DD",
 //      "days":1,"orders":N,"completed":N,"revenue_etb":N.NN,
+//      "net_profit_etb":N.NN,
 //      "new_users":N,"top_service":"..."|null,"top_quantity":N,
-//      "deposits_count":N,"deposits_etb":N.NN}
+//      "deposits_count":N,"deposits_etb":N.NN,
+//      "provider_balance_usd":N.NN}
 //      with "date" = today's date in EAT. On a quiet day every count
 //      may legitimately be 0 and top_service null — that is a correct
-//      answer, not an error.
+//      answer, not an error. net_profit_etb must equal
+//      revenue_etb x 220/420 (e.g. revenue 420.00 -> net 220.00).
+//      provider_balance_usd is present when the provider answers
+//      (compare it with the provider panel's own balance figure);
+//      when the provider is unreachable the field is OMITTED and
+//      every other figure is still there — that is correct too,
+//      not an error.
 //   curl -s "https://paxyo.et/api/bot/admin/stats?days=7" -H "X-Bot-Secret: $SECRET"
 //   -> same shape with "days":7 and "from" = 6 days ago in EAT;
 //      the counts cover the whole 7-day window. days=0, days=abc
 //      and days=999 behave as days=1 / days=1 / days=90.
+//   curl -s "https://paxyo.et/api/bot/admin/stats?day=yesterday" -H "X-Bot-Secret: $SECRET"
+//   -> same shape with "days":1, "day":"yesterday", "from" =
+//      yesterday in EAT and "date" = today in EAT; the counts
+//      cover yesterday only. Cross-check: the orders count must
+//      equal SELECT COUNT(*) FROM orders WHERE created_at >=
+//      <yesterday 00:00 EAT in UTC> AND created_at < <today
+//      00:00 EAT in UTC>.
+//   curl -s "https://paxyo.et/api/bot/admin/stats?day=bogus" -H "X-Bot-Secret: $SECRET"
+//   -> behaves as the plain ?days=1 window (no "day" key).
 //   Without the header (or with a wrong secret) the request must be
 //   refused by bot.php's existing X-Bot-Secret check, before this
 //   code runs:
 //   curl -s "https://paxyo.et/api/bot/admin/stats"
 //   -> expect the usual auth error (401/403), NOT the stats.
-//   No test rows to delete: this endpoint writes nothing.
+//   No test rows to delete for the stats GETs: they write nothing.
+//   Morning-sent marker (writes one row per date, idempotent —
+//   test with a past date, then delete the row):
+//   curl -s "https://paxyo.et/api/bot/admin/morning-sent?date=2026-01-01" -H "X-Bot-Secret: $SECRET"
+//   -> expect {"success":true,"date":"2026-01-01","sent":false}.
+//   curl -s -X POST "https://paxyo.et/api/bot/admin/morning-sent" -H "X-Bot-Secret: $SECRET" -H "Content-Type: application/json" -d '{"date":"2026-01-01"}'
+//   -> expect {"success":true,"ok":true,"date":"2026-01-01","sent":true}.
+//   curl -s "https://paxyo.et/api/bot/admin/morning-sent?date=2026-01-01" -H "X-Bot-Secret: $SECRET"
+//   -> expect sent true now.
+//   curl -s -X POST "https://paxyo.et/api/bot/admin/morning-sent" -H "X-Bot-Secret: $SECRET" -H "Content-Type: application/json" -d '{"date":"2026-01-01"}'
+//   -> expect sent true again (idempotent, no error).
+//   mysql -e "DELETE FROM bot_morning_sent WHERE sent_date='2026-01-01';"
+//   curl -s -X POST "https://paxyo.et/api/bot/admin/morning-sent" -H "X-Bot-Secret: $SECRET" -H "Content-Type: application/json" -d '{"date":"not-a-date"}'
+//   -> expect HTTP 400 (date must be YYYY-MM-DD).
 // ============================================================================
