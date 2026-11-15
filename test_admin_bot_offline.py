@@ -194,8 +194,9 @@ class FakeBot:
 
 
 class FakeContext:
-    def __init__(self, bot=None):
+    def __init__(self, bot=None, args=None):
         self.bot = bot or FakeBot()
+        self.args = list(args) if args is not None else []
 
 
 class FakeCallbackQuery:
@@ -235,7 +236,15 @@ class FakeAdminPaxyo:
                  promo_result=None, promo_error=None,
                  promo_error_body=None,
                  winbacks=None, winback_none=False, record_none=False,
-                 morning_sent_map=None, morning_none=False):
+                 morning_sent_map=None, morning_none=False,
+                 disputes=None, disputes_none=False,
+                 profitable=None, profitable_none=False,
+                 deposits_by_method=None, deposits_by_method_none=False,
+                 satisfaction=None, satisfaction_none=False,
+                 weekly=None, weekly_none=False,
+                 weekly_sent_map=None, weekly_sent_none=False,
+                 promo_codes_list=None, promo_codes_none=False,
+                 promo_off_result=None, promo_off_none=False):
         self._stats = stats
         self._stats_none = stats_none
         self._stats_by_days = dict(stats_by_days or {})
@@ -266,6 +275,33 @@ class FakeAdminPaxyo:
         self._morning_none = morning_none
         self.morning_sent_dates_seen = []
         self.morning_marked = []
+        # Round 3 (15 Nov 2026): disputes, profitable, deposits by
+        # method, satisfaction, weekly, promo list/off. None by
+        # default mirrors the real client's 404 (endpoint not live
+        # yet); the *_none flags force that None, and the *_result
+        # seeds override the default success replies.
+        self._disputes = list(disputes) if disputes is not None else []
+        self._disputes_none = disputes_none
+        self.dispute_closes = []
+        self._profitable = profitable
+        self._profitable_none = profitable_none
+        self._deposits_by_method = deposits_by_method
+        self._deposits_by_method_none = deposits_by_method_none
+        self._satisfaction = satisfaction
+        self._satisfaction_none = satisfaction_none
+        self._weekly = weekly
+        self._weekly_none = weekly_none
+        self._weekly_sent_map = dict(weekly_sent_map or {})
+        self._weekly_sent_none = weekly_sent_none
+        self.weekly_sent_dates_seen = []
+        self.weekly_marked = []
+        self._promo_codes_list = (
+            list(promo_codes_list) if promo_codes_list is not None else []
+        )
+        self._promo_codes_none = promo_codes_none
+        self.promo_off_calls = []
+        self._promo_off_result = promo_off_result
+        self._promo_off_none = promo_off_none
 
     async def admin_stats(self, days=1, day=None):
         self.stats_days_seen.append(days)
@@ -322,13 +358,14 @@ class FakeAdminPaxyo:
             "duplicate": False,
         }
 
-    async def create_promo_code(self, code, percent, expires_at=None,
-                                max_uses=None):
+    async def create_promo_code(self, code, percent=None, expires_at=None,
+                                max_uses=None, fixed_etb=None):
         self.promo_calls.append({
             "code": code,
             "percent": percent,
             "expires_at": expires_at,
             "max_uses": max_uses,
+            "fixed_etb": fixed_etb,
         })
         if self._promo_error is not None:
             # Mirrors the real client: 404 -> None (endpoint not
@@ -377,6 +414,71 @@ class FakeAdminPaxyo:
         self._morning_sent_map[date_str] = True
         return {"ok": True, "date": date_str, "sent": True}
 
+    # Round 3 (15 Nov 2026) mirrors: disputes, profitable,
+    # deposits by method, satisfaction, weekly (+ its sent
+    # marker), promo list/off. Each returns the seeded record, or
+    # None when its *_none flag is set (the real client's 404).
+
+    async def disputes(self):
+        if self._disputes_none:
+            return None
+        return {"disputes": list(self._disputes)}
+
+    async def close_dispute(self, dispute_id):
+        self.dispute_closes.append(dispute_id)
+        if self._disputes_none:
+            return None
+        return {"ok": True, "id": dispute_id, "status": "closed"}
+
+    async def profitable(self):
+        if self._profitable_none:
+            return None
+        return self._profitable
+
+    async def deposits_by_method(self):
+        if self._deposits_by_method_none:
+            return None
+        return self._deposits_by_method
+
+    async def satisfaction(self):
+        if self._satisfaction_none:
+            return None
+        return self._satisfaction
+
+    async def weekly_stats(self):
+        if self._weekly_none:
+            return None
+        return self._weekly
+
+    async def weekly_sent(self, monday_str):
+        self.weekly_sent_dates_seen.append(monday_str)
+        if self._weekly_sent_none:
+            return None
+        return {
+            "date": monday_str,
+            "sent": bool(self._weekly_sent_map.get(monday_str)),
+        }
+
+    async def mark_weekly_sent(self, monday_str):
+        self.weekly_marked.append(monday_str)
+        if self._weekly_sent_none:
+            return None
+        self._weekly_sent_map[monday_str] = True
+        return {"ok": True, "date": monday_str, "sent": True}
+
+    async def promo_codes(self):
+        if self._promo_codes_none:
+            return None
+        return {"codes": list(self._promo_codes_list)}
+
+    async def promo_off(self, code):
+        self.promo_off_calls.append(code)
+        if self._promo_off_none:
+            return None
+        if self._promo_off_result is not None:
+            return self._promo_off_result
+        return {"ok": True, "code": code, "active": False}
+
 
 class FakeApp:
     """Stand-in for a telegram.ext.Application: only .bot is used
@@ -392,6 +494,7 @@ class AdminBotBase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         admin_bot.PENDING.clear()
         admin_bot.MORNING_SENT_DATES.clear()
+        admin_bot.WEEKLY_SENT_MONDAYS.clear()
         self._ids_patch = mock.patch.object(
             admin_bot, "ADMIN_TELEGRAM_IDS", {ADMIN_ID}
         )
@@ -401,6 +504,7 @@ class AdminBotBase(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         admin_bot.PENDING.clear()
         admin_bot.MORNING_SENT_DATES.clear()
+        admin_bot.WEEKLY_SENT_MONDAYS.clear()
 
     def _patch_api(self, fake):
         patcher = mock.patch.object(admin_bot, "admin_api", fake)
@@ -423,13 +527,13 @@ class AdminBotBase(unittest.IsolatedAsyncioTestCase):
         return query
 
     async def _command(self, handler, user_id=ADMIN_ID, fake=None,
-                       bot=None):
+                       bot=None, args=None):
         """Run a /command handler (winbacks / morning) directly."""
         if fake is not None:
             self._patch_api(fake)
         message = FakeMessage("")
         update = FakeUpdate(message, FakeUser(user_id))
-        await handler(update, FakeContext(bot))
+        await handler(update, FakeContext(bot, args=args))
         return message
 
 
@@ -1329,14 +1433,14 @@ class TestPromoParsing(unittest.TestCase):
     def test_create_variants(self):
         self.assertEqual(
             admin_bot.parse_promo_create_command("create promo code PAXYO20 20%"),
-            {"code": "PAXYO20", "percent": 20,
+            {"code": "PAXYO20", "percent": 20, "fixed_etb": None,
              "expires_at": None, "max_uses": None},
         )
         self.assertEqual(
             admin_bot.parse_promo_create_command(
                 "new promo code WELCOME10 10 percent"
             ),
-            {"code": "WELCOME10", "percent": 10,
+            {"code": "WELCOME10", "percent": 10, "fixed_etb": None,
              "expires_at": None, "max_uses": None},
         )
 
@@ -1421,7 +1525,7 @@ class TestPromoValidation(unittest.TestCase):
 
     def test_percent_missing(self):
         self.assertIn(
-            "Tell me the percent too",
+            "Tell me the bonus too",
             admin_bot.validate_promo_create(self._parsed(percent=None)),
         )
 
@@ -1460,6 +1564,7 @@ class TestPromoFlow(AdminBotBase):
         self.assertEqual(
             admin_bot.PENDING[ADMIN_ID],
             {"kind": "promo", "code": "PAXYO20", "percent": 20,
+             "fixed_etb": None,
              "expires_at": "2026-12-31 23:59:59", "max_uses": 100},
         )
 
@@ -1477,7 +1582,8 @@ class TestPromoFlow(AdminBotBase):
         self.assertEqual(
             fake.promo_calls,
             [{"code": "PAXYO20", "percent": 20,
-              "expires_at": "2026-12-31 23:59:59", "max_uses": 100}],
+              "expires_at": "2026-12-31 23:59:59", "max_uses": 100,
+              "fixed_etb": None}],
         )
         self.assertEqual(
             query.edited,
@@ -1492,7 +1598,7 @@ class TestPromoFlow(AdminBotBase):
         self.assertEqual(
             fake.promo_calls,
             [{"code": "PAXYO20", "percent": 20,
-              "expires_at": None, "max_uses": None}],
+              "expires_at": None, "max_uses": None, "fixed_etb": None}],
         )
         self.assertEqual(
             query.edited,
@@ -1540,7 +1646,8 @@ class TestPromoFlow(AdminBotBase):
     async def test_missing_percent_asks_plainly(self):
         fake = FakeAdminPaxyo(stats=STATS)
         message = await self._create(fake, "create promo code PAXYO20")
-        self.assertIn("Tell me the percent too", message.text_sent[0])
+        self.assertIn("Tell me the bonus too", message.text_sent[0])
+        self.assertIn("100 ETB", message.text_sent[0])
         self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
         self.assertEqual(fake.promo_calls, [])
 
@@ -2154,6 +2261,420 @@ class TestEnsureEventLoop(unittest.TestCase):
         thread.start()
         thread.join()
         self.assertEqual(errors, [])
+
+
+# ------------------------------------------------------- round 3 (15 Nov 2026) ---
+
+DISPUTES = [
+    {
+        "id": 3, "order_id": 1841, "telegram_id": 5,
+        "username": "testuser", "message": "the views never arrived",
+        "created_at": "2026-11-14T10:00:00Z",
+    },
+    {
+        "id": 2, "order_id": None, "telegram_id": 6,
+        "username": "otheruser", "message": "my deposit is stuck",
+        "created_at": "2026-11-14T09:00:00Z",
+    },
+]
+
+PROFITABLE = {
+    "services": [
+        {
+            "service_id": 1665, "service_name": "TikTok Video Views",
+            "orders": 40, "quantity": 40000,
+            "revenue_etb": 756.0, "profit_etb": 396.0,
+        },
+        {
+            "service_id": 1104, "service_name": "TikTok Followers",
+            "orders": 5, "quantity": 5000,
+            "revenue_etb": 861.0, "profit_etb": 451.0,
+        },
+    ]
+}
+
+DEPOSITS_BY_METHOD = {
+    "methods": [
+        {
+            "method": "Telebirr", "count_7d": 5, "amount_7d": 500.0,
+            "count_all": 50, "amount_all": 5000.0,
+        },
+        {
+            "method": "CBE", "count_7d": 2, "amount_7d": 200.0,
+            "count_all": 10, "amount_all": 1000.0,
+        },
+        {
+            "method": "M-Pesa", "count_7d": 0, "amount_7d": 0.0,
+            "count_all": 0, "amount_all": 0.0,
+        },
+        {
+            "method": "CBE Birr", "count_7d": 1, "amount_7d": 100.0,
+            "count_all": 3, "amount_all": 300.0,
+        },
+    ]
+}
+
+SATISFACTION = {
+    "total": 20, "positive": 17, "negative": 3, "percent_positive": 85,
+}
+
+WEEKLY = {
+    "this_week": {
+        "users": 12, "orders": 40, "completed": 35,
+        "revenue_etb": 1680.0, "net_profit_etb": 880.0,
+        "deposits_count": 9, "deposits_etb": 2000.0,
+        "from": "2026-11-16", "to": "2026-11-22",
+    },
+    "last_week": {
+        "users": 8, "orders": 30, "completed": 28,
+        "revenue_etb": 1260.0, "net_profit_etb": 660.0,
+        "deposits_count": 7, "deposits_etb": 1500.0,
+        "from": "2026-11-09", "to": "2026-11-15",
+    },
+    "changes": {
+        "users_pct": 50, "orders_pct": 33,
+        "revenue_etb_pct": 33, "net_profit_etb_pct": 33,
+    },
+}
+
+PROMO_CODES_LIST = [
+    {
+        "code": "PAXYO20", "percent": 20, "fixed_etb": None,
+        "active": True, "expires_at": "2026-12-31 23:59:59",
+        "max_uses": 100, "used": 12,
+    },
+    {
+        "code": "FLAT100", "percent": None, "fixed_etb": 100.0,
+        "active": False, "expires_at": None, "max_uses": None,
+        "used": 3,
+    },
+]
+
+
+class TestDisputes(AdminBotBase):
+    """Disputes inbox (15, 15 Nov 2026): /disputes lists the open
+    ones; "close dispute #<id>" is Confirm-gated."""
+
+    async def test_disputes_lists_open_ones(self):
+        fake = FakeAdminPaxyo(disputes=DISPUTES)
+        message = await self._command(admin_bot.disputes_cmd, fake=fake)
+        text = message.text_sent[0]
+        self.assertIn("#3", text)
+        self.assertIn("#1841", text)
+        self.assertIn("testuser", text)
+        self.assertIn("views never arrived", text)
+        self.assertIn("deposit is stuck", text)
+        self.assertIn("close dispute #", text)
+
+    async def test_disputes_none_says_not_connected(self):
+        fake = FakeAdminPaxyo(disputes=[])
+        message = await self._command(admin_bot.disputes_cmd, fake=fake)
+        self.assertIn("No open disputes", message.text_sent[0])
+
+    async def test_disputes_404_says_not_connected(self):
+        fake = FakeAdminPaxyo(disputes_none=True)
+        message = await self._command(admin_bot.disputes_cmd, fake=fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+
+    async def test_close_dispute_confirm_gated(self):
+        fake = FakeAdminPaxyo(disputes=DISPUTES)
+        self._patch_api(fake)
+        message = await self._text("close dispute #3")
+        self.assertIn("Close this dispute?", message.text_sent[0])
+        self.assertIn("#1841", message.text_sent[0])
+        self.assertIn("views never arrived", message.text_sent[0])
+        self.assertEqual(fake.dispute_closes, [])  # nothing before Confirm
+        query = await self._callback("admin_confirm")
+        self.assertEqual(fake.dispute_closes, [3])
+        self.assertEqual(query.edited, ["✅ Dispute #3 closed."])
+
+    async def test_close_unknown_dispute_says_so(self):
+        fake = FakeAdminPaxyo(disputes=DISPUTES)
+        self._patch_api(fake)
+        message = await self._text("close dispute #99")
+        self.assertIn("no open dispute #99", message.text_sent[0].lower())
+        self.assertEqual(fake.dispute_closes, [])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+
+class TestProfitable(AdminBotBase):
+    """Most profitable services (16, 15 Nov 2026): /profitable
+    lists the top 10 by profit."""
+
+    async def test_profitable_lists_with_profit(self):
+        fake = FakeAdminPaxyo(profitable=PROFITABLE)
+        message = await self._command(admin_bot.profitable_cmd, fake=fake)
+        text = message.text_sent[0]
+        self.assertIn("TikTok Video Views", text)
+        self.assertIn("756.00", text)
+        self.assertIn("396.00", text)
+        self.assertIn("40 orders", text)
+
+    async def test_profitable_404_says_not_connected(self):
+        fake = FakeAdminPaxyo(profitable_none=True)
+        message = await self._command(admin_bot.profitable_cmd, fake=fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+
+    async def test_profitable_empty_says_no_orders(self):
+        fake = FakeAdminPaxyo(profitable={"services": []})
+        message = await self._command(admin_bot.profitable_cmd, fake=fake)
+        self.assertIn("No orders yet", message.text_sent[0])
+
+
+class TestDepositsByMethod(AdminBotBase):
+    """Deposit method report (18, 15 Nov 2026): /deposits-by-method
+    shows all four methods, last 7 days + all time."""
+
+    async def test_report_shows_all_four_methods(self):
+        fake = FakeAdminPaxyo(deposits_by_method=DEPOSITS_BY_METHOD)
+        message = await self._command(
+            admin_bot.deposits_by_method_cmd, fake=fake
+        )
+        text = message.text_sent[0]
+        for method in ("Telebirr", "CBE", "M-Pesa", "CBE Birr"):
+            self.assertIn(method, text)
+        self.assertIn("500.00", text)    # Telebirr last 7 days
+        self.assertIn("5,000.00", text)  # Telebirr all time
+
+    async def test_report_404_says_not_connected(self):
+        fake = FakeAdminPaxyo(deposits_by_method_none=True)
+        message = await self._command(
+            admin_bot.deposits_by_method_cmd, fake=fake
+        )
+        self.assertIn("not connected yet", message.text_sent[0])
+
+
+class TestSatisfaction(AdminBotBase):
+    """Satisfaction score (20, 15 Nov 2026): /satisfaction shows
+    the % positive; the morning report carries the same line."""
+
+    def test_format_line(self):
+        self.assertEqual(
+            admin_bot.format_satisfaction_line(SATISFACTION),
+            "Satisfaction: 85% positive (17 of 20)",
+        )
+
+    def test_format_line_no_feedback(self):
+        self.assertEqual(
+            admin_bot.format_satisfaction_line({"total": 0}),
+            "Satisfaction: no feedback yet.",
+        )
+
+    async def test_satisfaction_command(self):
+        fake = FakeAdminPaxyo(satisfaction=SATISFACTION)
+        message = await self._command(
+            admin_bot.satisfaction_cmd, fake=fake
+        )
+        self.assertIn("85% positive (17 of 20)", message.text_sent[0])
+
+    async def test_satisfaction_404_says_not_connected(self):
+        fake = FakeAdminPaxyo(satisfaction_none=True)
+        message = await self._command(
+            admin_bot.satisfaction_cmd, fake=fake
+        )
+        self.assertIn("not connected yet", message.text_sent[0])
+
+    async def test_morning_report_carries_satisfaction_line(self):
+        fake = FakeAdminPaxyo(
+            stats=STATS_YESTERDAY, satisfaction=SATISFACTION
+        )
+        message = await self._command(admin_bot.morning_cmd, fake=fake)
+        self.assertIn("85% positive (17 of 20)", message.text_sent[0])
+
+    async def test_morning_report_without_satisfaction_has_no_line(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        message = await self._command(admin_bot.morning_cmd, fake=fake)
+        self.assertNotIn("Satisfaction:", message.text_sent[0])
+
+
+class TestWeeklyReport(AdminBotBase):
+    """Weekly growth report (27, 15 Nov 2026): /weekly + the
+    automatic Monday 8am send, once per week."""
+
+    def _monday(self, hour, minute=0):
+        # 2026-11-16 is a Monday.
+        return datetime(2026, 11, 16, hour, minute, tzinfo=admin_bot.EAT_TZ)
+
+    def test_format_weekly(self):
+        text = admin_bot.format_weekly_report(WEEKLY)
+        self.assertIn("2026-11-16 to 2026-11-22", text)
+        self.assertIn("New users: 12 (last week: 8, +50%)", text)
+        self.assertIn("Orders: 40 (last week: 30, +33%)", text)
+        self.assertIn("Revenue: 1,680.00", text)
+        self.assertIn("Net profit: 880.00", text)
+
+    def test_format_weekly_404(self):
+        self.assertIn(
+            "not connected yet", admin_bot.format_weekly_report(None)
+        )
+
+    def test_should_send_weekly_gate(self):
+        monday_8 = self._monday(8, 0)
+        self.assertTrue(admin_bot.should_send_weekly(monday_8, False))
+        self.assertFalse(admin_bot.should_send_weekly(self._monday(7, 59), False))
+        self.assertFalse(admin_bot.should_send_weekly(monday_8, True))
+        tuesday = datetime(2026, 11, 17, 8, 0, tzinfo=admin_bot.EAT_TZ)
+        self.assertFalse(admin_bot.should_send_weekly(tuesday, False))
+        sunday = datetime(2026, 11, 15, 8, 0, tzinfo=admin_bot.EAT_TZ)
+        self.assertFalse(admin_bot.should_send_weekly(sunday, False))
+
+    async def test_weekly_command(self):
+        fake = FakeAdminPaxyo(weekly=WEEKLY)
+        message = await self._command(admin_bot.weekly_cmd, fake=fake)
+        self.assertIn("New users: 12 (last week: 8, +50%)", message.text_sent[0])
+
+    async def test_weekly_404_says_not_connected(self):
+        fake = FakeAdminPaxyo(weekly_none=True)
+        message = await self._command(admin_bot.weekly_cmd, fake=fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+
+    async def _once(self, fake, app, now):
+        self._patch_api(fake)
+        return await admin_bot.send_weekly_report_once(app, now=now)
+
+    async def test_monday_8am_sends_once(self):
+        fake = FakeAdminPaxyo(weekly=WEEKLY)
+        app = FakeApp()
+        self.assertTrue(await self._once(fake, app, self._monday(8, 0)))
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("Weekly growth", app.bot.sent[0][1])
+        self.assertIn("2026-11-16", fake.weekly_marked)
+        # Second attempt the same Monday: the server marker blocks it.
+        self.assertFalse(await self._once(fake, app, self._monday(9, 0)))
+        self.assertEqual(len(app.bot.sent), 1)
+
+    async def test_before_monday_8am_sends_nothing(self):
+        fake = FakeAdminPaxyo(weekly=WEEKLY)
+        app = FakeApp()
+        self.assertFalse(await self._once(fake, app, self._monday(7, 59)))
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.weekly_marked, [])
+
+    async def test_not_monday_sends_nothing(self):
+        fake = FakeAdminPaxyo(weekly=WEEKLY)
+        app = FakeApp()
+        tuesday = datetime(2026, 11, 17, 8, 0, tzinfo=admin_bot.EAT_TZ)
+        self.assertFalse(await self._once(fake, app, tuesday))
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_weekly_404_marks_nothing(self):
+        fake = FakeAdminPaxyo(weekly_none=True)
+        app = FakeApp()
+        self.assertFalse(await self._once(fake, app, self._monday(8, 0)))
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.weekly_marked, [])
+
+
+class TestPromoManager(AdminBotBase):
+    """Promo code manager (25, 15 Nov 2026): fixed-ETB creation,
+    /promo list, /promo off (Confirm-gated)."""
+
+    def test_parse_fixed_etb(self):
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code FLAT100 100 ETB"
+        )
+        self.assertEqual(parsed["code"], "FLAT100")
+        self.assertIsNone(parsed["percent"])
+        self.assertEqual(parsed["fixed_etb"], 100.0)
+
+    def test_validate_both_bonus_refused(self):
+        parsed = {
+            "code": "FLAT100", "percent": 10, "fixed_etb": 100.0,
+            "expires_at": None, "max_uses": None,
+        }
+        self.assertIn(
+            "Pick one bonus",
+            admin_bot.validate_promo_create(parsed),
+        )
+
+    def test_validate_fixed_etb_ok(self):
+        parsed = {
+            "code": "FLAT100", "percent": None, "fixed_etb": 100.0,
+            "expires_at": None, "max_uses": None,
+        }
+        self.assertIsNone(admin_bot.validate_promo_create(parsed))
+
+    def test_validate_neither_bonus_refused(self):
+        parsed = {
+            "code": "FLAT100", "percent": None, "fixed_etb": None,
+            "expires_at": None, "max_uses": None,
+        }
+        self.assertIn(
+            "Tell me the bonus too",
+            admin_bot.validate_promo_create(parsed),
+        )
+
+    async def test_fixed_etb_create_flow(self):
+        fake = FakeAdminPaxyo(stats=STATS)
+        self._patch_api(fake)
+        message = await self._text("create promo code FLAT100 100 ETB")
+        self.assertIn("FLAT100", message.text_sent[0])
+        self.assertIn("100.00 ETB", message.text_sent[0])
+        self.assertEqual(
+            admin_bot.PENDING[ADMIN_ID]["fixed_etb"], 100.0
+        )
+        query = await self._callback("admin_confirm")
+        self.assertEqual(
+            fake.promo_calls,
+            [{"code": "FLAT100", "percent": None, "expires_at": None,
+              "max_uses": None, "fixed_etb": 100.0}],
+        )
+        self.assertIn(
+            "100.00 ETB bonus", query.edited[0]
+        )
+
+    async def test_promo_list_command(self):
+        fake = FakeAdminPaxyo(promo_codes_list=PROMO_CODES_LIST)
+        message = await self._command(
+            admin_bot.promo_cmd, fake=fake, args=["list"]
+        )
+        text = message.text_sent[0]
+        self.assertIn("PAXYO20", text)
+        self.assertIn("20%", text)
+        self.assertIn("active", text)
+        self.assertIn("FLAT100", text)
+        self.assertIn("100.00 ETB", text)
+        self.assertIn("off", text)
+
+    async def test_promo_list_plain_language(self):
+        fake = FakeAdminPaxyo(promo_codes_list=PROMO_CODES_LIST)
+        self._patch_api(fake)
+        message = await self._text("list promo codes")
+        self.assertIn("PAXYO20", message.text_sent[0])
+
+    async def test_promo_off_confirm_gated(self):
+        fake = FakeAdminPaxyo(promo_codes_list=PROMO_CODES_LIST)
+        message = await self._command(
+            admin_bot.promo_cmd, fake=fake, args=["off", "PAXYO20"]
+        )
+        self.assertIn("Turn off promo code PAXYO20", message.text_sent[0])
+        self.assertEqual(fake.promo_off_calls, [])
+        query = await self._callback("admin_confirm")
+        self.assertEqual(fake.promo_off_calls, ["PAXYO20"])
+        self.assertEqual(query.edited, ["✅ Promo code PAXYO20 is now off."])
+
+    async def test_promo_off_plain_language(self):
+        fake = FakeAdminPaxyo(promo_codes_list=PROMO_CODES_LIST)
+        self._patch_api(fake)
+        message = await self._text("turn off promo code PAXYO20")
+        self.assertIn("Turn off promo code PAXYO20", message.text_sent[0])
+        query = await self._callback("admin_confirm")
+        self.assertEqual(fake.promo_off_calls, ["PAXYO20"])
+
+    async def test_promo_bare_command_explains(self):
+        fake = FakeAdminPaxyo()
+        message = await self._command(admin_bot.promo_cmd, fake=fake, args=[])
+        self.assertIn("/promo list", message.text_sent[0])
+        self.assertIn("/promo off CODE", message.text_sent[0])
+
+    async def test_new_commands_listed_in_capabilities(self):
+        message = FakeMessage("/start")
+        update = FakeUpdate(message, FakeUser(ADMIN_ID))
+        await admin_bot.start_cmd(update, FakeContext())
+        text = message.text_sent[0]
+        for cmd in ("/disputes", "/profitable", "/deposits-by-method",
+                    "/satisfaction", "/weekly", "/promo list"):
+            self.assertIn(cmd, text)
 
 
 if __name__ == "__main__":

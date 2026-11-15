@@ -500,13 +500,20 @@ class AdminPaxyoClient:
             )
         )
 
-    async def create_promo_code(self, code, percent, expires_at=None,
-                                max_uses=None):
-        """POST /promo-codes {code, percent, expires_at?, max_uses?}
-        -> {ok, code, percent, active, expires_at, max_uses}.
-        404 -> None (endpoint not live yet). Any other error raises
-        (409 = the code already exists)."""
-        body = {"code": code, "percent": int(percent)}
+    async def create_promo_code(self, code, percent=None, expires_at=None,
+                                max_uses=None, fixed_etb=None):
+        """POST /promo-codes {code, percent?|fixed_etb?, expires_at?,
+        max_uses?} -> {ok, code, percent, fixed_etb, active,
+        expires_at, max_uses}. Either a percent (1–100) or a fixed
+        ETB bonus — never both, never neither (the client-side
+        validator enforces it before any Confirm). 404 -> None
+        (endpoint not live yet). Any other error raises (409 = the
+        code already exists)."""
+        body = {"code": code}
+        if percent is not None:
+            body["percent"] = int(percent)
+        if fixed_etb is not None:
+            body["fixed_etb"] = float(fixed_etb)
         if expires_at is not None:
             body["expires_at"] = expires_at
         if max_uses is not None:
@@ -536,6 +543,167 @@ class AdminPaxyoClient:
         raw = data.get("services", data) if isinstance(data, dict) else data
         return raw if isinstance(raw, list) else []
 
+    async def disputes(self):
+        """GET /disputes — the open disputes (15, 15 Nov 2026):
+        {disputes: [{id, order_id, telegram_id, username, message,
+        created_at}], ...}, newest first, max 50. 404 -> None
+        (endpoint not live yet)."""
+        try:
+            data = await self._send(build_api_request("GET", "/disputes"))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /disputes returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def close_dispute(self, dispute_id):
+        """POST /disputes/{id}/close -> {ok, id, status}. 404 ->
+        None (endpoint not live yet, or the dispute is already
+        closed). Any other error raises."""
+        try:
+            data = await self._send(
+                build_api_request("POST", f"/disputes/{dispute_id}/close")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /disputes/%s/close returned 404 (endpoint not live yet)",
+                    dispute_id,
+                )
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def profitable(self):
+        """GET /admin/profitable — the services earning the most
+        (16, 15 Nov 2026): {services: [{service_id, service_name,
+        orders, quantity, revenue_etb, profit_etb}], ...}, top 10
+        by profit. 404 -> None (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/admin/profitable")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /admin/profitable returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def deposits_by_method(self):
+        """GET /admin/deposits-by-method — completed deposits
+        broken down by method (18, 15 Nov 2026): {methods:
+        [{method, count_7d, amount_7d, count_all, amount_all}],
+        ...} for Telebirr, CBE, M-Pesa and CBE Birr. 404 -> None
+        (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/admin/deposits-by-method")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /admin/deposits-by-method returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def satisfaction(self):
+        """GET /satisfaction — the 👍/👎 feedback score (20, 15 Nov
+        2026): {total, positive, negative, percent_positive}.
+        404 -> None (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/satisfaction")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /satisfaction returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def weekly_stats(self):
+        """GET /admin/weekly — this week vs last week (27, 15 Nov
+        2026): {this_week: {users, orders, completed, revenue_etb,
+        net_profit_etb, deposits_count, deposits_etb, from, to},
+        last_week: {...}, changes: {users_pct, orders_pct,
+        revenue_pct, profit_pct}}. Weeks are EAT Monday–Sunday.
+        404 -> None (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/admin/weekly")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /admin/weekly returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def weekly_sent(self, monday_str: str):
+        """GET /admin/weekly-sent?date=YYYY-MM-DD (the Monday) ->
+        {date, sent}. 404 -> None (endpoint not live yet — the
+        caller falls back to the in-memory marker)."""
+        path = f"/admin/weekly-sent?date={monday_str}"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def mark_weekly_sent(self, monday_str: str):
+        """POST /admin/weekly-sent {date} -> {ok, date, sent}.
+        404 -> None (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "POST", "/admin/weekly-sent", {"date": monday_str}
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /admin/weekly-sent returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def promo_codes(self):
+        """GET /promo-codes — every promo code (25, 15 Nov 2026):
+        {codes: [{code, percent, fixed_etb, active, expires_at,
+        max_uses, used}]}. 404 -> None (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/promo-codes")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /promo-codes returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def promo_off(self, code):
+        """POST /promo-codes/{code}/off -> {ok, code, active}.
+        404 -> None (endpoint not live yet, or the code does not
+        exist). Any other error raises."""
+        try:
+            data = await self._send(
+                build_api_request("POST", f"/promo-codes/{code}/off")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /promo-codes/%s/off returned 404 (endpoint not live yet)",
+                    code,
+                )
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
 
 # The live client, set in main(). Tests patch this object.
 admin_api = None
@@ -554,9 +722,12 @@ admin_api = None
 # only when the Confirm runs, never before):
 #   {"kind": "refund", "order_id": ..., "telegram_id": <order owner>}
 # A promo-code entry:
-#   {"kind": "promo", "code": ..., "percent": ...,
-#    "expires_at": <"YYYY-MM-DD 23:59:59"|None>,
+#   {"kind": "promo", "code": ..., "percent": <int|None>,
+#    "fixed_etb": <float|None>, "expires_at": <"YYYY-MM-DD 23:59:59"|None>,
 #    "max_uses": <int|None>}
+# A dispute-close entry (Confirm-gated, like every other change):
+#   {"kind": "dispute_close", "dispute_id": ...,
+#    "order_id": <int|None>, "message": <str|None>}
 # A win-back entry (audience frozen at preview time — the count
 # shown is the count messaged):
 #   {"kind": "winback",
@@ -814,14 +985,16 @@ def parse_refund_command(text: str):
 def parse_promo_create_command(text: str):
     """Deterministic promo-code creation parser. "create promo code
     PAXYO20 20%", "new promo code WELCOME10 10 percent" ->
-    {"code": "PAXYO20", "percent": 20,
+    {"code": "PAXYO20", "percent": 20, "fixed_etb": None,
      "expires_at": "2026-12-31 23:59:59"|None, "max_uses": 100|None}.
-    Optional "expires 2026-12-31" and "max 100 uses" are parsed
-    when present. The code is uppercased here (the server
-    normalises the same way). percent is None when no percent was
-    given — the handler then asks for it, plainly. The code keeps
-    its raw shape for validate_promo_create, which refuses bad
-    ones before any Confirm."""
+    A fixed ETB bonus instead of a percent (25, 15 Nov 2026):
+    "create promo code FLAT100 100 ETB" -> {"fixed_etb": 100,
+    "percent": None}. Optional "expires 2026-12-31" and "max 100
+    uses" are parsed when present. The code is uppercased here
+    (the server normalises the same way). percent / fixed_etb are
+    None when neither was given — the handler then asks for one,
+    plainly. The code keeps its raw shape for validate_promo_create,
+    which refuses bad ones before any Confirm."""
     s = re.sub(r"\s+", " ", (text or "").strip())
     if not s:
         return None
@@ -843,6 +1016,15 @@ def parse_promo_create_command(text: str):
             percent = int(pm.group(1))
         except ValueError:
             percent = None
+    fixed_etb = None
+    # A fixed amount: "100 ETB" / "100 birr" — not "100 uses"
+    # (max uses is parsed separately below).
+    fm = re.search(r"(\d+(?:\.\d+)?)\s*(?:ETB|birr)\b", rest, re.IGNORECASE)
+    if fm:
+        try:
+            fixed_etb = float(fm.group(1))
+        except ValueError:
+            fixed_etb = None
     expires_at = None
     em = re.search(
         r"expir(?:y|es)?\s+(\d{4}-\d{2}-\d{2})", rest, re.IGNORECASE
@@ -861,17 +1043,60 @@ def parse_promo_create_command(text: str):
     return {
         "code": code,
         "percent": percent,
+        "fixed_etb": fixed_etb,
         "expires_at": expires_at,
         "max_uses": max_uses,
     }
 
 
+def parse_promo_list_command(text: str):
+    """"/promo list" / "list promo codes" / "show promo codes" ->
+    True, else None. (25, 15 Nov 2026.)"""
+    s = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if re.fullmatch(r"/promo\s+list", s) or re.fullmatch(
+        r"(?:list|show|all)\s+(?:the\s+)?promo\s+codes?", s
+    ):
+        return True
+    return None
+
+
+def parse_promo_off_command(text: str):
+    """"/promo off CODE" / "turn off promo code CODE" / "disable
+    promo code CODE" -> {"code": "CODE"}, else None.
+    (25, 15 Nov 2026.)"""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    m = re.search(
+        r"(?:/promo\s+off|turn\s+off|disable|deactivate)\s+(?:promo\s+code\s+)?([A-Za-z0-9]+)",
+        s,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    return {"code": m.group(1).strip().upper()}
+
+
+def parse_dispute_close_command(text: str):
+    """"/disputes close 3" / "close dispute #3" / "close dispute 3"
+    -> {"dispute_id": 3}, else None. (15, 15 Nov 2026.)"""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    m = re.search(
+        r"close\s+dispute\s+#?(\d+)", s, re.IGNORECASE
+    )
+    if not m:
+        return None
+    try:
+        return {"dispute_id": int(m.group(1))}
+    except ValueError:
+        return None
+
+
 def validate_promo_create(parsed: dict):
     """Client-side promo-code validation, before any Confirm.
-    Returns a plain refusal, or None when the code + percent are
-    usable. Code: letters + digits only, 4–20 chars. Percent:
-    1–100. Expiry must be a real date, not in the past. Max uses
-    must be at least 1."""
+    Returns a plain refusal, or None when the code + bonus are
+    usable. Code: letters + digits only, 4–20 chars. Bonus:
+    EITHER a percent (1–100) OR a fixed ETB amount (>= 1) —
+    never both, never neither. Expiry must be a real date, not in
+    the past. Max uses must be at least 1."""
     code = (parsed.get("code") or "").strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{4,20}", code):
         return (
@@ -879,13 +1104,24 @@ def validate_promo_create(parsed: dict):
             "for example PAXYO20."
         )
     percent = parsed.get("percent")
-    if percent is None:
+    fixed_etb = parsed.get("fixed_etb")
+    if percent is not None and fixed_etb is not None:
         return (
-            "Tell me the percent too — for example "
-            f"\"create promo code {code} 10%\"."
+            "Pick one bonus for the code — a percent (for example "
+            f"\"create promo code {code} 10%\") or a fixed amount "
+            f"(for example \"create promo code {code} 100 ETB\"), "
+            "not both."
         )
-    if percent < 1 or percent > 100:
+    if percent is None and fixed_etb is None:
+        return (
+            "Tell me the bonus too — a percent, for example "
+            f"\"create promo code {code} 10%\", or a fixed amount, "
+            f"for example \"create promo code {code} 100 ETB\"."
+        )
+    if percent is not None and (percent < 1 or percent > 100):
         return "The percent must be between 1 and 100."
+    if fixed_etb is not None and fixed_etb < 1:
+        return "The fixed amount must be at least 1 ETB."
     expires_at = parsed.get("expires_at")
     if expires_at:
         try:
@@ -1177,14 +1413,18 @@ def answer_stats(stats, question: dict) -> str:
     return "\n".join(lines)
 
 
-def format_morning_report(stats) -> str:
+def format_morning_report(stats, satisfaction=None) -> str:
     """Yesterday's money report from a /admin/stats record fetched
     with day="yesterday". All five figures come from the record;
     a missing figure says so, never invented. The window is
     labelled from the response's own `from`/`date` fields, so the
     label is honest whatever window the server actually returned:
     "Yesterday (2026-11-14)" when the server sent day=yesterday,
-    otherwise the same Today / Last N days label as answer_stats."""
+    otherwise the same Today / Last N days label as answer_stats.
+    A satisfaction record (20, 15 Nov 2026), when given, adds the
+    👍/👎 score line; when it is None the line is left out (the
+    morning send fetches it separately and only adds it when the
+    endpoint answers)."""
     stats = stats or {}
     if stats.get("day") == "yesterday":
         when = str(stats.get("from") or stats.get("date") or "yesterday")
@@ -1218,6 +1458,198 @@ def format_morning_report(stats) -> str:
         lines.append(deposits_line)
     else:
         lines.append("Deposits: not available yet.")
+    if satisfaction is not None:
+        lines.append(format_satisfaction_line(satisfaction))
+    return "\n".join(lines)
+
+
+def format_satisfaction_line(data) -> str:
+    """One satisfaction line from a /satisfaction record (20):
+    "Satisfaction: 85% positive (17 of 20)". A record with no
+    ratings yet says so, never a 0% that would read as all-bad."""
+    data = data or {}
+    total = int(data.get("total") or 0)
+    if total <= 0:
+        return "Satisfaction: no feedback yet."
+    positive = int(data.get("positive") or 0)
+    percent = data.get("percent_positive")
+    if percent is None:
+        percent = round(100 * positive / total)
+    return (
+        f"Satisfaction: {int(percent)}% positive "
+        f"({positive} of {total})"
+    )
+
+
+def format_disputes(data) -> str:
+    """The open disputes (15, 15 Nov 2026): one line each — id,
+    order, user, their words (truncated). No open disputes says
+    so; a missing endpoint says so."""
+    if data is None:
+        return (
+            "The disputes list is not connected yet — the endpoint "
+            "is not live on the server."
+        )
+    disputes = data.get("disputes") or []
+    if not disputes:
+        return "No open disputes."
+    lines = [f"Open disputes ({len(disputes)}):"]
+    for d in disputes:
+        who = d.get("username") or d.get("telegram_id") or "?"
+        order = d.get("order_id")
+        order_part = f"order #{order}" if order is not None else "no order"
+        message = str(d.get("message") or "")[:120]
+        lines.append(
+            f"#{d.get('id')} — {order_part} — {who}: {message}"
+        )
+    lines.append("Close one with: close dispute #<id>")
+    return "\n".join(lines)
+
+
+def format_profitable(data) -> str:
+    """The most profitable services (16, 15 Nov 2026): top 10 by
+    profit (revenue minus provider cost at the 200 ETB per USD
+    buy rate). Profit and revenue come from the server, never
+    computed here."""
+    if data is None:
+        return (
+            "The profitable list is not connected yet — the "
+            "endpoint is not live on the server."
+        )
+    services = data.get("services") or []
+    if not services:
+        return "No orders yet, so there is nothing profitable to rank."
+    lines = ["Most profitable services:"]
+    for i, s in enumerate(services[:10], 1):
+        name = s.get("service_name") or f"service {s.get('service_id')}"
+        lines.append(
+            f"{i}. {name} — "
+            f"{format_money(s.get('revenue_etb') or 0)} ETB revenue, "
+            f"{format_money(s.get('profit_etb') or 0)} ETB profit "
+            f"({int(s.get('orders') or 0)} orders)"
+        )
+    return "\n".join(lines)
+
+
+def format_deposits_by_method(data) -> str:
+    """Deposits broken down by method (18, 15 Nov 2026): last 7
+    days + all time, one line per method. Only completed deposits
+    count (the server counts those)."""
+    if data is None:
+        return (
+            "The deposit-method report is not connected yet — the "
+            "endpoint is not live on the server."
+        )
+    methods = data.get("methods") or []
+    if not methods:
+        return "No completed deposits yet."
+    lines = ["Deposits by method (completed):"]
+    for m in methods:
+        lines.append(
+            f"{m.get('method') or '?'} — last 7 days: "
+            f"{int(m.get('count_7d') or 0)} "
+            f"({format_money(m.get('amount_7d') or 0)} ETB); "
+            f"all time: {int(m.get('count_all') or 0)} "
+            f"({format_money(m.get('amount_all') or 0)} ETB)"
+        )
+    return "\n".join(lines)
+
+
+def _pct_change(this_value, last_value):
+    """Percent change from last week to this week, or None when
+    there is no last-week figure to compare against."""
+    try:
+        this_value = float(this_value)
+        last_value = float(last_value)
+    except (TypeError, ValueError):
+        return None
+    if last_value == 0:
+        return None
+    return round(100 * (this_value - last_value) / last_value)
+
+
+def format_weekly_report(data) -> str:
+    """The weekly growth report (27, 15 Nov 2026): this week vs
+    last week (EAT Monday–Sunday), with the % change where a
+    last-week figure exists. All figures come from the server."""
+    if data is None:
+        return (
+            "The weekly report is not connected yet — the endpoint "
+            "is not live on the server."
+        )
+    this_week = data.get("this_week") or {}
+    last_week = data.get("last_week") or {}
+    changes = data.get("changes") or {}
+
+    def change_line(label, key, money=False):
+        this_value = this_week.get(key)
+        last_value = last_week.get(key)
+        pct = changes.get(key + "_pct")
+        if pct is None:
+            pct = _pct_change(this_value, last_value)
+        if money:
+            this_text = format_money(this_value or 0)
+            last_text = format_money(last_value or 0)
+        else:
+            this_text = str(int(this_value or 0))
+            last_text = str(int(last_value or 0))
+        line = f"{label}: {this_text} (last week: {last_text}"
+        if pct is None:
+            line += ")"
+        else:
+            sign = "+" if pct >= 0 else ""
+            line += f", {sign}{pct}%)"
+        return line
+
+    window = this_week.get("from") and this_week.get("to")
+    lines = [
+        (
+            f"Weekly growth ({this_week.get('from')} to "
+            f"{this_week.get('to')}):"
+        )
+        if window
+        else "Weekly growth:",
+        change_line("New users", "users"),
+        change_line("Orders", "orders"),
+        change_line("Revenue", "revenue_etb", money=True),
+        change_line("Net profit", "net_profit_etb", money=True),
+    ]
+    if "deposits_count" in this_week:
+        lines.append(
+            change_line("Deposits", "deposits_count")
+            + f" ({format_money(this_week.get('deposits_etb') or 0)} ETB)"
+        )
+    return "\n".join(lines)
+
+
+def format_promo_codes(data) -> str:
+    """Every promo code (25, 15 Nov 2026): code, bonus, active or
+    off, expiry, uses. Inactive codes are shown too, marked off —
+    William can see what he turned off."""
+    if data is None:
+        return (
+            "The promo-code list is not connected yet — the "
+            "endpoint is not live on the server."
+        )
+    codes = data.get("codes") or []
+    if not codes:
+        return "No promo codes yet."
+    lines = [f"Promo codes ({len(codes)}):"]
+    for c in codes:
+        if c.get("percent") is not None:
+            bonus = f"{c['percent']}%"
+        elif c.get("fixed_etb") is not None:
+            bonus = f"{format_money(c.get('fixed_etb'))} ETB"
+        else:
+            bonus = "?"
+        state = "active" if c.get("active") else "off"
+        parts = [f"{c.get('code')} — {bonus} — {state}"]
+        if c.get("expires_at"):
+            parts.append(f"expires {str(c['expires_at'])[:10]}")
+        if c.get("max_uses") is not None:
+            used = c.get("used") or 0
+            parts.append(f"uses {used}/{c['max_uses']}")
+        lines.append(" ".join(parts))
     return "\n".join(lines)
 
 
@@ -1363,8 +1795,13 @@ def _promo_preview(pending: dict) -> str:
     lines = [
         "Create this promo code?",
         f"Code: {pending['code']}",
-        f"Bonus: {pending['percent']}% on a deposit",
     ]
+    if pending.get("percent") is not None:
+        lines.append(f"Bonus: {pending['percent']}% on a deposit")
+    elif pending.get("fixed_etb") is not None:
+        lines.append(
+            f"Bonus: {format_money(pending['fixed_etb'])} ETB on a deposit"
+        )
     if pending.get("expires_at"):
         lines.append(f"Expires: {str(pending['expires_at'])[:10]}")
     if pending.get("max_uses") is not None:
@@ -1373,11 +1810,26 @@ def _promo_preview(pending: dict) -> str:
     return "\n".join(lines)
 
 
+def _dispute_preview(pending: dict) -> str:
+    """Close-dispute preview (15): the dispute id + order + the
+    user's words, shown BEFORE anything closes."""
+    lines = [
+        "Close this dispute?",
+        f"Dispute: #{pending['dispute_id']}",
+    ]
+    if pending.get("order_id") is not None:
+        lines.append(f"Order: #{pending['order_id']}")
+    if pending.get("message"):
+        lines.append(f"Message: {str(pending['message'])[:120]}")
+    lines += ["", "Tap Confirm to close it, or Cancel."]
+    return "\n".join(lines)
+
+
 async def _execute_pending(user_id: int, context) -> str:
     """Run a confirmed pending change (broadcast send, setting
-    write, order refund, or promo-code creation) and return the
-    one-line outcome. Clears the pending entry first, so a double
-    tap cannot run it twice."""
+    write, order refund, promo-code creation, or dispute close)
+    and return the one-line outcome. Clears the pending entry
+    first, so a double tap cannot run it twice."""
     pending = PENDING.pop(user_id, None)
     if pending is None:
         return "Nothing to confirm."
@@ -1446,9 +1898,10 @@ async def _execute_pending(user_id: int, context) -> str:
         try:
             result = await admin_api.create_promo_code(
                 pending["code"],
-                pending["percent"],
+                percent=pending.get("percent"),
                 expires_at=pending.get("expires_at"),
                 max_uses=pending.get("max_uses"),
+                fixed_etb=pending.get("fixed_etb"),
             )
         except httpx.HTTPStatusError as exc:
             return _promo_error_text(pending, exc)
@@ -1460,15 +1913,55 @@ async def _execute_pending(user_id: int, context) -> str:
                 "The promo-code endpoint is not connected yet — "
                 "nothing was created."
             )
+        if pending.get("percent") is not None:
+            bonus = f"{pending['percent']}% bonus on a deposit"
+        else:
+            bonus = (
+                f"{format_money(pending.get('fixed_etb'))} ETB bonus "
+                "on a deposit"
+            )
         lines = [
-            f"✅ Promo code {pending['code']} created — "
-            f"{pending['percent']}% bonus on a deposit."
+            f"✅ Promo code {pending['code']} created — {bonus}."
         ]
         if result.get("expires_at"):
             lines.append(f"Expires: {str(result['expires_at'])[:10]}")
         if result.get("max_uses") is not None:
             lines.append(f"Max uses: {result['max_uses']}")
         return "\n".join(lines)
+    if pending["kind"] == "dispute_close":
+        # Close the dispute (15): the server marks it closed; an
+        # already-closed dispute 404s and says so honestly.
+        try:
+            result = await admin_api.close_dispute(pending["dispute_id"])
+        except httpx.HTTPStatusError as exc:
+            log.warning("close_dispute failed: %s", exc)
+            return "Could not close the dispute — please try again."
+        except Exception as exc:
+            log.warning("close_dispute failed: %s", exc)
+            return "Could not close the dispute — please try again."
+        if result is None:
+            return (
+                "The disputes endpoint is not connected yet — "
+                "nothing was closed."
+            )
+        return f"✅ Dispute #{pending['dispute_id']} closed."
+    if pending["kind"] == "promo_off":
+        # Turn a promo code off (25): the server deactivates it;
+        # an unknown code 404s and says so honestly.
+        try:
+            result = await admin_api.promo_off(pending["code"])
+        except httpx.HTTPStatusError as exc:
+            log.warning("promo_off failed: %s", exc)
+            return "Could not turn off the promo code — please try again."
+        except Exception as exc:
+            log.warning("promo_off failed: %s", exc)
+            return "Could not turn off the promo code — please try again."
+        if result is None:
+            return (
+                "The promo-code endpoint is not connected yet — "
+                "nothing was turned off."
+            )
+        return f"✅ Promo code {pending['code']} is now off."
     # setting
     try:
         result = await admin_api.set_setting(pending["key"], pending["value"])
@@ -1569,7 +2062,16 @@ async def send_morning_report_once(app, now=None) -> bool:
     if stats is None:
         log.warning("Morning report not connected yet — stats endpoint 404.")
         return False
-    text = format_morning_report(stats)
+    # Satisfaction (20, 15 Nov 2026): the morning report carries
+    # the 👍/👎 score line when the endpoint answers; when it does
+    # not (404, not live yet) the line is simply left out — the
+    # money figures still go out.
+    try:
+        satisfaction = await admin_api.satisfaction()
+    except Exception as exc:
+        log.warning("morning satisfaction failed: %s", exc)
+        satisfaction = None
+    text = format_morning_report(stats, satisfaction)
     for admin_id in sorted(ADMIN_TELEGRAM_IDS):
         try:
             await app.bot.send_message(chat_id=admin_id, text=text)
@@ -1611,10 +2113,111 @@ async def morning_report_loop(app):
             log.warning("Morning report loop failed: %s", exc)
 
 
+# ------------------------------------------------------- weekly report (27) ---
+
+# In-memory fallback for the weekly sent marker (the Monday's date),
+# used only while the server endpoint 404s — same shape as
+# MORNING_SENT_DATES.
+WEEKLY_SENT_MONDAYS = set()
+
+
+def _monday_of_week(now: datetime) -> date:
+    """The Monday (EAT date) of the week `now` falls in."""
+    return (now.date() - timedelta(days=now.weekday()))
+
+
+def should_send_weekly(now: datetime, sent_this_week: bool) -> bool:
+    """Pure once-a-week gate (27): send only on a Monday at/after
+    08:00 EAT, and only when this week's Monday has not been sent
+    yet. `now` is an EAT datetime."""
+    if sent_this_week:
+        return False
+    return now.weekday() == 0 and now.hour >= 8
+
+
+async def send_weekly_report_once(app, now=None) -> bool:
+    """One weekly-report attempt: this week vs last week, to every
+    ADMIN_TELEGRAM_IDS id, at most once per week (keyed on the
+    Monday's date). Mirrors send_morning_report_once: the sent
+    marker is checked AND written server-side (GET/POST
+    /admin/weekly-sent) so a restart after 8am Monday cannot
+    double-send; when that endpoint 404s (not live yet) the
+    in-memory WEEKLY_SENT_MONDAYS set is the fallback. Nothing is
+    sent before Monday 8am EAT, nothing is sent when the week is
+    already marked, and nothing is marked when the weekly endpoint
+    is not connected yet (so the next wake retries instead of
+    losing the week). Returns True when the report was sent."""
+    now = now or datetime.now(EAT_TZ)
+    monday = _monday_of_week(now).isoformat()
+    server_marker = None
+    try:
+        server_marker = await admin_api.weekly_sent(monday)
+    except Exception as exc:
+        log.warning("weekly_sent check failed: %s", exc)
+    if server_marker is None:
+        log.warning(
+            "Weekly-sent endpoint not connected yet — using the "
+            "in-memory marker only for %s.",
+            monday,
+        )
+        sent_this_week = monday in WEEKLY_SENT_MONDAYS
+    else:
+        sent_this_week = bool(server_marker.get("sent"))
+    if not should_send_weekly(now, sent_this_week):
+        return False
+    try:
+        data = await admin_api.weekly_stats()
+    except Exception as exc:
+        log.warning("weekly_stats failed: %s", exc)
+        return False
+    if data is None:
+        log.warning("Weekly report not connected yet — weekly endpoint 404.")
+        return False
+    text = format_weekly_report(data)
+    for admin_id in sorted(ADMIN_TELEGRAM_IDS):
+        try:
+            await app.bot.send_message(chat_id=admin_id, text=text)
+        except Exception as exc:
+            log.warning("Weekly report send to %s failed: %s", admin_id, exc)
+    WEEKLY_SENT_MONDAYS.add(monday)
+    try:
+        await admin_api.mark_weekly_sent(monday)
+    except Exception as exc:
+        log.warning("mark_weekly_sent failed: %s", exc)
+    return True
+
+
+def _seconds_until_next_monday_8am_eat(now=None) -> float:
+    """Seconds from `now` (EAT) until the next Monday 08:00 EAT.
+    Pure helper so the schedule is testable: on a Monday before
+    8am it is today 08:00, otherwise the coming Monday 08:00."""
+    now = now or datetime.now(EAT_TZ)
+    days_ahead = (0 - now.weekday()) % 7
+    target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    target += timedelta(days=days_ahead)
+    if target <= now:
+        target += timedelta(days=7)
+    return (target - now).total_seconds()
+
+
+async def weekly_report_loop(app):
+    """Background loop: sleep until the next Monday 08:00 EAT,
+    send the weekly report once, then sleep until the next
+    Monday's 08:00. Same shape as the morning loop (a proper
+    schedule, not a poll)."""
+    while True:
+        await asyncio.sleep(_seconds_until_next_monday_8am_eat())
+        try:
+            await send_weekly_report_once(app)
+        except Exception as exc:
+            log.warning("Weekly report loop failed: %s", exc)
+
+
 async def _post_init(app):
     """Application post_init hook: start the morning-report loop.
     Polling has no job queue, so the loop is an asyncio task."""
     asyncio.create_task(morning_report_loop(app))
+    asyncio.create_task(weekly_report_loop(app))
 
 
 # ---------------------------------------------------------------- handlers ---
@@ -1632,12 +2235,24 @@ CAPABILITIES = (
     "you confirm, the full total goes back to the user's Paxyo "
     "balance, never cash)\n"
     "• Create a promo code — \"Create promo code PAXYO20 20%\" "
-    "(you confirm first)\n"
+    "(you confirm first; a fixed amount works too — "
+    "\"Create promo code FLAT100 100 ETB\")\n"
     "• Win back quiet users — /winbacks (I show the count first, "
     "you confirm, then each gets one personal message)\n"
     "• Morning money report — /morning (yesterday's revenue, net "
     "profit, new users, top service, deposits; also sent "
-    "automatically once a day at 8am)\n\n"
+    "automatically once a day at 8am)\n"
+    "• Disputes — /disputes (open problems from users; close one "
+    "with \"close dispute #<id>\", you confirm first)\n"
+    "• Most profitable services — /profitable (top 10 by profit)\n"
+    "• Deposits by method — /deposits-by-method (Telebirr, CBE, "
+    "M-Pesa, CBE Birr; last 7 days + all time)\n"
+    "• Satisfaction — /satisfaction (the 👍/👎 feedback score; "
+    "also in the morning report)\n"
+    "• Weekly growth — /weekly (this week vs last week; also sent "
+    "automatically once a week, Monday 8am)\n"
+    "• Promo codes — /promo list (every code) and /promo off CODE "
+    "(turn a code off, you confirm first)\n\n"
     "Refunds go through the Confirm-gated admin-refund endpoint, "
     "once, never twice, never for completed orders."
 )
@@ -1713,7 +2328,179 @@ async def morning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "endpoint is not live on the server."
         )
         return
-    await update.message.reply_text(format_morning_report(stats))
+    try:
+        satisfaction = await admin_api.satisfaction()
+    except Exception as exc:
+        log.warning("morning satisfaction failed: %s", exc)
+        satisfaction = None
+    await update.message.reply_text(
+        format_morning_report(stats, satisfaction)
+    )
+
+
+async def disputes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /disputes — the open disputes (15, 15 Nov 2026), newest
+    first. Close one with "close dispute #<id>" (Confirm first)."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
+    try:
+        data = await admin_api.disputes()
+    except Exception as exc:
+        log.warning("disputes failed: %s", exc)
+        await update.message.reply_text(
+            "Could not load the disputes — please try again."
+        )
+        return
+    await update.message.reply_text(format_disputes(data))
+
+
+async def profitable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /profitable — the services earning the most (16, 15 Nov
+    2026), top 10 by profit."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
+    try:
+        data = await admin_api.profitable()
+    except Exception as exc:
+        log.warning("profitable failed: %s", exc)
+        await update.message.reply_text(
+            "Could not load the profitable services — please try again."
+        )
+        return
+    await update.message.reply_text(format_profitable(data))
+
+
+async def deposits_by_method_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /deposits-by-method — completed deposits broken down by
+    method (18, 15 Nov 2026), last 7 days + all time."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
+    try:
+        data = await admin_api.deposits_by_method()
+    except Exception as exc:
+        log.warning("deposits_by_method failed: %s", exc)
+        await update.message.reply_text(
+            "Could not load the deposit-method report — please try again."
+        )
+        return
+    await update.message.reply_text(format_deposits_by_method(data))
+
+
+async def satisfaction_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /satisfaction — the 👍/👎 feedback score (20, 15 Nov 2026):
+    % positive out of all feedback so far."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
+    try:
+        data = await admin_api.satisfaction()
+    except Exception as exc:
+        log.warning("satisfaction failed: %s", exc)
+        await update.message.reply_text(
+            "Could not load the satisfaction score — please try again."
+        )
+        return
+    if data is None:
+        await update.message.reply_text(
+            "The satisfaction score is not connected yet — the "
+            "endpoint is not live on the server."
+        )
+        return
+    await update.message.reply_text(format_satisfaction_line(data))
+
+
+async def weekly_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /weekly — this week vs last week (27, 15 Nov 2026), on
+    demand. Also sent automatically once a week, Monday 8am."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
+    try:
+        data = await admin_api.weekly_stats()
+    except Exception as exc:
+        log.warning("weekly_stats failed: %s", exc)
+        await update.message.reply_text(
+            "Could not load the weekly report — please try again."
+        )
+        return
+    await update.message.reply_text(format_weekly_report(data))
+
+
+async def promo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /promo list — every promo code (25, 15 Nov 2026).
+    /promo off CODE — turn a code off (Confirm first).
+    Bare /promo explains the two."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
+    args = (context.args or [])
+    if not args:
+        await update.message.reply_text(
+            "Promo codes:\n"
+            "• /promo list — every code, active and off\n"
+            "• /promo off CODE — turn a code off (you confirm first)\n"
+            "• Create one with: create promo code CODE 10% "
+            "(or 100 ETB for a fixed amount)"
+        )
+        return
+    sub = (args[0] or "").strip().lower()
+    if sub == "list":
+        try:
+            data = await admin_api.promo_codes()
+        except Exception as exc:
+            log.warning("promo_codes failed: %s", exc)
+            await update.message.reply_text(
+                "Could not load the promo codes — please try again."
+            )
+            return
+        await update.message.reply_text(format_promo_codes(data))
+        return
+    if sub == "off":
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Which code? For example: /promo off PAXYO20"
+            )
+            return
+        code = args[1].strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{4,20}", code):
+            await update.message.reply_text(
+                "That code doesn't look right — use 4–20 letters "
+                "and digits, for example PAXYO20."
+            )
+            return
+        PENDING[user.id] = {"kind": "promo_off", "code": code}
+        await update.message.reply_text(
+            f"Turn off promo code {code}?\n\n"
+            "Tap Confirm to turn it off, or Cancel.",
+            reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+    await update.message.reply_text(
+        "Promo codes:\n"
+        "• /promo list — every code, active and off\n"
+        "• /promo off CODE — turn a code off (you confirm first)"
+    )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1731,7 +2518,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/winbacks messages users with no order in 14+ days "
         "(count first, you confirm). /morning shows yesterday's "
         "money report — it is also sent automatically once a day "
-        "at 8am."
+        "at 8am. /weekly shows this week vs last week — it is also "
+        "sent automatically once a week, Monday 8am. /disputes "
+        "lists open problems from users. /profitable, "
+        "/deposits-by-method and /satisfaction show the most "
+        "profitable services, deposits by payment method, and the "
+        "feedback score."
     )
 
 
@@ -1912,7 +2704,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 5. Promo-code creation — deterministic, Confirm required.
-    #    Bad codes / percents are refused here, before any Confirm.
+    #    Bad codes / bonuses are refused here, before any Confirm.
     promo = parse_promo_create_command(text)
     if promo is not None:
         problem = validate_promo_create(promo)
@@ -1922,12 +2714,85 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         PENDING[user.id] = {
             "kind": "promo",
             "code": promo["code"],
-            "percent": promo["percent"],
+            "percent": promo.get("percent"),
+            "fixed_etb": promo.get("fixed_etb"),
             "expires_at": promo.get("expires_at"),
             "max_uses": promo.get("max_uses"),
         }
         await update.message.reply_text(
             _promo_preview(PENDING[user.id]),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+
+    # 5a. Promo-code list / off in plain language (25) — "list
+    # promo codes", "turn off promo code PAXYO20". The off path is
+    # Confirm-gated like every other change; the list is a read.
+    if parse_promo_list_command(text) is not None:
+        try:
+            data = await admin_api.promo_codes()
+        except Exception as exc:
+            log.warning("promo_codes failed: %s", exc)
+            await update.message.reply_text(
+                "Could not load the promo codes — please try again."
+            )
+            return
+        await update.message.reply_text(format_promo_codes(data))
+        return
+    promo_off = parse_promo_off_command(text)
+    if promo_off is not None:
+        code = promo_off["code"]
+        if not re.fullmatch(r"[A-Z0-9]{4,20}", code):
+            await update.message.reply_text(
+                "That code doesn't look right — use 4–20 letters "
+                "and digits, for example PAXYO20."
+            )
+            return
+        PENDING[user.id] = {"kind": "promo_off", "code": code}
+        await update.message.reply_text(
+            f"Turn off promo code {code}?\n\n"
+            "Tap Confirm to turn it off, or Cancel.",
+            reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+
+    # 5b. Close a dispute in plain language (15) — "close dispute
+    # #3". Confirm-gated like every other change; the preview
+    # shows the dispute's own words (looked up first, so a wrong
+    # id says so instead of confirming blind).
+    dispute_close = parse_dispute_close_command(text)
+    if dispute_close is not None:
+        dispute_id = dispute_close["dispute_id"]
+        try:
+            data = await admin_api.disputes()
+        except Exception as exc:
+            log.warning("disputes failed: %s", exc)
+            await update.message.reply_text(
+                "Could not load the disputes — please try again."
+            )
+            return
+        found = None
+        if data is not None:
+            for d in data.get("disputes") or []:
+                try:
+                    if int(d.get("id")) == dispute_id:
+                        found = d
+                        break
+                except (TypeError, ValueError):
+                    continue
+        if found is None:
+            await update.message.reply_text(
+                f"There is no open dispute #{dispute_id}."
+            )
+            return
+        PENDING[user.id] = {
+            "kind": "dispute_close",
+            "dispute_id": dispute_id,
+            "order_id": found.get("order_id"),
+            "message": found.get("message"),
+        }
+        await update.message.reply_text(
+            _dispute_preview(PENDING[user.id]),
             reply_markup=CONFIRM_KEYBOARD,
         )
         return
@@ -2005,6 +2870,12 @@ def build_application():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("winbacks", winbacks_cmd))
     app.add_handler(CommandHandler("morning", morning_cmd))
+    app.add_handler(CommandHandler("disputes", disputes_cmd))
+    app.add_handler(CommandHandler("profitable", profitable_cmd))
+    app.add_handler(CommandHandler("deposits-by-method", deposits_by_method_cmd))
+    app.add_handler(CommandHandler("satisfaction", satisfaction_cmd))
+    app.add_handler(CommandHandler("weekly", weekly_cmd))
+    app.add_handler(CommandHandler("promo", promo_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback))
     return app
