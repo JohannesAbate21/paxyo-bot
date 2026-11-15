@@ -2121,5 +2121,40 @@ class TestPasswordGate(PasswordGateBase):
             self.assertEqual(fake.stats_days_seen, [1])
 
 
+class TestEnsureEventLoop(unittest.TestCase):
+    """Regression: atlas-desk-bot first deploy crashed on Render with
+    RuntimeError: There is no current event loop in thread 'MainThread'
+    (Python 3.14, 15 Nov 2026) — run_polling() needs a loop in the main
+    thread. _ensure_event_loop() must create one when missing."""
+
+    def test_creates_loop_in_thread_without_one(self):
+        import threading
+
+        errors = []
+
+        def _run():
+            try:
+                try:
+                    asyncio.get_event_loop()
+                    self.fail("expected no event loop in a fresh thread")
+                except RuntimeError:
+                    pass
+                admin_bot._ensure_event_loop()
+                loop = asyncio.get_event_loop()
+                self.assertIsNotNone(loop)
+                self.assertFalse(loop.is_closed())
+                # Calling it again with a loop present is a no-op.
+                admin_bot._ensure_event_loop()
+                self.assertIs(asyncio.get_event_loop(), loop)
+                loop.close()
+            except Exception as exc:  # noqa: BLE001 - re-raised on main thread
+                errors.append(exc)
+
+        thread = threading.Thread(target=_run)
+        thread.start()
+        thread.join()
+        self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()

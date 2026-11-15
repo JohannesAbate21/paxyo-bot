@@ -2010,6 +2010,17 @@ def build_application():
     return app
 
 
+def _ensure_event_loop():
+    """Python 3.14 removed the implicit event loop: run_polling() calls
+    asyncio.get_event_loop() and crashes with RuntimeError when the main
+    thread has none (atlas-desk-bot first deploy, Render, 15 Nov 2026).
+    Create + set one if missing."""
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
 def main():
     missing = [
         name
@@ -2041,6 +2052,7 @@ def main():
         port,
         "DeepSeek" if DEEPSEEK_API_KEY else ("Gemini" if GEMINI_API_KEY else "none"),
     )
+    _ensure_event_loop()
     app.run_polling()
 
 
