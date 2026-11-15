@@ -13,10 +13,18 @@ minted only on Confirm, exact server messages for success /
 duplicate / 409 / 502 / 404 / 403, double-Confirm runs once), the
 promo-code creation flow (preview, Confirm posts the right body,
 bad codes / percents refused before Confirm, 409 duplicate shown
-plainly), and the free-form AI fallback (no key -> short reply;
-the AI is never called for a broadcast, a setting change, a refund
-or a promo-code creation). No network calls, no Telegram
-connection, no real messages sent.
+plainly), the win-back flow (/winbacks: count shown, Confirm
+required, one personal message each naming the usual service,
+sends recorded, zero audience / 404 / non-admin handled,
+double-Confirm sends once), the morning money report (/morning:
+yesterday's five figures from a seeded stats record labelled
+from the response's own date fields, 404 -> "not connected yet",
+and the once-a-day background gate: before 8am nothing, already
+sent today nothing, stats 404 marks nothing, server marker down
+falls back to the in-memory marker), and the free-form AI fallback
+(no key -> short reply; the AI is never called for a broadcast, a
+setting change, a refund or a promo-code creation). No network
+calls, no Telegram connection, no real messages sent.
 """
 
 import asyncio
@@ -25,6 +33,7 @@ import hmac
 import os
 import sys
 import unittest
+from datetime import datetime
 from unittest import mock
 
 import httpx
@@ -56,6 +65,29 @@ STATS = {
     "deposits_count": 4,
     "deposits_etb": 1250.00,
 }
+
+STATS_YESTERDAY = {
+    "date": "2026-11-15",
+    "from": "2026-11-14",
+    "days": 1,
+    "day": "yesterday",
+    "orders": 12,
+    "completed": 9,
+    "revenue_etb": 420.00,
+    "net_profit_etb": 220.00,
+    "new_users": 3,
+    "top_service": "TikTok Video Views",
+    "top_quantity": 5400,
+    "deposits_count": 4,
+    "deposits_etb": 1250.00,
+}
+
+WINBACK_USERS = [
+    {"telegram_id": 1, "usual_service": "TikTok Video Views",
+     "usual_quantity": 1000},
+    {"telegram_id": 2, "usual_service": "Instagram Followers",
+     "usual_quantity": 500},
+]
 
 STATS_7D = {
     "date": "2026-11-15",
@@ -195,11 +227,14 @@ class FakeAdminPaxyo:
                  refund_result=None, refund_error=None,
                  refund_error_body=None,
                  promo_result=None, promo_error=None,
-                 promo_error_body=None):
+                 promo_error_body=None,
+                 winbacks=None, winback_none=False, record_none=False,
+                 morning_sent_map=None, morning_none=False):
         self._stats = stats
         self._stats_none = stats_none
         self._stats_by_days = dict(stats_by_days or {})
         self.stats_days_seen = []
+        self.stats_day_seen = []
         self._audience = dict(audience or {})
         self._audience_none = audience_none
         self._services = list(services) if services is not None else SERVICES
@@ -216,9 +251,19 @@ class FakeAdminPaxyo:
         self._promo_result = promo_result
         self._promo_error = promo_error
         self._promo_error_body = promo_error_body
+        self._winbacks = winbacks
+        self._winback_none = winback_none
+        self._record_none = record_none
+        self.winback_days_seen = []
+        self.recorded_winbacks = []
+        self._morning_sent_map = dict(morning_sent_map or {})
+        self._morning_none = morning_none
+        self.morning_sent_dates_seen = []
+        self.morning_marked = []
 
-    async def admin_stats(self, days=1):
+    async def admin_stats(self, days=1, day=None):
         self.stats_days_seen.append(days)
+        self.stats_day_seen.append(day)
         if self._stats_none:
             return None
         if days in self._stats_by_days:
@@ -296,17 +341,60 @@ class FakeAdminPaxyo:
             "max_uses": max_uses,
         }
 
+    async def winback_audience(self, days=14):
+        self.winback_days_seen.append(days)
+        if self._winback_none:
+            return None
+        if self._winbacks is not None:
+            return self._winbacks
+        return {"days": days, "count": 0, "users": []}
+
+    async def record_winbacks(self, telegram_ids):
+        self.recorded_winbacks.append(list(telegram_ids))
+        if self._record_none:
+            return None
+        return {"ok": True, "recorded": len(telegram_ids)}
+
+    async def morning_sent(self, date_str):
+        self.morning_sent_dates_seen.append(date_str)
+        if self._morning_none:
+            return None
+        return {
+            "date": date_str,
+            "sent": bool(self._morning_sent_map.get(date_str, False)),
+        }
+
+    async def mark_morning_sent(self, date_str):
+        self.morning_marked.append(date_str)
+        if self._morning_none:
+            return None
+        self._morning_sent_map[date_str] = True
+        return {"ok": True, "date": date_str, "sent": True}
+
+
+class FakeApp:
+    """Stand-in for a telegram.ext.Application: only .bot is used
+    by the morning-report sender."""
+
+    def __init__(self, bot=None):
+        self.bot = bot or FakeBot()
+
 
 class AdminBotBase(unittest.IsolatedAsyncioTestCase):
     """Base: allowlist = {ADMIN_ID} only, pending state cleared."""
 
     def setUp(self):
         admin_bot.PENDING.clear()
+        admin_bot.MORNING_SENT_DATES.clear()
         self._ids_patch = mock.patch.object(
             admin_bot, "ADMIN_TELEGRAM_IDS", {ADMIN_ID}
         )
         self._ids_patch.start()
         self.addCleanup(self._ids_patch.stop)
+
+    def tearDown(self):
+        admin_bot.PENDING.clear()
+        admin_bot.MORNING_SENT_DATES.clear()
 
     def _patch_api(self, fake):
         patcher = mock.patch.object(admin_bot, "admin_api", fake)
@@ -327,6 +415,16 @@ class AdminBotBase(unittest.IsolatedAsyncioTestCase):
         update = FakeCallbackUpdate(query, FakeUser(user_id))
         await admin_bot.on_callback(update, FakeContext(bot))
         return query
+
+    async def _command(self, handler, user_id=ADMIN_ID, fake=None,
+                       bot=None):
+        """Run a /command handler (winbacks / morning) directly."""
+        if fake is not None:
+            self._patch_api(fake)
+        message = FakeMessage("")
+        update = FakeUpdate(message, FakeUser(user_id))
+        await handler(update, FakeContext(bot))
+        return message
 
 
 class TestAllowlist(AdminBotBase):
@@ -1496,6 +1594,344 @@ class TestPromoFlow(AdminBotBase):
         ):
             message = await self._text("create promo code PAXYO20 20%")
         self.assertIn("Create this promo code?", message.text_sent[0])
+
+
+class TestWinbackMessage(unittest.TestCase):
+    def test_names_usual_service(self):
+        self.assertEqual(
+            admin_bot.winback_message(WINBACK_USERS[0]),
+            "We miss you at Paxyo! You usually order "
+            "TikTok Video Views — want to order again? Just reply here.",
+        )
+
+    def test_no_usual_service_gets_generic_message(self):
+        self.assertEqual(
+            admin_bot.winback_message(
+                {"telegram_id": 9, "usual_service": "", "usual_quantity": None}
+            ),
+            "We miss you at Paxyo! Want to order again? Just reply here.",
+        )
+
+    def test_message_never_places_an_order(self):
+        for user in WINBACK_USERS:
+            text = admin_bot.winback_message(user)
+            self.assertNotIn("Confirm", text)
+            self.assertNotIn("placed", text.lower())
+            self.assertNotIn("ordered for you", text.lower())
+
+
+class TestWinbackFlow(AdminBotBase):
+    def _winback_fake(self, users):
+        return FakeAdminPaxyo(
+            stats=STATS,
+            winbacks={
+                "days": 14,
+                "count": len(users),
+                "users": list(users),
+            },
+        )
+
+    async def test_preview_shows_count_first(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        message = await self._command(
+            admin_bot.winbacks_cmd, fake=fake
+        )
+        self.assertEqual(len(message.text_sent), 1)
+        preview = message.text_sent[0]
+        self.assertIn("2 users have gone quiet", preview)
+        self.assertIn("no order in 14+ days", preview)
+        self.assertIn("Confirm", preview)
+        self.assertIsNotNone(message.markups[0])
+        self.assertEqual(
+            admin_bot.PENDING[ADMIN_ID]["kind"], "winback"
+        )
+
+    async def test_nothing_sends_before_confirm(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        bot = FakeBot()
+        await self._command(admin_bot.winbacks_cmd, fake=fake, bot=bot)
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(fake.recorded_winbacks, [])
+
+    async def test_confirm_tap_sends_personalised_and_records(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        bot = FakeBot()
+        await self._command(admin_bot.winbacks_cmd, fake=fake, bot=bot)
+        query = await self._callback("admin_confirm", bot=bot)
+        self.assertEqual(
+            bot.sent,
+            [
+                (1, "We miss you at Paxyo! You usually order "
+                    "TikTok Video Views — want to order again? "
+                    "Just reply here."),
+                (2, "We miss you at Paxyo! You usually order "
+                    "Instagram Followers — want to order again? "
+                    "Just reply here."),
+            ],
+        )
+        self.assertEqual(fake.recorded_winbacks, [[1, 2]])
+        self.assertEqual(query.edited, ["Sent to 2 users."])
+
+    async def test_typed_yes_confirms(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        bot = FakeBot()
+        await self._command(admin_bot.winbacks_cmd, fake=fake, bot=bot)
+        message = await self._text("yes", bot=bot)
+        self.assertEqual(len(bot.sent), 2)
+        self.assertEqual(message.text_sent, ["Sent to 2 users."])
+
+    async def test_failed_send_counted_and_not_recorded(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        bot = FakeBot(fail_ids={2})
+        await self._command(admin_bot.winbacks_cmd, fake=fake, bot=bot)
+        query = await self._callback("admin_confirm", bot=bot)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(bot.sent[0][0], 1)
+        # Only the user who actually got the message is recorded.
+        self.assertEqual(fake.recorded_winbacks, [[1]])
+        self.assertEqual(
+            query.edited, ["Sent to 1 users. 1 failed to deliver."]
+        )
+
+    async def test_zero_audience_sends_nothing(self):
+        fake = self._winback_fake([])
+        bot = FakeBot()
+        message = await self._command(
+            admin_bot.winbacks_cmd, fake=fake, bot=bot
+        )
+        self.assertEqual(message.text_sent, ["No users have gone quiet."])
+        self.assertEqual(bot.sent, [])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_audience_404_sends_nothing(self):
+        fake = FakeAdminPaxyo(stats=STATS, winback_none=True)
+        bot = FakeBot()
+        message = await self._command(
+            admin_bot.winbacks_cmd, fake=fake, bot=bot
+        )
+        self.assertIn("not connected yet", message.text_sent[0])
+        self.assertEqual(bot.sent, [])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_non_admin_refused(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        message = await self._command(
+            admin_bot.winbacks_cmd, user_id=OTHER_ID, fake=fake
+        )
+        self.assertEqual(message.text_sent, [admin_bot.REFUSAL])
+        self.assertEqual(fake.winback_days_seen, [])
+
+    async def test_cancel_sends_nothing(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        bot = FakeBot()
+        await self._command(admin_bot.winbacks_cmd, fake=fake, bot=bot)
+        query = await self._callback("admin_cancel", bot=bot)
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(fake.recorded_winbacks, [])
+        self.assertEqual(query.edited, ["Cancelled."])
+
+    async def test_double_confirm_sends_once(self):
+        fake = self._winback_fake(WINBACK_USERS)
+        bot = FakeBot()
+        await self._command(admin_bot.winbacks_cmd, fake=fake, bot=bot)
+        first = await self._callback("admin_confirm", bot=bot)
+        second = await self._callback("admin_confirm", bot=bot)
+        self.assertEqual(first.edited, ["Sent to 2 users."])
+        self.assertEqual(second.edited, ["Nothing to confirm."])
+        self.assertEqual(len(bot.sent), 2)
+        self.assertEqual(fake.recorded_winbacks, [[1, 2]])
+
+    async def test_duplicate_ids_collapsed(self):
+        users = WINBACK_USERS + [dict(WINBACK_USERS[0])]
+        fake = self._winback_fake(users)
+        bot = FakeBot()
+        await self._command(admin_bot.winbacks_cmd, fake=fake, bot=bot)
+        await self._callback("admin_confirm", bot=bot)
+        self.assertEqual([tid for tid, _ in bot.sent], [1, 2])
+        self.assertEqual(fake.recorded_winbacks, [[1, 2]])
+
+    async def test_commands_listed_in_capabilities(self):
+        message = FakeMessage("/start")
+        update = FakeUpdate(message, FakeUser(ADMIN_ID))
+        await admin_bot.start_cmd(update, FakeContext())
+        self.assertIn("/winbacks", message.text_sent[0])
+        self.assertIn("/morning", message.text_sent[0])
+
+
+class TestMorningReport(AdminBotBase):
+    def test_formatting_shows_all_five_figures_labelled_yesterday(self):
+        text = admin_bot.format_morning_report(STATS_YESTERDAY)
+        self.assertIn("Yesterday (2026-11-14)", text)
+        self.assertIn("Revenue: 420.00 ETB", text)
+        self.assertIn("Net profit: 220.00 ETB", text)
+        self.assertIn("New users: 3", text)
+        self.assertIn("Top service: TikTok Video Views ×5400", text)
+        self.assertIn("Deposits: 4", text)
+
+    def test_label_comes_from_response_fields(self):
+        # No "day" key: the window label falls back to the same
+        # Today / Last N days wording as answer_stats.
+        stats = dict(STATS_YESTERDAY)
+        stats.pop("day")
+        text = admin_bot.format_morning_report(stats)
+        self.assertIn("Today (2026-11-15)", text)
+
+    def test_missing_net_profit_is_honest(self):
+        stats = dict(STATS_YESTERDAY)
+        stats.pop("net_profit_etb")
+        text = admin_bot.format_morning_report(stats)
+        self.assertIn("Net profit: not available yet.", text)
+        self.assertNotIn("Net profit: 0.00", text)
+
+    def test_missing_top_service_is_honest(self):
+        stats = dict(STATS_YESTERDAY, top_service=None, top_quantity=0)
+        text = admin_bot.format_morning_report(stats)
+        self.assertIn("Top service: none yet.", text)
+
+    async def test_morning_command_passes_day_yesterday(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        message = await self._command(admin_bot.morning_cmd, fake=fake)
+        self.assertEqual(fake.stats_day_seen, ["yesterday"])
+        self.assertIn("Yesterday (2026-11-14)", message.text_sent[0])
+        self.assertIn("Net profit: 220.00 ETB", message.text_sent[0])
+
+    async def test_morning_404_is_not_connected_yet(self):
+        fake = FakeAdminPaxyo(stats_none=True)
+        message = await self._command(admin_bot.morning_cmd, fake=fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+
+    async def test_morning_non_admin_refused(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        message = await self._command(
+            admin_bot.morning_cmd, user_id=OTHER_ID, fake=fake
+        )
+        self.assertEqual(message.text_sent, [admin_bot.REFUSAL])
+        self.assertEqual(fake.stats_day_seen, [])
+
+
+class TestMorningOncePerDay(AdminBotBase):
+    def _at(self, hour, minute=0):
+        return datetime(2026, 11, 15, hour, minute, tzinfo=admin_bot.EAT_TZ)
+
+    async def _once(self, fake, app, now):
+        self._patch_api(fake)
+        return await admin_bot.send_morning_report_once(app, now=now)
+
+    def test_should_send_gate(self):
+        self.assertFalse(
+            admin_bot.should_send_morning(self._at(7, 59), False)
+        )
+        self.assertTrue(admin_bot.should_send_morning(self._at(8, 0), False))
+        self.assertTrue(admin_bot.should_send_morning(self._at(12, 30), False))
+        self.assertFalse(admin_bot.should_send_morning(self._at(9, 0), True))
+
+    async def test_before_8am_sends_nothing(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        app = FakeApp()
+        self.assertFalse(await self._once(fake, app, self._at(7, 59)))
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.morning_marked, [])
+        self.assertEqual(fake.stats_day_seen, [])
+
+    async def test_at_8am_sends_once_and_marks(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        app = FakeApp()
+        self.assertTrue(await self._once(fake, app, self._at(8, 0)))
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertEqual(app.bot.sent[0][0], ADMIN_ID)
+        self.assertIn("Yesterday (2026-11-14)", app.bot.sent[0][1])
+        self.assertIn("Net profit: 220.00 ETB", app.bot.sent[0][1])
+        self.assertEqual(fake.morning_sent_dates_seen, ["2026-11-15"])
+        self.assertEqual(fake.morning_marked, ["2026-11-15"])
+        self.assertIn("2026-11-15", admin_bot.MORNING_SENT_DATES)
+        # A second attempt the same day sends nothing.
+        self.assertFalse(await self._once(fake, app, self._at(8, 10)))
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertEqual(fake.morning_marked, ["2026-11-15"])
+
+    async def test_already_sent_server_marker_sends_nothing(self):
+        fake = FakeAdminPaxyo(
+            stats=STATS_YESTERDAY,
+            morning_sent_map={"2026-11-15": True},
+        )
+        app = FakeApp()
+        self.assertFalse(await self._once(fake, app, self._at(9, 0)))
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.morning_marked, [])
+
+    async def test_stats_404_marks_nothing(self):
+        fake = FakeAdminPaxyo(stats_none=True)
+        app = FakeApp()
+        self.assertFalse(await self._once(fake, app, self._at(8, 0)))
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.morning_marked, [])
+        self.assertNotIn("2026-11-15", admin_bot.MORNING_SENT_DATES)
+
+    async def test_morning_endpoint_404_falls_back_to_memory(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY, morning_none=True)
+        app = FakeApp()
+        self.assertTrue(await self._once(fake, app, self._at(8, 0)))
+        self.assertEqual(len(app.bot.sent), 1)
+        # The mark was still attempted (the server answered 404 /
+        # None for it); the in-memory marker is what stops the
+        # second send, not a server record.
+        self.assertEqual(fake.morning_marked, ["2026-11-15"])
+        self.assertIn("2026-11-15", admin_bot.MORNING_SENT_DATES)
+        # The in-memory marker still stops a second send.
+        self.assertFalse(await self._once(fake, app, self._at(8, 10)))
+        self.assertEqual(len(app.bot.sent), 1)
+
+    async def test_sends_to_every_admin_id(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        app = FakeApp()
+        with mock.patch.object(
+            admin_bot, "ADMIN_TELEGRAM_IDS", {ADMIN_ID, OTHER_ID}
+        ):
+            self.assertTrue(await self._once(fake, app, self._at(8, 0)))
+        self.assertEqual(
+            sorted(tid for tid, _ in app.bot.sent), [ADMIN_ID, OTHER_ID]
+        )
+
+
+class TestMorningSchedule(AdminBotBase):
+    def _at(self, hour, minute=0):
+        return datetime(2026, 11, 15, hour, minute, tzinfo=admin_bot.EAT_TZ)
+
+    def test_before_8am_waits_until_today_8am(self):
+        self.assertEqual(
+            admin_bot._seconds_until_next_8am_eat(self._at(7, 30)), 1800
+        )
+        self.assertEqual(
+            admin_bot._seconds_until_next_8am_eat(self._at(0, 0)), 8 * 3600
+        )
+
+    def test_at_or_after_8am_waits_until_tomorrow_8am(self):
+        self.assertEqual(
+            admin_bot._seconds_until_next_8am_eat(self._at(8, 0)), 24 * 3600
+        )
+        self.assertEqual(
+            admin_bot._seconds_until_next_8am_eat(self._at(10, 0)), 22 * 3600
+        )
+        self.assertEqual(
+            admin_bot._seconds_until_next_8am_eat(self._at(23, 59)),
+            8 * 3600 + 60,
+        )
+
+    async def test_loop_sleeps_until_8am_before_first_attempt(self):
+        app = FakeApp()
+        calls = []
+
+        async def fake_sleep(delay):
+            calls.append(delay)
+            raise asyncio.CancelledError
+
+        with mock.patch.object(admin_bot.asyncio, "sleep", fake_sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await admin_bot.morning_report_loop(app)
+        self.assertEqual(len(calls), 1)
+        self.assertGreater(calls[0], 0)
+        self.assertLessEqual(calls[0], 24 * 3600)
+        self.assertEqual(app.bot.sent, [])
 
 
 class TestSafetyLine(AdminBotBase):

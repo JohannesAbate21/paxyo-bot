@@ -33,6 +33,23 @@ What it does, for William only (English only, like the admin panel):
      20%". The bot shows the code + percent (+ expiry / max uses
      when given), William taps Confirm, and only then it calls
      POST /promo-codes.
+  6. WIN-BACK MESSAGES — /winbacks. Users with no order in 14+
+     days: the bot shows the COUNT first, William taps Confirm,
+     and only then it sends one personal message each (their usual
+     service named, never an order placed, never a Confirm card
+     to the user), then records the sends so nobody is messaged
+     twice in 30 days.
+  7. MORNING MONEY REPORT — /morning, on demand, plus one
+     automatic send a day at 8am EAT on a proper schedule (the
+     loop sleeps until the next 08:00 EAT): yesterday's revenue,
+     net profit, new users, top service, deposits count, all from
+     GET /admin/stats?day=yesterday. Exact 8am delivery needs the
+     always-on server (Oracle move); on free Render the process
+     sleeps and the report goes out on the next wake after 8am
+     instead. The once-a-day marker lives on the server
+     (POST /admin/morning-sent) so a restart after 8am cannot
+     double-send; an in-memory marker is only the fallback when
+     that endpoint is not live yet.
 
 SAFETY (never break):
   * ONLY William can use it. Allowlist from env ADMIN_TELEGRAM_IDS
@@ -92,7 +109,7 @@ import logging
 import os
 import re
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -118,6 +135,16 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or ""
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
 SEND_DELAY_SECONDS = float(os.environ.get("SEND_DELAY_SECONDS", "0.05") or 0.05)
+
+# Ethiopia is UTC+3 all year (no daylight saving).
+EAT_TZ = timezone(timedelta(hours=3))
+
+# In-memory fallback for the morning-report once-a-day marker:
+# dates (YYYY-MM-DD, EAT) the report was already sent on, in this
+# process. The server-side marker (POST /admin/morning-sent) is
+# the authority; this set only covers the case where that endpoint
+# is not live yet. Tests clear it in setUp/tearDown.
+MORNING_SENT_DATES = set()
 
 # The settings key for the ticker text. TO VERIFY on the server before
 # go-live: check what key the site / mini app actually reads for the
@@ -188,18 +215,89 @@ class AdminPaxyoClient:
         response.raise_for_status()
         return response.json()
 
-    async def admin_stats(self, days: int = 1):
-        """GET /admin/stats[?days=N] — the digest numbers. `days`
-        is the last N calendar days in EAT, today included (1 =
-        today). 404 -> None (endpoint not live yet)."""
+    async def admin_stats(self, days: int = 1, day: str = None):
+        """GET /admin/stats[?days=N | ?day=yesterday] — the digest
+        numbers. `days` is the last N calendar days in EAT, today
+        included (1 = today). `day="yesterday"` asks for yesterday's
+        EAT calendar day only (the ?days=N windows always end
+        today, so yesterday alone needs this parameter). 404 ->
+        None (endpoint not live yet)."""
         path = "/admin/stats"
-        if days and int(days) > 1:
+        if day == "yesterday":
+            path = "/admin/stats?day=yesterday"
+        elif days and int(days) > 1:
             path = f"/admin/stats?days={int(days)}"
         try:
             data = await self._send(build_api_request("GET", path))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def winback_audience(self, days: int = 14):
+        """GET /winbacks/audience?days=N — users with >=1 order
+        whose most recent order is more than N days ago, excluding
+        users messaged in the last 30 days and users with a draft
+        in progress. -> {days, count,
+        users: [{telegram_id, usual_service, usual_quantity}]}.
+        404 -> None (endpoint not live yet)."""
+        path = f"/winbacks/audience?days={int(days)}"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def record_winbacks(self, telegram_ids):
+        """POST /winbacks/record {telegram_ids: [...]} -> {ok,
+        recorded}. Idempotent on the server (a re-record only
+        refreshes sent_at). 404 -> None (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "POST",
+                    "/winbacks/record",
+                    {"telegram_ids": [int(t) for t in telegram_ids]},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /winbacks/record returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def morning_sent(self, date_str: str):
+        """GET /admin/morning-sent?date=YYYY-MM-DD -> {date, sent}.
+        404 -> None (endpoint not live yet — the caller falls back
+        to the in-memory marker)."""
+        path = f"/admin/morning-sent?date={date_str}"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def mark_morning_sent(self, date_str: str):
+        """POST /admin/morning-sent {date} -> {ok, date, sent}.
+        404 -> None (endpoint not live yet)."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "POST", "/admin/morning-sent", {"date": date_str}
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /admin/morning-sent returned 404 (endpoint not live yet)")
                 return None
             raise
         return data if isinstance(data, dict) else None
@@ -332,6 +430,11 @@ admin_api = None
 #   {"kind": "promo", "code": ..., "percent": ...,
 #    "expires_at": <"YYYY-MM-DD 23:59:59"|None>,
 #    "max_uses": <int|None>}
+# A win-back entry (audience frozen at preview time — the count
+# shown is the count messaged):
+#   {"kind": "winback",
+#    "users": [{"telegram_id": ..., "usual_service": ...,
+#               "usual_quantity": ...}, ...]}
 PENDING = {}
 
 CONFIRM_KEYBOARD = InlineKeyboardMarkup([
@@ -867,7 +970,9 @@ FALLBACK_REPLY = (
     "• \"Send this to users who never deposited: <message>\"\n"
     "• \"Change ticker to <new text>\"\n"
     "• \"Refund order #1841\"\n"
-    "• \"Create promo code PAXYO20 20%\""
+    "• \"Create promo code PAXYO20 20%\"\n"
+    "• /winbacks — message users who went quiet\n"
+    "• /morning — yesterday's money report"
 )
 
 # ------------------------------------------------------------ stats answers ---
@@ -945,6 +1050,50 @@ def answer_stats(stats, question: dict) -> str:
     return "\n".join(lines)
 
 
+def format_morning_report(stats) -> str:
+    """Yesterday's money report from a /admin/stats record fetched
+    with day="yesterday". All five figures come from the record;
+    a missing figure says so, never invented. The window is
+    labelled from the response's own `from`/`date` fields, so the
+    label is honest whatever window the server actually returned:
+    "Yesterday (2026-11-14)" when the server sent day=yesterday,
+    otherwise the same Today / Last N days label as answer_stats."""
+    stats = stats or {}
+    if stats.get("day") == "yesterday":
+        when = str(stats.get("from") or stats.get("date") or "yesterday")
+        label = f"Yesterday ({when})"
+    else:
+        label = _stats_window_label(stats, int(stats.get("days") or 1))
+    revenue = float(stats.get("revenue_etb") or 0)
+    new_users = int(stats.get("new_users") or 0)
+    lines = [
+        f"{label}:",
+        f"Revenue: {format_money(revenue)} ETB",
+    ]
+    if "net_profit_etb" in stats:
+        lines.append(f"Net profit: {format_money(stats.get('net_profit_etb') or 0)} ETB")
+    else:
+        lines.append("Net profit: not available yet.")
+    lines.append(f"New users: {new_users}")
+    top = stats.get("top_service")
+    if top:
+        lines.append(
+            f"Top service: {top} ×{int(stats.get('top_quantity') or 0)}"
+        )
+    else:
+        lines.append("Top service: none yet.")
+    if "deposits_count" in stats:
+        deposits_line = f"Deposits: {int(stats.get('deposits_count') or 0)}"
+        if "deposits_etb" in stats:
+            deposits_line += (
+                f" ({format_money(stats.get('deposits_etb') or 0)} ETB)"
+            )
+        lines.append(deposits_line)
+    else:
+        lines.append("Deposits: not available yet.")
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------- broadcast sending ---
 
 async def send_broadcast(bot, telegram_ids, message: str):
@@ -977,6 +1126,69 @@ async def send_broadcast(bot, telegram_ids, message: str):
         if i < len(ids) - 1 and SEND_DELAY_SECONDS > 0:
             await asyncio.sleep(SEND_DELAY_SECONDS)
     return delivered, failed
+
+
+def winback_message(user: dict) -> str:
+    """One win-back message for one user, personalised with their
+    usual service when the server knew it. Plain text only — it
+    never places an order and never shows the user a Confirm card;
+    the user just replies in chat if they want to order again."""
+    service = str((user or {}).get("usual_service") or "").strip()
+    if service:
+        return (
+            "We miss you at Paxyo! You usually order "
+            f"{service} — want to order again? Just reply here."
+        )
+    return "We miss you at Paxyo! Want to order again? Just reply here."
+
+
+async def send_winbacks(bot, users):
+    """Send one personalised win-back message to each user in
+    `users` ([{telegram_id, usual_service, usual_quantity}]),
+    sequentially, one at a time, with a short pause between sends.
+    Ids are deduped first — a user is messaged at most once even
+    if the audience list ever carried a duplicate. Returns
+    (delivered, failed, delivered_ids). Never raises: one failed
+    send must not stop the rest, and a failed send is never
+    recorded as sent."""
+    seen = set()
+    queue = []
+    for user in users or []:
+        if not isinstance(user, dict):
+            continue
+        try:
+            tid = int(user.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if tid <= 0 or tid in seen:
+            continue
+        seen.add(tid)
+        queue.append((tid, user))
+    delivered = 0
+    failed = 0
+    delivered_ids = []
+    for i, (tid, user) in enumerate(queue):
+        try:
+            await bot.send_message(chat_id=tid, text=winback_message(user))
+            delivered += 1
+            delivered_ids.append(tid)
+        except Exception as exc:
+            log.warning("Win-back send to %s failed: %s", tid, exc)
+            failed += 1
+        if i < len(queue) - 1 and SEND_DELAY_SECONDS > 0:
+            await asyncio.sleep(SEND_DELAY_SECONDS)
+    return delivered, failed, delivered_ids
+
+
+def _winback_preview(pending: dict) -> str:
+    return (
+        "Win-back preview:\n"
+        f"{len(pending['users'])} users have gone quiet "
+        "(no order in 14+ days).\n"
+        "Each gets one personal message naming the service they "
+        "usually order — no order is placed for them.\n\n"
+        "Tap Confirm to send them, or Cancel."
+    )
 
 
 def _broadcast_preview(pending: dict) -> str:
@@ -1046,6 +1258,25 @@ async def _execute_pending(user_id: int, context) -> str:
         delivered, failed = await send_broadcast(
             context.bot, pending["telegram_ids"], pending["message"]
         )
+        if failed:
+            return (
+                f"Sent to {delivered} users. "
+                f"{failed} failed to deliver."
+            )
+        return f"Sent to {delivered} users."
+    if pending["kind"] == "winback":
+        delivered, failed, delivered_ids = await send_winbacks(
+            context.bot, pending["users"]
+        )
+        # Record only the users who actually got the message, so
+        # a failed send is not treated as sent. Best-effort: if
+        # the record endpoint is not live yet (or fails), the
+        # sends still happened and the report still stands.
+        if delivered_ids:
+            try:
+                await admin_api.record_winbacks(delivered_ids)
+            except Exception as exc:
+                log.warning("record_winbacks failed: %s", exc)
         if failed:
             return (
                 f"Sent to {delivered} users. "
@@ -1164,6 +1395,101 @@ async def _resolve_audience_and_preview(user_id: int, parsed: dict):
     return (_broadcast_preview(pending), CONFIRM_KEYBOARD, True)
 
 
+# ------------------------------------------------------ morning report ---
+
+def should_send_morning(now: datetime, sent_today: bool) -> bool:
+    """Pure once-a-day gate: send only at/after 08:00 EAT, and only
+    when today has not been sent yet. `now` is an EAT datetime."""
+    if sent_today:
+        return False
+    return now.hour >= 8
+
+
+async def send_morning_report_once(app, now=None) -> bool:
+    """One morning-report attempt: send yesterday's money report to
+    every ADMIN_TELEGRAM_IDS id, at most once per EAT calendar day.
+    Returns True when the report was sent. The sent marker is
+    checked AND written server-side (GET/POST /admin/morning-sent)
+    so a restart after 8am cannot double-send; when that endpoint
+    404s (not live yet) the in-memory MORNING_SENT_DATES set is
+    the fallback and a warning is logged. Nothing is sent before
+    8am EAT, nothing is sent when the day is already marked, and
+    nothing is marked when the stats endpoint is not connected
+    yet (so the next wake retries instead of losing the day)."""
+    now = now or datetime.now(EAT_TZ)
+    today = now.date().isoformat()
+    server_marker = None
+    try:
+        server_marker = await admin_api.morning_sent(today)
+    except Exception as exc:
+        log.warning("morning_sent check failed: %s", exc)
+    if server_marker is None:
+        log.warning(
+            "Morning-sent endpoint not connected yet — using the "
+            "in-memory marker only for %s.",
+            today,
+        )
+        sent_today = today in MORNING_SENT_DATES
+    else:
+        sent_today = bool(server_marker.get("sent"))
+    if not should_send_morning(now, sent_today):
+        return False
+    try:
+        stats = await admin_api.admin_stats(day="yesterday")
+    except Exception as exc:
+        log.warning("morning admin_stats failed: %s", exc)
+        return False
+    if stats is None:
+        log.warning("Morning report not connected yet — stats endpoint 404.")
+        return False
+    text = format_morning_report(stats)
+    for admin_id in sorted(ADMIN_TELEGRAM_IDS):
+        try:
+            await app.bot.send_message(chat_id=admin_id, text=text)
+        except Exception as exc:
+            log.warning("Morning report send to %s failed: %s", admin_id, exc)
+    MORNING_SENT_DATES.add(today)
+    try:
+        await admin_api.mark_morning_sent(today)
+    except Exception as exc:
+        log.warning("mark_morning_sent failed: %s", exc)
+    return True
+
+
+def _seconds_until_next_8am_eat(now=None) -> float:
+    """Seconds from `now` (EAT) until the next 08:00 EAT. Pure helper
+    so the schedule is testable: before 8am it is today 08:00,
+    at/after 8am it is tomorrow 08:00."""
+    now = now or datetime.now(EAT_TZ)
+    target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def morning_report_loop(app):
+    """Background loop: sleep until the next 08:00 EAT, send the
+    morning report once, then sleep until the next day's 08:00.
+    A proper schedule, not a poll — on the always-on server
+    (Oracle move) the report goes out at 08:00 sharp. On free
+    Render the process sleeps, so the sleep finishes on the next
+    wake after 08:00 and the report goes out then instead; the
+    once-a-day gate in send_morning_report_once still prevents
+    a double-send."""
+    while True:
+        await asyncio.sleep(_seconds_until_next_8am_eat())
+        try:
+            await send_morning_report_once(app)
+        except Exception as exc:
+            log.warning("Morning report loop failed: %s", exc)
+
+
+async def _post_init(app):
+    """Application post_init hook: start the morning-report loop.
+    Polling has no job queue, so the loop is an asyncio task."""
+    asyncio.create_task(morning_report_loop(app))
+
+
 # ---------------------------------------------------------------- handlers ---
 
 CAPABILITIES = (
@@ -1179,7 +1505,12 @@ CAPABILITIES = (
     "you confirm, the full total goes back to the user's Paxyo "
     "balance, never cash)\n"
     "• Create a promo code — \"Create promo code PAXYO20 20%\" "
-    "(you confirm first)\n\n"
+    "(you confirm first)\n"
+    "• Win back quiet users — /winbacks (I show the count first, "
+    "you confirm, then each gets one personal message)\n"
+    "• Morning money report — /morning (yesterday's revenue, net "
+    "profit, new users, top service, deposits; also sent "
+    "automatically once a day at 8am)\n\n"
     "Refunds go through the Confirm-gated admin-refund endpoint, "
     "once, never twice, never for completed orders."
 )
@@ -1193,6 +1524,65 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(CAPABILITIES)
 
 
+async def winbacks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /winbacks — count the quiet users (no order in 14+ days),
+    show the count, and only send after William taps Confirm.
+    Nothing is sent from this handler itself."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    try:
+        audience = await admin_api.winback_audience()
+    except Exception as exc:
+        log.warning("winback_audience failed: %s", exc)
+        await update.message.reply_text(
+            "Could not count the quiet users — please try again."
+        )
+        return
+    if audience is None:
+        await update.message.reply_text(
+            "The win-back list is not connected yet — the audience "
+            "endpoint is not live on the server, so I cannot count "
+            "who went quiet."
+        )
+        return
+    users = audience.get("users") or []
+    if not users or int(audience.get("count") or 0) == 0:
+        await update.message.reply_text("No users have gone quiet.")
+        return
+    PENDING[user.id] = {"kind": "winback", "users": list(users)}
+    await update.message.reply_text(
+        _winback_preview(PENDING[user.id]),
+        reply_markup=CONFIRM_KEYBOARD,
+    )
+
+
+async def morning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /morning — yesterday's money report, on demand. All
+    figures come from GET /admin/stats?day=yesterday; a 404 means
+    the endpoint is not live yet and the bot says so honestly."""
+    user = update.effective_user
+    if not is_admin_user(user.id):
+        await update.message.reply_text(REFUSAL)
+        return
+    try:
+        stats = await admin_api.admin_stats(day="yesterday")
+    except Exception as exc:
+        log.warning("morning admin_stats failed: %s", exc)
+        await update.message.reply_text(
+            "Could not load yesterday's numbers — please try again."
+        )
+        return
+    if stats is None:
+        await update.message.reply_text(
+            "The live numbers are not connected yet — the stats "
+            "endpoint is not live on the server."
+        )
+        return
+    await update.message.reply_text(format_morning_report(stats))
+
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin_user(user.id):
@@ -1202,7 +1592,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         CAPABILITIES
         + "\n\nBroadcasts can go to: users who never deposited, "
         "users who deposited before, users who bought a service "
-        "(\"users who bought service 6139\"), or all users."
+        "(\"users who bought service 6139\"), or all users.\n\n"
+        "/winbacks messages users with no order in 14+ days "
+        "(count first, you confirm). /morning shows yesterday's "
+        "money report — it is also sent automatically once a day "
+        "at 8am."
     )
 
 
@@ -1461,10 +1855,13 @@ def build_application():
     app = (
         ApplicationBuilder()
         .token(ADMIN_BOT_TOKEN)
+        .post_init(_post_init)
         .build()
     )
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("winbacks", winbacks_cmd))
+    app.add_handler(CommandHandler("morning", morning_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback))
     return app
