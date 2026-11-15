@@ -6475,9 +6475,69 @@ def _quantity_grounded_in_text(text: str, quantity) -> bool:
     return wanted in _number_word_values(text)
 
 
+# Question phrasing for a cheapest question: "what is the
+# cheapest tiktok views", "which is the cheapest", "tell me the
+# cheapest". A bare "cheapest <platform> <metric>" with no
+# question words is a price question too (the owner asked for
+# those variants); anything else after "cheapest" ("is it fast?",
+# "for me") is not.
+_CHEAPEST_QUESTION_WORDS = (
+    "what is", "what's", "whats", "what are", "which is",
+    "which are", "which one", "how much", "how many",
+    "tell me", "show me",
+)
+# Words a bare cheapest phrase may contain, besides the cheapest
+# word itself: platforms, metrics (singular and plural), and
+# politeness fillers. "comment" covers "comment likes".
+_CHEAPEST_BARE_WORDS = frozenset(
+    {"cheapest", "lowest", "the", "a", "an", "please", "pls"}
+    | set(_PLATFORMS)
+    | set(_METRICS)
+    | {m[:-1] for m in _METRICS}
+)
+
+
+def is_cheapest_question(text: str) -> bool:
+    """True when the user asks what the cheapest service costs
+    ("what is the cheapest tiktok views", "cheapest views") — a
+    price question, never an order. Live fault, 15 Nov 2026: the
+    bot answered that exact question with "Please send the link
+    of the video", because is_price_question only knew "price",
+    "cost", "rate" and "how much" — "cheapest" fell through to
+    the classifier, which called it an order. An order verb, a
+    quantity, or a link makes it an order instead ("order 1000
+    cheapest Instagram followers", "I want the cheapest tiktok
+    views", "1000 cheapest tiktok views", "cheapest views for
+    <link>"). A bare "the cheapest one" names no platform or
+    metric, so it stays a service choice inside the order being
+    built."""
+    s = " ".join(normalize_text(text or "").lower().split())
+    if not s:
+        return False
+    words = re.findall(r"[a-z]+", s)
+    word_set = set(words)
+    if not word_set & {"cheapest", "lowest"}:
+        return False
+    if extract_links(text):
+        return False
+    if any(v in s for v in _ORDER_REQUEST_VERBS):
+        return False
+    if kind_from_text(s) is None and not any(
+        p in word_set for p in _PLATFORMS
+    ):
+        return False
+    if any(q in s for q in _CHEAPEST_QUESTION_WORDS):
+        return True
+    if quantity_from_text(s) is not None:
+        return False
+    return word_set <= _CHEAPEST_BARE_WORDS
+
+
 def is_price_question(text: str) -> bool:
     """True when the user asks the price of a service ('how much are
-    tiktok views?', "what's the price of 1000 views?"). A budget
+    tiktok views?', "what's the price of 1000 views?"). A cheapest
+    question ('what is the cheapest tiktok views') counts too — see
+    is_cheapest_question. A budget
     ('how much views can 10 br get me') carries a currency amount
     and is not a price question; neither is a balance or a deposit
     question. A pasted link is not a price question only when the
@@ -6516,6 +6576,12 @@ def is_price_question(text: str) -> bool:
         # and a split() comparison ("it" != "it?") misses it.
         or re.search(r"\b(it|this|that|one|them)\b", s) is not None
     ):
+        return True
+    # "Cheapest" is a price question too (live fault, 15 Nov 2026):
+    # "what is the cheapest tiktok views" asked for a price and
+    # got "Please send the link of the video" instead, because
+    # none of the words above match "cheapest".
+    if is_cheapest_question(text):
         return True
     return False
 
@@ -6606,6 +6672,20 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
     except Exception as exc:
         log.warning("price lookup failed: %s", exc)
         return None
+    if is_cheapest_question(text):
+        # A cheapest question is answered from the cheapest
+        # service, not the fastest pick: the fastest TikTok views
+        # service is 18.90 ETB/1000 while the cheapest is 1.26 —
+        # quoting the fastest for "what is the cheapest" is the
+        # wrong price (live fault, 15 Nov 2026). cheapest_service
+        # forces the cheapest ranking, so this is the true global
+        # cheapest. No draft is seeded here: a price question
+        # never starts an order.
+        cheapest = cheapest_service(
+            services, platform=platform, service_hint=hint
+        )
+        if cheapest is not None:
+            return _service_price_line(cheapest, quantity, lang)
     line, platform, hint = await _price_line(
         user_id, text, platform, hint, quantity, lang,
         reaction_emoji=reaction_emoji(text), services=services,

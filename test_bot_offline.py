@@ -18138,5 +18138,253 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
             await client._client.aclose()
 
 
+class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
+    """Cheapest-question routing (live fault, 15 Nov 2026): the owner
+    asked "What is the cheapest tiktok views" and the bot replied
+    "Please send the link of the video" — it treated a price
+    question as an order. The cheapest_service() fix was already
+    in the code, but the bot never called it for that phrasing:
+    is_price_question only knew "price", "cost", "rate" and "how
+    much", so the question fell through to the classifier, which
+    called it an order. The fix answers cheapest questions
+    deterministically from cheapest_service, before the AI."""
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.WATCHED_ORDERS.clear()
+        bot.FIRST_ORDER_NUDGE_DONE.clear()
+        bot.NUDGE_SERVICE.clear()
+        bot.FAILED_DEPOSIT.clear()
+        bot.FASTEST_FALLBACK.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.WATCHED_ORDERS.clear()
+        bot.FIRST_ORDER_NUDGE_DONE.clear()
+        bot.NUDGE_SERVICE.clear()
+        bot.FAILED_DEPOSIT.clear()
+        bot.FASTEST_FALLBACK.clear()
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        fake = paxyo or FakePaxyo()
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", fake), \
+             mock.patch("bot.speak_reply") as speak:
+            await bot.handle_order_text(update, None, text)
+        self.assertEqual(msg.voice_sent, [])  # text in -> text only
+        return msg, fake
+
+    # --- detector -------------------------------------------------
+
+    def test_is_cheapest_question(self):
+        # The live fault and its variants: all price questions.
+        for text in (
+            "what is the cheapest tiktok views",
+            "cheapest views",
+            "cheapest tiktok followers",
+            "what's the cheapest likes",
+            "cheapest telegram reactions",
+            "what is the cheapest tiktok views for 1000",
+            "which is the cheapest instagram followers",
+            "tell me the cheapest tiktok views",
+            "cheapest comment likes",
+            "what is the lowest tiktok views",
+        ):
+            self.assertTrue(bot.is_cheapest_question(text), text)
+            self.assertTrue(bot.is_price_question(text), text)
+        # Orders: an order verb, a quantity, or a link makes the
+        # same words an order, not a question.
+        for text in (
+            "order 1000 cheapest Instagram followers",
+            "I want 1000 cheapest tiktok views",
+            "I want the cheapest tiktok views",
+            "1000 cheapest tiktok views",
+            "get me the cheapest tiktok views",
+            "cheapest tiktok views for https://tiktok.com/@x/video/1",
+        ):
+            self.assertFalse(bot.is_cheapest_question(text), text)
+        # Not a question at all: no platform or metric, or a
+        # different question about the cheapest service.
+        for text in (
+            "the cheapest one",
+            "is the cheapest tiktok views fast?",
+            "what is the cheapest",
+            "cheapest",
+        ):
+            self.assertFalse(bot.is_cheapest_question(text), text)
+
+    # --- price answer ---------------------------------------------
+
+    async def test_cheapest_views_question_quotes_1_26(self):
+        # The exact live fault: the mocked intent is "order", as
+        # the AI classified it live — the deterministic fast path
+        # must still answer with a price, never the link ask.
+        msg, fake = await self._send(
+            "what is the cheapest tiktok views",
+            intent_of("order", platform="tiktok",
+                      service_hint="cheapest tiktok views"),
+            paxyo=FakePaxyo(services=_views_fixture()),
+        )
+        self.assertEqual(
+            msg.text_sent[0], "TikTok Video Views: 1.26 ETB per 1000."
+        )
+        self.assertNotIn("10.00", msg.text_sent[0])
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+        self.assertIsNone(msg.markups[0])  # no Confirm card
+        # No order draft and nothing placed.
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_cheapest_question_variants_quote_cheapest(self):
+        # "cheapest views" — no platform named: the cheapest views
+        # service of any platform is #5535 at 1.26.
+        msg, _ = await self._send(
+            "cheapest views",
+            intent_of("order", service_hint="cheapest views"),
+            paxyo=FakePaxyo(services=_views_fixture()),
+        )
+        self.assertEqual(
+            msg.text_sent[0], "TikTok Video Views: 1.26 ETB per 1000."
+        )
+        # "what's the cheapest likes" — the cheapest likes service
+        # in the fixture is #6001 at 5.00.
+        msg, _ = await self._send(
+            "what's the cheapest likes",
+            intent_of("order", service_hint="cheapest likes"),
+            paxyo=FakePaxyo(services=_views_fixture()),
+        )
+        self.assertEqual(
+            msg.text_sent[0], "TikTok Likes: 5.00 ETB per 1000."
+        )
+        # "cheapest tiktok followers" — the fast pick is 20.00, the
+        # cheapest is 3.00: the quote must be the cheapest.
+        followers = _views_fixture() + [
+            {
+                "service": 7100, "name": "TikTok Followers | Fast",
+                "category": "TikTok Followers", "type": "Default",
+                "rate_etb_per_1000": 20.0, "min": 10, "max": 1000000,
+                "average_time": "1 minute", "active": True,
+                "provider_service_id": 7100,
+            },
+            {
+                "service": 7101, "name": "TikTok Followers | Slow",
+                "category": "TikTok Followers", "type": "Default",
+                "rate_etb_per_1000": 3.0, "min": 10, "max": 1000000,
+                "average_time": "24 hours", "active": True,
+                "provider_service_id": 7101,
+            },
+        ]
+        msg, _ = await self._send(
+            "cheapest tiktok followers",
+            intent_of("order", platform="tiktok",
+                      service_hint="cheapest tiktok followers"),
+            paxyo=FakePaxyo(services=followers),
+        )
+        self.assertEqual(
+            msg.text_sent[0], "TikTok Followers: 3.00 ETB per 1000."
+        )
+        # "cheapest telegram reactions" — the fast Positive mix is
+        # 20.00, the cheapest is 3.00.
+        reactions = [
+            {
+                "service": 7003,
+                "name": "Telegram Reactions + Free Views | Positive",
+                "category": "Telegram Reactions", "type": "Default",
+                "rate_etb_per_1000": 20.0, "min": 10, "max": 1000000,
+                "average_time": "1 minute", "active": True,
+                "provider_service_id": 7003,
+            },
+            {
+                "service": 7004,
+                "name": "Telegram Reactions + Free Views | Positive",
+                "category": "Telegram Reactions", "type": "Default",
+                "rate_etb_per_1000": 3.0, "min": 10, "max": 1000000,
+                "average_time": "24 hours", "active": True,
+                "provider_service_id": 7004,
+            },
+        ]
+        msg, _ = await self._send(
+            "cheapest telegram reactions",
+            intent_of("order", platform="telegram",
+                      service_hint="cheapest telegram reactions"),
+            paxyo=FakePaxyo(services=reactions),
+        )
+        self.assertIn("3.00", msg.text_sent[0])
+        self.assertIn("per 1000", msg.text_sent[0])
+        self.assertNotIn("20.00", msg.text_sent[0])
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+
+    async def test_cheapest_question_with_quantity_states_total(self):
+        # "how much is 1000 of the cheapest tiktok views?" — the
+        # total for 1000 of the cheapest service, not the fastest.
+        msg, _ = await self._send(
+            "how much is 1000 of the cheapest tiktok views?",
+            intent_of("order", platform="tiktok",
+                      service_hint="cheapest tiktok views",
+                      quantity=1000),
+            paxyo=FakePaxyo(services=_views_fixture()),
+        )
+        self.assertEqual(
+            msg.text_sent[0],
+            "TikTok Video Views: 1.26 ETB for 1,000 (1.26 ETB per 1000).",
+        )
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+
+    # --- order flow untouched --------------------------------------
+
+    async def test_order_with_cheapest_still_starts_order(self):
+        # "order 1000 cheapest Instagram followers" + link: an
+        # order, with the cheapest service picked and a Confirm
+        # card — the cheapest detector must not eat real orders.
+        msg, fake = await self._send(
+            "order 1000 cheapest Instagram followers "
+            "https://instagram.com/p/x",
+            intent_of("order", platform="instagram",
+                      service_hint="cheapest instagram followers",
+                      link="https://instagram.com/p/x", quantity=1000),
+        )
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertIn("1000", msg.text_sent[0])
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_plain_order_request_still_asks_for_link(self):
+        # "I want 100 tiktok views" — the start of the order flow
+        # that placed live order #1841: the link ask is unchanged.
+        msg, _ = await self._send(
+            "I want 100 tiktok views",
+            intent_of("order", platform="tiktok",
+                      service_hint="tiktok views", quantity=100),
+            paxyo=FakePaxyo(services=_views_fixture()),
+        )
+        self.assertEqual(
+            msg.text_sent[0], "Please send the link of the video."
+        )
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+        self.assertEqual(bot.PENDING, {})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
