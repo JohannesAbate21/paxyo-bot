@@ -3284,6 +3284,65 @@ class TestDepositApiClient(unittest.IsolatedAsyncioTestCase):
             await client._client.aclose()
 
 
+class TestDelayedOrdersApiClient(unittest.IsolatedAsyncioTestCase):
+    """GET /delayed-orders request shape. Regression (live retest
+    15 Nov 2026): list_delayed_orders used to send telegram_id and
+    status as a GET JSON body, which never reaches PHP's $_GET —
+    the server answered 400 'telegram_id is required', so the chat
+    list/cancel always said 'You have no scheduled orders' while
+    a scheduled order existed. Params must be in the URL."""
+
+    async def test_list_puts_params_in_url_and_sends_no_body(self):
+        client = bot.PaxyoClient()
+        try:
+            row = {"id": 4, "telegram_id": 779060335, "status": "scheduled"}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={"delayed_orders": [row]}),
+            ) as send:
+                result = await client.list_delayed_orders(779060335)
+            self.assertEqual(result, [row])
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "GET")
+            self.assertTrue(request.url.path.endswith("/delayed-orders"))
+            self.assertIn("telegram_id=779060335", str(request.url))
+            self.assertIn("status=scheduled", str(request.url))
+            self.assertEqual(request.content, b"")
+        finally:
+            await client._client.aclose()
+
+    async def test_list_404_returns_empty(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "GET", "https://paxyo.et/api/bot/delayed-orders"
+            )
+            resp = bot.httpx.Response(404, request=req)
+            err = bot.httpx.HTTPStatusError("not found", request=req, response=resp)
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertEqual(await client.list_delayed_orders(1), [])
+        finally:
+            await client._client.aclose()
+
+    async def test_due_sends_no_body(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={"delayed_orders": []}),
+            ) as send:
+                result = await client.due_delayed_orders()
+            self.assertEqual(result, [])
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "GET")
+            self.assertTrue(request.url.path.endswith("/delayed-orders/due"))
+            self.assertEqual(request.content, b"")
+        finally:
+            await client._client.aclose()
+
+
 class TestServicesNormalisation(unittest.IsolatedAsyncioTestCase):
     """PaxyoClient.services() maps the API's `id`/`price` to the
     bot's `service`/`rate_etb_per_1000` — the live API returns no

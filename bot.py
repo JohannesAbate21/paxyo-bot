@@ -3039,12 +3039,18 @@ class PaxyoClient:
     async def list_delayed_orders(self, telegram_id: int,
                                   status: str = "scheduled"):
         """GET /delayed-orders?telegram_id=N&status=scheduled ->
-        {"ok": true, "delayed_orders": [...]}. Returns [] on 404."""
+        {"ok": true, "delayed_orders": [...]}. Returns [] on 404.
+        Params go in the URL query string, like every other GET
+        in this client: a GET JSON body never reaches PHP's $_GET,
+        so the server answered 400 'telegram_id is required' and
+        the chat list/cancel always said 'no scheduled orders'
+        (live retest 15 Nov 2026)."""
         try:
             data = await self._send(
                 build_api_request(
-                    "GET", "/delayed-orders",
-                    {"telegram_id": telegram_id, "status": status},
+                    "GET",
+                    f"/delayed-orders?telegram_id={telegram_id}"
+                    f"&status={status}",
                 )
             )
             return data.get("delayed_orders", []) if isinstance(data, dict) else []
@@ -3073,10 +3079,11 @@ class PaxyoClient:
     async def due_delayed_orders(self):
         """GET /delayed-orders/due (secret-only) -> {"ok": true,
         "delayed_orders": [...]} — scheduled rows whose run_at is
-        now or past. Returns [] on 404."""
+        now or past. Returns [] on 404. No body: a GET JSON body
+        never reaches the server (see list_delayed_orders)."""
         try:
             data = await self._send(
-                build_api_request("GET", "/delayed-orders/due", {})
+                build_api_request("GET", "/delayed-orders/due")
             )
             return data.get("delayed_orders", []) if isinstance(data, dict) else []
         except httpx.HTTPStatusError as exc:
