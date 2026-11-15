@@ -8,11 +8,12 @@
 // WHAT IT ADDS (all behind the existing X-Bot-Secret check in bot.php):
 //   POST /api/bot/delayed-orders
 //     {telegram_id, service_id, link, quantity, total, run_at,
-//      idempotency_key}
+//      idempotency_key[, provider]}
 //     -> {"ok":true,"id":N,"delayed_order":{...}}   (run_at is UTC
 //        "YYYY-MM-DD HH:MM:SS"; idempotency_key is unique — a retry
 //        with the same key returns the existing row, never a second
-//        scheduled order)
+//        scheduled order; provider is 'godofpanel' by default or
+//        'smmsocialmedia')
 //   GET  /api/bot/delayed-orders?telegram_id=X[&status=scheduled]
 //     -> {"delayed_orders":[{id,telegram_id,service_id,link,quantity,
 //        total,run_at,status,idempotency_key,order_id,reason,
@@ -35,6 +36,9 @@
 // TABLES (created automatically on first call, utf8mb4 so emoji in
 // links survive):
 //   delayed_orders  id AUTO_INCREMENT PK, telegram_id, service_id,
+//                   provider VARCHAR(32) DEFAULT 'godofpanel'
+//                   ('godofpanel' or 'smmsocialmedia' — added 15 Nov
+//                   2026, best-effort ALTER, see del_ensure_tables),
 //                   link VARCHAR(500), quantity, total DECIMAL(12,2),
 //                   run_at DATETIME (UTC), status ENUM(scheduled,
 //                   placing, placed, failed, cancelled),
@@ -107,6 +111,14 @@ function del_substr($text, $len) {
     return substr($text, 0, $len);
 }
 
+//   - SMM PROVIDER (15 Nov 2026, api-order-smm.php): bot_del_create()
+//     accepts an optional "provider" in the JSON body — only
+//     'godofpanel' (default) or 'smmsocialmedia'; anything else is a
+//     400. del_row() returns the provider, and list/due return it.
+//     Old rows (no provider value) read back as 'godofpanel', so
+//     every existing delayed order keeps working unchanged. The bot
+//     places a due 'smmsocialmedia' row through POST /orders/smm
+//     and a due 'godofpanel' row through POST /orders.
 function del_ensure_tables($db) {
     // utf8mb4 so emoji in links survive.
     // set_charset is idempotent — harmless if bot.php already did it.
@@ -115,6 +127,7 @@ function del_ensure_tables($db) {
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         telegram_id BIGINT NOT NULL,
         service_id INT NOT NULL,
+        provider VARCHAR(32) NOT NULL DEFAULT 'godofpanel',
         link VARCHAR(500) NOT NULL,
         quantity INT NOT NULL,
         total DECIMAL(12,2) NOT NULL,
@@ -131,6 +144,33 @@ function del_ensure_tables($db) {
         INDEX idx_delayed_run (status, run_at),
         INDEX idx_delayed_updated (status, updated_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    // SMM BRANCH (15 Nov 2026): the table already exists live, so
+    // the provider column is added best-effort. A failed ALTER (e.g.
+    // duplicate column 1060, or a locked table) must NEVER fail the
+    // endpoint — old rows keep working as GodOfPanel, and
+    // del_has_provider_column() tells the create handler whether
+    // the column is there to write to.
+    try {
+        $db->query("ALTER TABLE delayed_orders ADD COLUMN provider VARCHAR(32) NOT NULL DEFAULT 'godofpanel'");
+    } catch (mysqli_sql_exception $e) {
+        // 1060 = already there; anything else: column stays missing.
+    } catch (Throwable $e) {
+        // Same: the endpoint must keep working without the column.
+    }
+}
+
+// Does delayed_orders have the provider column yet? (False when the
+// best-effort ALTER above could not run.) Checked once per request
+// by bot_del_create(); list/due never need it (del_row() defaults
+// a missing value to 'godofpanel').
+function del_has_provider_column($db) {
+    try {
+        $res = $db->query("SHOW COLUMNS FROM delayed_orders LIKE 'provider'");
+        if ($res === false) return false;
+        return $res->num_rows > 0;
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function del_row($row) {
@@ -138,6 +178,7 @@ function del_row($row) {
         'id' => (int)$row['id'],
         'telegram_id' => (int)$row['telegram_id'],
         'service_id' => (int)$row['service_id'],
+        'provider' => $row['provider'] ?? 'godofpanel',
         'link' => $row['link'],
         'quantity' => (int)$row['quantity'],
         'total' => (float)$row['total'],
@@ -180,13 +221,37 @@ function bot_del_create() {
     }
     $key = del_substr(trim((string)($in['idempotency_key'] ?? '')), 64);
     if ($key === '') del_fail(400, 'idempotency_key is required.');
+    // Optional provider: only 'godofpanel' (default) or
+    // 'smmsocialmedia'. Anything else is a 400 — never silently
+    // stored as the other provider. The chat bot sends the short
+    // slugs 'gop' / 'smm' (it must never carry the full provider
+    // names — secrecy); both spellings are accepted here and
+    // normalised to the canonical value for storage.
+    $provider = strtolower(trim((string)($in['provider'] ?? 'godofpanel')));
+    if ($provider === 'gop') $provider = 'godofpanel';
+    if ($provider === 'smm') $provider = 'smmsocialmedia';
+    if (!in_array($provider, ['godofpanel', 'smmsocialmedia'], true)) {
+        del_fail(400, 'provider must be "godofpanel" or "smmsocialmedia" (or "gop" / "smm").');
+    }
 
     $db = del_db();
     if ($db === null) del_fail(500, 'Database is not available.');
     del_ensure_tables($db);
 
-    $stmt = $db->prepare('INSERT INTO delayed_orders (telegram_id, service_id, link, quantity, total, run_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?)');
-    $stmt->bind_param('iisidss', $telegram_id, $service_id, $link, $quantity, $total, $run_at, $key);
+    if (del_has_provider_column($db)) {
+        $stmt = $db->prepare('INSERT INTO delayed_orders (telegram_id, service_id, provider, link, quantity, total, run_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt->bind_param('iissidss', $telegram_id, $service_id, $provider, $link, $quantity, $total, $run_at, $key);
+    } else {
+        // Table predates the provider column (the best-effort ALTER
+        // could not run): a GodOfPanel row stores exactly as before.
+        // An SMM delayed order cannot be stored without the column —
+        // refuse honestly rather than silently scheduling it as
+        // GodOfPanel (the bot would then place it at the wrong
+        // provider).
+        if ($provider !== 'godofpanel') del_fail(500, 'Delayed orders for this provider cannot be stored yet (provider column is missing).');
+        $stmt = $db->prepare('INSERT INTO delayed_orders (telegram_id, service_id, link, quantity, total, run_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        $stmt->bind_param('iisidss', $telegram_id, $service_id, $link, $quantity, $total, $run_at, $key);
+    }
     // PHP 8.1+ mysqli throws mysqli_sql_exception on error instead of
     // returning false, so a duplicate idempotency key (1062) must be
     // caught here — the old errno-only check never ran and the
