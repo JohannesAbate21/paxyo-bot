@@ -20,6 +20,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -400,11 +401,35 @@ class FakePaxyo:
                  deposits=None, deposits_none=False, status="pending",
                  session=None, delayed=None, delayed_due=None,
                  delayed_none=False, claim_ok=True,
-                 services=None, status_by_order=None, admin_stats=None):
+                 services=None, status_by_order=None, admin_stats=None,
+                 my_referral=None, referral_error=None,
+                 cancel_refund_result=None, cancel_refund_error=None,
+                 next_order_ids=None, traits=None,
+                 promo_codes=None, promo_none=False,
+                 promo_redeem_result=None, promo_redeem_none=False,
+                 promo_error=None, report_none=False, report_error=None,
+                 ratings=None, ratings_none=False, rate_none=False,
+                 rate_error=None, rate_already=False):
         self._balance = balance
         self._status = status
         self._status_by_order = dict(status_by_order or {})
         self._admin_stats = admin_stats
+        self._my_referral = my_referral
+        self._referral_error = referral_error
+        self.referrals_recorded = []
+        self._services = list(services) if services is not None else SAMPLE_SERVICES
+        self.orders_created = []
+        self.order_keys = []
+        # Stall rescue (15 Nov 2026): a seeded refund for
+        # cancel_refund (None by default — the endpoint is not live
+        # yet, so the real client returns None on its 404), a
+        # record of every cancel-refund call, and optional ids for
+        # orders create_order returns (1827 by default, so existing
+        # tests keep their order id).
+        self._cancel_refund_result = cancel_refund_result
+        self._cancel_refund_error = cancel_refund_error
+        self._next_order_ids = list(next_order_ids or [])
+        self.cancel_refund_calls = []
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
         self.order_keys = []
@@ -428,6 +453,13 @@ class FakePaxyo:
         self.session_loads = []
         self.sessions_saved = []
         self.confusions_logged = []
+        # Per-user traits (feature 5, 15 Nov 2026): seeded traits
+        # for load_traits (None = nothing stored yet, like the real
+        # client's 404), and a record of every save / load / clear.
+        self._traits = dict(traits) if traits is not None else None
+        self.traits_saved = []
+        self.traits_loads = []
+        self.traits_cleared = []
         # One-time delayed orders (14 Nov 2026): a seeded list for
         # list_delayed_orders, due rows for due_delayed_orders, and
         # a record of every create / cancel / claim / finish.
@@ -440,6 +472,45 @@ class FakePaxyo:
         self.delayed_cancelled = []
         self.delayed_claims = []
         self.delayed_finished = []
+        # Promo codes (ideas batch 2, feature 1, 15 Nov 2026):
+        # promo_codes maps an uppercased code to its validate
+        # record; an unmapped code gets the "does not exist"
+        # record. promo_none=True returns None from validate and
+        # redeem (the real client does that on a 404: endpoint not
+        # live yet). promo_error=<status> raises the HTTP error the
+        # real client raises on a non-404 failure.
+        self._promo_codes = dict(promo_codes or {})
+        self._promo_none = promo_none
+        self._promo_redeem_result = promo_redeem_result
+        self._promo_redeem_none = promo_redeem_none
+        self._promo_error = promo_error
+        self.promo_validates = []
+        self.promo_redeems = []
+        # Report a problem (ideas batch 2, feature 2, 15 Nov 2026):
+        # reports_filed records every report (telegram_id, order_id,
+        # message). report_none=True returns None (the real client
+        # does that on a 404: endpoint not live yet, or the named
+        # order is not this user's). report_error=<status> raises
+        # the HTTP error the real client raises on a non-404
+        # failure.
+        self._report_none = report_none
+        self._report_error = report_error
+        self.reports_filed = []
+        # Rate your order (ideas batch 2, feature 3, 15 Nov 2026):
+        # ratings maps a service id (str) to {"good": n, "bad": n}
+        # for service_ratings; unknown ids read 0/0. rate_none=True
+        # returns None from rate_order (404: endpoint not live yet);
+        # rate_error=<status> raises the HTTP error the real client
+        # raises on a non-404 failure; rate_already=True returns the
+        # already-rated 409 passthrough for every tap. ratings_none
+        # returns None from service_ratings (404: endpoint not live).
+        self._ratings = dict(ratings or {})
+        self._ratings_none = ratings_none
+        self._rate_none = rate_none
+        self._rate_error = rate_error
+        self._rate_already = rate_already
+        self.ratings_filed = []
+        self.ratings_calls = []
 
     async def services(self):
         return self._services
@@ -450,7 +521,37 @@ class FakePaxyo:
     async def create_order(self, telegram_id, service_id, link, quantity, idempotency_key):
         self.orders_created.append((service_id, link, quantity))
         self.order_keys.append(idempotency_key)
-        return {"order": {"id": 1827, "status": "pending"}}
+        new_id = self._next_order_ids.pop(0) if self._next_order_ids else 1827
+        return {"order": {"id": new_id, "status": "pending"}}
+
+    async def cancel_refund(self, order_id, telegram_id):
+        """Mirror POST /orders/{id}/cancel-refund (stall rescue,
+        15 Nov 2026). Returns the seeded result (a refund dict) or
+        None by default — the endpoint is not live yet, so the real
+        client returns None on its 404. cancel_refund_error=<status>
+        raises the HTTP error the real client raises (409 already
+        completed/cancelled or provider-refused, 502 provider did
+        not confirm)."""
+        self.cancel_refund_calls.append((order_id, telegram_id))
+        if self._cancel_refund_error is not None:
+            message = (
+                "Order is already completed and cannot be cancelled."
+                if self._cancel_refund_error == 409
+                else "Provider did not confirm the cancel. "
+                     "No refund was made."
+            )
+            req = bot.httpx.Request(
+                "POST",
+                f"https://paxyo.et/api/bot/orders/{order_id}/cancel-refund",
+            )
+            resp = bot.httpx.Response(
+                self._cancel_refund_error,
+                json={"error": message}, request=req,
+            )
+            raise bot.httpx.HTTPStatusError(
+                "cancel-refund failed", request=req, response=resp
+            )
+        return self._cancel_refund_result
 
     async def order_status(self, order_id, telegram_id):
         # Per-order statuses (ideas batch, 15 Nov 2026): the delivery
@@ -465,6 +566,35 @@ class FakePaxyo:
         None by default — the server endpoint is not live yet, so
         the real client returns None on its 404."""
         return self._admin_stats
+
+    async def record_referral(self, telegram_id, code):
+        """Mirror POST /referrals (per-user invite codes, 15 Nov
+        2026). referral_error=<message> raises the HTTP error the
+        real client raises when the server rejects the referral
+        (400 invalid/own code, 409 already deposited)."""
+        if self._referral_error is not None:
+            req = bot.httpx.Request(
+                "POST", "https://paxyo.et/api/bot/referrals"
+            )
+            resp = bot.httpx.Response(
+                400, json={"error": self._referral_error}, request=req
+            )
+            raise bot.httpx.HTTPStatusError(
+                "bad request", request=req, response=resp
+            )
+        self.referrals_recorded.append({
+            "telegram_id": telegram_id, "code": code,
+        })
+        return {
+            "ok": True, "referrer_telegram_id": 123456789,
+            "code_used": code, "already_recorded": False,
+        }
+
+    async def my_referral(self, telegram_id):
+        """Mirror GET /referrals — the seeded record, or None when
+        nothing is seeded (the real client returns None on a 404:
+        endpoint not live yet)."""
+        return self._my_referral
 
     async def create_user(self, telegram_id, username=None, first_name=None):
         return {"created": True}
@@ -502,13 +632,16 @@ class FakePaxyo:
         self._due = [s for s in self._due if s.get("id") != schedule_id]
         return {"ok": True}
 
-    async def create_deposit(self, telegram_id, amount, method, phone):
+    async def create_deposit(self, telegram_id, amount, method, phone,
+                             promo_code=None):
         """Mirror POST /deposits. deposit_none=True returns None (the
         real client does that on a 404: endpoint not live yet).
         deposit_error=<message> raises the HTTP error the real client
         raises when the server rejects the deposit (status
         deposit_error_status, default 400; use 502 for the Chapa
-        Direct Charge refusal)."""
+        Direct Charge refusal). promo_code is recorded as sent, so
+        tests can prove a validated code rode on the create call —
+        and that a second deposit carries none."""
         if self._deposit_none:
             return None
         if self._deposit_error is not None:
@@ -524,7 +657,7 @@ class FakePaxyo:
             )
         self.deposits_created.append({
             "telegram_id": telegram_id, "amount": amount,
-            "method": method, "phone": phone,
+            "method": method, "phone": phone, "promo_code": promo_code,
         })
         return {
             "deposit_id": "dep-1",
@@ -532,6 +665,125 @@ class FakePaxyo:
             "ussd_code": "*847#",
             "pay_to": "099387383",
             "status": "pending",
+        }
+
+    async def validate_promo(self, telegram_id, code):
+        """Mirror POST /promo-codes/validate. Returns the seeded
+        record for the code (default 20% ok), or the "does not
+        exist" record for an unmapped code. promo_none=True returns
+        None (404: endpoint not live yet)."""
+        if self._promo_none:
+            return None
+        if self._promo_error is not None:
+            req = bot.httpx.Request(
+                "POST", "https://paxyo.et/api/bot/promo-codes/validate"
+            )
+            resp = bot.httpx.Response(
+                self._promo_error, json={"error": "boom"}, request=req
+            )
+            raise bot.httpx.HTTPStatusError(
+                "server error", request=req, response=resp
+            )
+        self.promo_validates.append((telegram_id, code))
+        return self._promo_codes.get(str(code).upper(), {
+            "ok": False, "percent": None,
+            "message": "That promo code does not exist.",
+            "already_used": False,
+        })
+
+    async def redeem_promo(self, telegram_id, code, deposit_id):
+        """Mirror POST /promo-codes/redeem. Returns the seeded
+        result, or a 20% bonus of 20.00 ETB by default (the tests
+        seed the exact figure they expect). promo_redeem_none=True
+        returns None (404: endpoint not live yet)."""
+        if self._promo_redeem_none:
+            return None
+        self.promo_redeems.append((telegram_id, code, deposit_id))
+        if self._promo_redeem_result is not None:
+            return dict(self._promo_redeem_result)
+        return {
+            "ok": True, "bonus_etb": 20.0, "percent": 20,
+            "code": code, "deposit_id": deposit_id, "duplicate": False,
+        }
+
+    async def report_problem(self, telegram_id, message, order_id=None):
+        """Mirror POST /support-reports. Returns the filed record
+        (ok:true, report_id, status open) and records the call, so
+        tests can prove the right order id, user and message were
+        filed. report_none=True returns None (404: endpoint not
+        live yet, or the named order is not this user's).
+        report_error=<status> raises the HTTP error the real
+        client raises on a non-404 failure."""
+        if self._report_none:
+            return None
+        if self._report_error is not None:
+            req = bot.httpx.Request(
+                "POST", "https://paxyo.et/api/bot/support-reports"
+            )
+            resp = bot.httpx.Response(
+                self._report_error, json={"error": "boom"}, request=req
+            )
+            raise bot.httpx.HTTPStatusError(
+                "server error", request=req, response=resp
+            )
+        record = {
+            "telegram_id": telegram_id, "order_id": order_id,
+            "message": message,
+        }
+        self.reports_filed.append(record)
+        return {
+            "ok": True, "report_id": len(self.reports_filed),
+            "status": "open",
+            "note": "Report received. This does not refund your "
+                    "order — support will look into it.",
+        }
+
+    async def rate_order(self, order_id, telegram_id, rating):
+        """Mirror POST /orders/{id}/rate. Returns the filed record
+        (ok:true, order_id, rating) and records the call, so tests
+        can prove a tap files exactly once. rate_none=True returns
+        None (404: endpoint not live yet). rate_error=<status>
+        raises the HTTP error the real client raises on a non-404
+        failure. rate_already=True returns the already-rated 409
+        passthrough the real client returns (ok:false,
+        already_rated:true) and files nothing."""
+        if self._rate_none:
+            return None
+        if self._rate_error is not None:
+            req = bot.httpx.Request(
+                "POST",
+                f"https://paxyo.et/api/bot/orders/{order_id}/rate",
+            )
+            resp = bot.httpx.Response(
+                self._rate_error, json={"error": "boom"}, request=req
+            )
+            raise bot.httpx.HTTPStatusError(
+                "server error", request=req, response=resp
+            )
+        if self._rate_already:
+            return {
+                "ok": False, "already_rated": True,
+                "error": f"Order #{order_id} was already rated "
+                         "\"good\".",
+            }
+        self.ratings_filed.append({
+            "order_id": order_id, "telegram_id": telegram_id,
+            "rating": rating,
+        })
+        return {"ok": True, "order_id": order_id, "rating": rating}
+
+    async def service_ratings(self, service_ids):
+        """Mirror GET /ratings/services. Returns the seeded counts
+        per id (unknown ids 0/0), and records the call, so tests
+        can prove a pick fetches at most once. ratings_none=True
+        returns None (404: endpoint not live yet)."""
+        if self._ratings_none:
+            return None
+        self.ratings_calls.append(list(service_ids))
+        return {
+            str(sid): dict(self._ratings.get(str(sid),
+                                             {"good": 0, "bad": 0}))
+            for sid in service_ids
         }
 
     async def list_deposits(self, telegram_id, limit=5):
@@ -571,6 +823,32 @@ class FakePaxyo:
             "reason": reason,
         })
         return {"ok": True, "id": len(self.confusions_logged)}
+
+    # Per-user traits (feature 5, 15 Nov 2026): mirror POST/GET
+    # /user-traits and POST /user-traits/clear. load_traits returns
+    # the seeded traits, or None when nothing is stored (the real
+    # client returns None on a 404: endpoint not live yet).
+    # save_traits merges like the server (only the sent fields
+    # change, a null clears) and records the call.
+    async def save_traits(self, telegram_id, traits):
+        self.traits_saved.append((telegram_id, dict(traits)))
+        if self._traits is None:
+            self._traits = {}
+        for key, value in (traits or {}).items():
+            if value is None:
+                self._traits.pop(key, None)
+            else:
+                self._traits[key] = value
+        return {"ok": True, "traits": dict(self._traits)}
+
+    async def load_traits(self, telegram_id):
+        self.traits_loads.append(telegram_id)
+        return dict(self._traits) if self._traits else None
+
+    async def clear_traits(self, telegram_id):
+        self.traits_cleared.append(telegram_id)
+        self._traits = None
+        return {"ok": True}
 
     # One-time delayed orders (14 Nov 2026): mirror POST/GET
     # /delayed-orders, /cancel, /due, /claim, /finish.
@@ -680,6 +958,12 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -690,6 +974,12 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -867,6 +1157,12 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -877,6 +1173,12 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1124,6 +1426,12 @@ class TestMultiTurnOrder(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1134,6 +1442,12 @@ class TestMultiTurnOrder(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1299,6 +1613,12 @@ class TestThatLink(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1309,6 +1629,12 @@ class TestThatLink(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1409,6 +1735,12 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1419,6 +1751,12 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1568,6 +1906,12 @@ class TestSchedules(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1578,6 +1922,12 @@ class TestSchedules(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1687,9 +2037,11 @@ class FakeBot:
 
     def __init__(self):
         self.sent = []
+        self.sent_markups = []
 
-    async def send_message(self, chat_id, text):
+    async def send_message(self, chat_id, text, reply_markup=None):
         self.sent.append((chat_id, text))
+        self.sent_markups.append(reply_markup)
 
 
 class FakeApp:
@@ -1728,6 +2080,12 @@ class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1738,6 +2096,12 @@ class TestSchedulerLoop(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1835,6 +2199,12 @@ class TestDelayedOrders(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -1848,6 +2218,12 @@ class TestDelayedOrders(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -2769,6 +3145,12 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -2780,6 +3162,12 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3064,6 +3452,12 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3076,6 +3470,12 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3300,6 +3700,12 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3311,6 +3717,12 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3563,6 +3975,1238 @@ class TestDepositApiClient(unittest.IsolatedAsyncioTestCase):
             await client._client.aclose()
 
 
+class TestPromoCodesApiClient(unittest.IsolatedAsyncioTestCase):
+    """POST /promo-codes/validate and /promo-codes/redeem: request
+    shape, the 404 -> None mapping, and the business-failure
+    passthrough (ok:false is an HTTP 200 the client must return,
+    never raise). Also that a validated code rides on the deposit
+    create body — and that no code means no promo_code key at all."""
+
+    def _err(self, status):
+        req = bot.httpx.Request("POST", "https://paxyo.et/api/bot/promo-codes/validate")
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError("error", request=req, response=resp)
+
+    async def test_validate_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=self._err(404))
+            ):
+                self.assertIsNone(await client.validate_promo(1, "PAXYO20"))
+        finally:
+            await client._client.aclose()
+
+    async def test_validate_posts_expected_body_and_returns_record(self):
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": True, "percent": 20,
+                      "message": "Promo code valid: 20% bonus on your deposit.",
+                      "already_used": False}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ) as send:
+                result = await client.validate_promo(1, "PAXYO20")
+            self.assertEqual(result, record)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/promo-codes/validate"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(
+                json.loads(request.content),
+                {"telegram_id": 1, "code": "PAXYO20"},
+            )
+        finally:
+            await client._client.aclose()
+
+    async def test_validate_passes_business_failure_through(self):
+        # Already-used is ok:false with already_used:true on HTTP
+        # 200 — a plain answer for the user, not an exception.
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": False, "percent": None,
+                      "message": "You have already used this code.",
+                      "already_used": True}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ):
+                result = await client.validate_promo(1, "PAXYO20")
+            self.assertEqual(result, record)
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["already_used"])
+        finally:
+            await client._client.aclose()
+
+    async def test_validate_invalid_passes_through(self):
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": False, "percent": None,
+                      "message": "That promo code does not exist.",
+                      "already_used": False}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ):
+                result = await client.validate_promo(1, "NOPE99")
+            self.assertEqual(result, record)
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["already_used"])
+        finally:
+            await client._client.aclose()
+
+    async def test_validate_other_error_raises(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=self._err(500))
+            ):
+                with self.assertRaises(bot.httpx.HTTPStatusError):
+                    await client.validate_promo(1, "PAXYO20")
+        finally:
+            await client._client.aclose()
+
+    async def test_redeem_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=self._err(404))
+            ):
+                self.assertIsNone(await client.redeem_promo(1, "PAXYO20", "dep-1"))
+        finally:
+            await client._client.aclose()
+
+    async def test_redeem_posts_expected_body_and_returns_record(self):
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": True, "bonus_etb": 20.0, "percent": 20,
+                      "code": "PAXYO20", "deposit_id": "dep-1",
+                      "duplicate": False}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ) as send:
+                result = await client.redeem_promo(1, "PAXYO20", "dep-1")
+            self.assertEqual(result, record)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/promo-codes/redeem"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(
+                json.loads(request.content),
+                {"telegram_id": 1, "code": "PAXYO20", "deposit_id": "dep-1"},
+            )
+        finally:
+            await client._client.aclose()
+
+    async def test_redeem_duplicate_passes_through(self):
+        # A repeat redeem returns the recorded bonus with
+        # duplicate:true — never a second credit, never an error.
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": True, "bonus_etb": 20.0, "percent": 20,
+                      "code": "PAXYO20", "deposit_id": "dep-1",
+                      "duplicate": True}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ):
+                result = await client.redeem_promo(1, "PAXYO20", "dep-1")
+            self.assertEqual(result, record)
+            self.assertTrue(result["duplicate"])
+            self.assertEqual(result["bonus_etb"], 20.0)
+        finally:
+            await client._client.aclose()
+
+    async def test_create_deposit_with_promo_code_includes_it(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={"deposit_id": "dep-1"}),
+            ) as send:
+                await client.create_deposit(
+                    1, 100, "telebirr", "25199387383", promo_code="PAXYO20"
+                )
+            self.assertEqual(
+                json.loads(send.call_args.args[0].content),
+                {"telegram_id": 1, "amount": 100, "method": "telebirr",
+                 "phone": "25199387383", "promo_code": "PAXYO20"},
+            )
+        finally:
+            await client._client.aclose()
+
+
+class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
+    """Promo codes in chat (ideas batch 2, feature 1, 15 Nov 2026):
+    a user types a code, the bot validates it against the server,
+    remembers it for exactly ONE deposit, attaches it to the deposit
+    create, and reports the bonus when the deposit completes. A code
+    never discounts an order price — it only adds a bonus on a real
+    deposit, once per user, once per deposit."""
+
+    VALID = {
+        "PAXYO20": {"ok": True, "percent": 20,
+                    "message": "Promo code valid: 20% bonus on your deposit.",
+                    "already_used": False},
+        "WELCOME10": {"ok": True, "percent": 10,
+                      "message": "Promo code valid: 10% bonus on your deposit.",
+                      "already_used": False},
+    }
+    EXPIRED = {
+        "OLD99": {"ok": False, "percent": None,
+                  "message": "This promo code has expired.",
+                  "already_used": False},
+    }
+    USED = {
+        "USED10": {"ok": False, "percent": None,
+                   "message": "You have already used this code.",
+                   "already_used": True},
+    }
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.VALIDATED_PROMO.clear()
+        bot.PROMO_DEPOSIT.clear()
+        bot.PROMO_OFFER.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.VALIDATED_PROMO.clear()
+        bot.PROMO_DEPOSIT.clear()
+        bot.PROMO_OFFER.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        # turns are (text, intent-or-None): an intent is only
+        # consumed when the turn reaches the classifier, so a bare
+        # promo-code turn (answered before the classifier) passes
+        # None and the intents stay aligned to the calls.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo(promo_codes=self.VALID)
+        intents = [intent for _, intent in turns if intent is not None]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _confirm(self, fake):
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        query = FakeQuery(f"confirm:{confirm_id}", message_text="Please confirm:")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update, None)
+        return query
+
+    async def test_bare_code_validates_and_is_remembered(self):
+        msg, fake = await self._turns([("PAXYO20", None)])
+        self.assertEqual(
+            msg.text_sent,
+            ["Code accepted — you'll get 20% extra on your next deposit."],
+        )
+        self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1], {"code": "PAXYO20", "percent": 20}
+        )
+
+    async def test_my_code_is_phrasing_validates(self):
+        msg, fake = await self._turns([("my code is WELCOME10", None)])
+        self.assertEqual(
+            msg.text_sent,
+            ["Code accepted — you'll get 10% extra on your next deposit."],
+        )
+        self.assertEqual(fake.promo_validates, [(1, "WELCOME10")])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1], {"code": "WELCOME10", "percent": 10}
+        )
+
+    async def test_lowercase_bare_code_validates(self):
+        msg, fake = await self._turns([("paxyo20", None)])
+        self.assertIn("20% extra", msg.text_sent[0])
+        self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
+
+    async def test_invalid_code_answered_honestly(self):
+        msg, fake = await self._turns([("NOPE99", None)])
+        self.assertEqual(msg.text_sent, ["That promo code isn't valid."])
+        self.assertEqual(fake.promo_validates, [(1, "NOPE99")])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_expired_code_uses_server_reason(self):
+        fake = FakePaxyo(promo_codes=self.EXPIRED)
+        msg, fake = await self._turns([("OLD99", None)], paxyo=fake)
+        self.assertEqual(msg.text_sent, ["This promo code has expired."])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_already_used_code_answered_plainly(self):
+        fake = FakePaxyo(promo_codes=self.USED)
+        msg, fake = await self._turns([("USED10", None)], paxyo=fake)
+        self.assertEqual(msg.text_sent, ["You've already used this code."])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_endpoint_not_live_answered_honestly(self):
+        fake = FakePaxyo(promo_none=True)
+        msg, fake = await self._turns([("PAXYO20", None)], paxyo=fake)
+        self.assertEqual(
+            msg.text_sent,
+            ["Promo codes aren't switched on yet — I'll let you know when they are."],
+        )
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_validate_error_answers_not_understood(self):
+        fake = FakePaxyo(promo_error=500)
+        msg, _ = await self._turns([("PAXYO20", None)], paxyo=fake)
+        self.assertEqual(msg.text_sent, [bot.t("not_understood", "en")])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_bare_number_is_not_a_code(self):
+        # A bare "1000" is a quantity, not a code: no validate call,
+        # and the bot asks for the platform instead of a bonus.
+        msg, fake = await self._turns(
+            [("1000", intent_of("unclear"))]
+        )
+        self.assertEqual(fake.promo_validates, [])
+        self.assertIn("Which platform?", msg.text_sent[0])
+
+    async def test_bare_word_is_not_a_code(self):
+        msg, fake = await self._turns(
+            [("hello", intent_of("greeting"))]
+        )
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_code_shaped_token_in_order_does_not_hijack(self):
+        # The code rides in an order message: the order wins, no
+        # validate call, the bot asks for the link.
+        msg, fake = await self._turns([
+            ("order PAXYO20 tiktok views",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views", quantity=1000)),
+        ])
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+        self.assertIn("link", msg.text_sent[0].lower())
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
+
+    async def test_code_while_draft_open_does_not_hijack(self):
+        # An order is being built (waiting for its link): the code
+        # is left alone — the draft survives untouched, no validate.
+        msg, fake = await self._turns([
+            ("I want 1000 TikTok views",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views", quantity=1000)),
+            ("PAXYO20", intent_of("unclear")),
+        ])
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 1000)
+        self.assertIn("link", msg.text_sent[1].lower())
+
+    async def test_code_while_deposit_draft_open_does_not_hijack(self):
+        # A deposit is being built (waiting for its phone): the code
+        # does not jump the queue — the draft keeps its amount.
+        msg, fake = await self._turns([
+            ("I want to deposit 100 by telebirr",
+             intent_of("deposit", amount=100, method="telebirr")),
+            ("PAXYO20", intent_of("unclear")),
+        ])
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+        self.assertEqual(bot.DEPOSIT_DRAFT[1].get("amount"), 100.0)
+
+    async def test_offer_asked_for_ambiguous_token(self):
+        # "PAXYO20 please" is code-shaped but not bare: the bot
+        # asks instead of validating outright, and validates nothing.
+        msg, fake = await self._turns([("PAXYO20 please", None)])
+        self.assertEqual(
+            msg.text_sent,
+            ["Is PAXYO20 a promo code? Reply yes and I'll check it for you."],
+        )
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.PROMO_OFFER[1], "PAXYO20")
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_offer_yes_validates(self):
+        msg, fake = await self._turns([
+            ("PAXYO20 please", None),
+            ("yes", None),
+        ])
+        self.assertEqual(
+            msg.text_sent[1],
+            "Code accepted — you'll get 20% extra on your next deposit.",
+        )
+        self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1], {"code": "PAXYO20", "percent": 20}
+        )
+        self.assertEqual(bot.PROMO_OFFER, {})
+
+    async def test_offer_no_declines(self):
+        msg, fake = await self._turns([
+            ("PAXYO20 please", None),
+            ("no", None),
+        ])
+        self.assertEqual(msg.text_sent[1], "Okay — no problem.")
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.PROMO_OFFER, {})
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_offer_stale_message_drops_it(self):
+        # The user moves on to a balance question instead: the
+        # offer dies, and a later "yes" validates nothing.
+        msg, fake = await self._turns([
+            ("PAXYO20 please", None),
+            ("how much is my balance", intent_of("balance")),
+            ("yes", intent_of("unclear")),
+        ])
+        self.assertEqual(bot.PROMO_OFFER, {})
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+        self.assertIn("balance", msg.text_sent[1].lower())
+
+    async def test_offer_not_asked_for_deposit_word(self):
+        # "deposit PAXYO20" names a deposit: no offer, no validate.
+        msg, fake = await self._turns([
+            ("deposit PAXYO20", intent_of("unclear")),
+        ])
+        self.assertEqual(fake.promo_validates, [])
+        self.assertEqual(bot.PROMO_OFFER, {})
+
+    async def test_invite_code_gets_invite_reply_not_promo(self):
+        # The shared invite code is a real invite code, not a promo
+        # code: the user gets their invite link, never a "does not
+        # exist" from the promo endpoint.
+        msg, fake = await self._turns([("REF3723FB335", None)])
+        self.assertEqual(fake.promo_validates, [])
+        self.assertIn("Invite your friends", msg.text_sent[0])
+        self.assertIn("t.me/paxorder_bot?start=", msg.text_sent[0])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_deposit_confirm_card_shows_code(self):
+        msg, fake = await self._turns([
+            ("PAXYO20", None),
+            ("deposit 100 telebirr 099387383",
+             intent_of("deposit", amount=100, method="telebirr",
+                       phone="099387383")),
+        ])
+        self.assertIn("100.00 ETB", msg.text_sent[1])
+        self.assertIn("Promo code PAXYO20", msg.text_sent[1])
+        self.assertIn("20% bonus", msg.text_sent[1])
+        self.assertEqual(fake.deposits_created, [])
+
+    async def test_deposit_creation_carries_validated_code(self):
+        msg, fake = await self._turns([
+            ("PAXYO20", None),
+            ("deposit 100 telebirr 099387383",
+             intent_of("deposit", amount=100, method="telebirr",
+                       phone="099387383")),
+        ])
+        query = await self._confirm(fake)
+        self.assertIn("100.00 ETB", query.edited[0])
+        self.assertEqual(len(fake.deposits_created), 1)
+        self.assertEqual(fake.deposits_created[0]["promo_code"], "PAXYO20")
+        # The code is spent on this deposit: remembered no longer
+        # as a standing code, but as the deposit's own code.
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+        self.assertEqual(
+            bot.PROMO_DEPOSIT[1],
+            {"code": "PAXYO20", "percent": 20, "deposit_id": "dep-1"},
+        )
+
+    async def test_second_deposit_has_no_code_attached(self):
+        msg, fake = await self._turns([
+            ("PAXYO20", None),
+            ("deposit 100 telebirr 099387383",
+             intent_of("deposit", amount=100, method="telebirr",
+                       phone="099387383")),
+        ])
+        await self._confirm(fake)
+        msg2, fake2 = await self._turns([
+            ("deposit 50 telebirr 099387383",
+             intent_of("deposit", amount=50, method="telebirr",
+                       phone="099387383")),
+        ], paxyo=fake)
+        self.assertNotIn("PAXYO20", msg2.text_sent[0])
+        query = await self._confirm(fake)
+        self.assertEqual(len(fake.deposits_created), 2)
+        self.assertEqual(fake.deposits_created[0]["promo_code"], "PAXYO20")
+        self.assertIsNone(fake.deposits_created[1]["promo_code"])
+        self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
+
+    async def test_deposit_completion_clears_code_and_mentions_bonus(self):
+        dep = dict(FakePaxyo.DEPOSIT)
+        dep.update({"id": "dep-1", "amount": 100, "status": "completed"})
+        fake = FakePaxyo(
+            promo_codes=self.VALID,
+            deposits=[dep],
+            promo_redeem_result={
+                "ok": True, "bonus_etb": 20.0, "percent": 20,
+                "code": "PAXYO20", "deposit_id": "dep-1",
+                "duplicate": True,
+            },
+        )
+        msg, fake = await self._turns([
+            ("PAXYO20", None),
+            ("deposit 100 telebirr 099387383",
+             intent_of("deposit", amount=100, method="telebirr",
+                       phone="099387383")),
+        ], paxyo=fake)
+        await self._confirm(fake)
+        msg2, _ = await self._turns([("I paid", None)], paxyo=fake)
+        self.assertIn("went through", msg2.text_sent[0])
+        self.assertIn("100.00 ETB", msg2.text_sent[0])
+        self.assertIn("PAXYO20", msg2.text_sent[0])
+        self.assertIn("+20.00 ETB", msg2.text_sent[0])
+        self.assertIn("20% extra", msg2.text_sent[0])
+        self.assertEqual(fake.promo_redeems, [(1, "PAXYO20", "dep-1")])
+        self.assertEqual(bot.PROMO_DEPOSIT, {})
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+
+    async def test_website_deposit_redeem_uses_validated_code(self):
+        # Paid on the website (no chat deposit was ever created):
+        # the validated code is redeemed against the completed
+        # deposit when the user says "I paid".
+        dep = dict(FakePaxyo.DEPOSIT)
+        dep.update({"id": "dep-9", "amount": 100, "status": "completed"})
+        fake = FakePaxyo(
+            promo_codes=self.VALID,
+            deposits=[dep],
+            promo_redeem_result={
+                "ok": True, "bonus_etb": 20.0, "percent": 20,
+                "code": "PAXYO20", "deposit_id": "dep-9",
+                "duplicate": False,
+            },
+        )
+        msg, fake = await self._turns([("PAXYO20", None)], paxyo=fake)
+        msg2, _ = await self._turns([("I paid", None)], paxyo=fake)
+        self.assertIn("went through", msg2.text_sent[0])
+        self.assertIn("+20.00 ETB", msg2.text_sent[0])
+        self.assertEqual(fake.promo_redeems, [(1, "PAXYO20", "dep-9")])
+        self.assertEqual(bot.VALIDATED_PROMO, {})
+        self.assertEqual(bot.PROMO_DEPOSIT, {})
+
+    async def test_redeem_not_live_says_applied_for_attached_code(self):
+        # The hook is server-side, so when the redeem endpoint is
+        # not live the bot still says the bonus was applied with
+        # the deposit — it never claims an exact figure it cannot
+        # verify.
+        dep = dict(FakePaxyo.DEPOSIT)
+        dep.update({"id": "dep-1", "amount": 100, "status": "completed"})
+        fake = FakePaxyo(
+            promo_codes=self.VALID, deposits=[dep],
+            promo_redeem_none=True,
+        )
+        msg, fake = await self._turns([
+            ("PAXYO20", None),
+            ("deposit 100 telebirr 099387383",
+             intent_of("deposit", amount=100, method="telebirr",
+                       phone="099387383")),
+        ], paxyo=fake)
+        await self._confirm(fake)
+        msg2, _ = await self._turns([("I paid", None)], paxyo=fake)
+        self.assertIn("went through", msg2.text_sent[0])
+        self.assertIn("was applied with this deposit", msg2.text_sent[0])
+        self.assertIn("PAXYO20", msg2.text_sent[0])
+        self.assertEqual(bot.PROMO_DEPOSIT, {})
+
+    async def test_amharic_code_ask_and_accept(self):
+        # An Amharic message carrying a Latin code: the ask and the
+        # acceptance both come back in Amharic.
+        msg, fake = await self._turns([
+            ("ኮድ PAXYO20", None),
+            ("አዎ", None),
+        ])
+        self.assertIn("promo code ነው?", msg.text_sent[0])
+        self.assertIn("ኮድ ተቀብሏል", msg.text_sent[1])
+        self.assertIn("20%", msg.text_sent[1])
+        self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1], {"code": "PAXYO20", "percent": 20}
+        )
+
+    def test_promo_detection_unit_cases(self):
+        self.assertEqual(bot.extract_promo_code("PAXYO20"), "PAXYO20")
+        self.assertEqual(bot.extract_promo_code("my code is WELCOME10"), "WELCOME10")
+        self.assertEqual(bot.extract_promo_code("promo code PAXYO20"), "PAXYO20")
+        self.assertEqual(bot.extract_promo_code("code: ABC123"), "ABC123")
+        self.assertIsNone(bot.extract_promo_code("1000"))
+        self.assertIsNone(bot.extract_promo_code("hello"))
+        self.assertIsNone(bot.extract_promo_code("ABC"))
+        self.assertIsNone(bot.extract_promo_code("A1"))
+        self.assertIsNone(bot.extract_promo_code("I want 1000 TikTok views"))
+        self.assertIsNone(bot.extract_promo_code("order PAXYO20 tiktok views"))
+        self.assertEqual(bot.extract_promo_offer("PAXYO20 please"), "PAXYO20")
+        self.assertEqual(bot.extract_promo_offer("use WELCOME10"), "WELCOME10")
+        self.assertIsNone(bot.extract_promo_offer("deposit PAXYO20"))
+        self.assertIsNone(bot.extract_promo_offer("PAXYO20 views"))
+        self.assertIsNone(bot.extract_promo_offer("PAXYO20"))
+
+    def test_promo_failure_text_mapping(self):
+        self.assertEqual(
+            bot._promo_failure_text(
+                {"ok": False, "message": "This promo code has expired."}, "en"
+            ),
+            "This promo code has expired.",
+        )
+        self.assertEqual(
+            bot._promo_failure_text(
+                {"ok": False, "message": "This promo code has expired."}, "am"
+            ),
+            "የዚህ promo code ጊዜ አልፏል።",
+        )
+        self.assertEqual(
+            bot._promo_failure_text(
+                {"ok": False, "message": "You have already used this code."}, "am"
+            ),
+            "ይህን ኮድ አስቀድመው ተጠቅመውበታል።",
+        )
+        self.assertEqual(
+            bot._promo_failure_text(
+                {"ok": False, "message": "Something odd happened."}, "en"
+            ),
+            "Something odd happened.",
+        )
+        self.assertEqual(
+            bot._promo_failure_text(
+                {"ok": False, "message": "Something odd happened."}, "am"
+            ),
+            "ይህ promo code ትክክል አይደለም።",
+        )
+        self.assertEqual(
+            bot._promo_failure_text({"ok": False}, "en"),
+            "That promo code isn't valid.",
+        )
+
+
+class TestReportProblemApiClient(unittest.IsolatedAsyncioTestCase):
+    """POST /support-reports: request shape (order_id nullable),
+    the 404 -> None mapping, and the non-404 raise."""
+
+    def _err(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://paxyo.et/api/bot/support-reports"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError("error", request=req, response=resp)
+
+    async def test_report_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=self._err(404))
+            ):
+                self.assertIsNone(
+                    await client.report_problem(
+                        1, "The views never arrived", order_id=1841
+                    )
+                )
+        finally:
+            await client._client.aclose()
+
+    async def test_report_posts_expected_body_with_order_id(self):
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": True, "report_id": 12, "status": "open",
+                      "note": "Report received. This does not refund "
+                              "your order — support will look into it."}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ) as send:
+                result = await client.report_problem(
+                    1, "The views never arrived", order_id=1841
+                )
+            self.assertEqual(result, record)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/support-reports"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(
+                json.loads(request.content),
+                {"telegram_id": 1, "order_id": 1841,
+                 "message": "The views never arrived"},
+            )
+        finally:
+            await client._client.aclose()
+
+    async def test_report_posts_null_order_id_without_order(self):
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": True, "report_id": 13, "status": "open",
+                      "note": "Report received. This does not refund "
+                              "your order — support will look into it."}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ) as send:
+                result = await client.report_problem(
+                    1, "The bot keeps crashing"
+                )
+            self.assertEqual(result, record)
+            self.assertEqual(
+                json.loads(send.call_args.args[0].content),
+                {"telegram_id": 1, "order_id": None,
+                 "message": "The bot keeps crashing"},
+            )
+        finally:
+            await client._client.aclose()
+
+    async def test_report_other_error_raises(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=self._err(500))
+            ):
+                with self.assertRaises(bot.httpx.HTTPStatusError):
+                    await client.report_problem(
+                        1, "The views never arrived", order_id=1841
+                    )
+        finally:
+            await client._client.aclose()
+
+
+class TestReportProblem(unittest.IsolatedAsyncioTestCase):
+    """Report a problem in chat (ideas batch 2, feature 2, 15 Nov
+    2026): the user reports a problem with an order (button on a
+    My-orders row, a typed request, or a reply to a delivery
+    message) or without one, describes it in one message, and the
+    bot files it via POST /support-reports and confirms — naming
+    the order and saying it does NOT refund. When the endpoint is
+    not live yet the bot answers honestly with the t.me/paxyo
+    fallback and never pretends the report was filed. "cancel"
+    drops the flow with nothing filed, and a report never hijacks
+    an in-progress draft or Confirm card."""
+
+    SECOND_ORDER = {
+        "id": 1828, "service_id": 1002,
+        "service_name": "TikTok Views | Fast",
+        "link": "https://tiktok.com/@x/video/1", "quantity": 500,
+        "charge": 9.45, "status": "completed",
+        "created_at": "2026-11-13T09:00:00Z",
+    }
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PARTIAL.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.LAST_LANG.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.PENDING_DELAYED.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.SPLIT_DRAFT.clear()
+        bot.BUDGET_OPTIONS.clear()
+        bot.PROMO_OFFER.clear()
+        bot.FRIDAY_PENDING.clear()
+        bot.FRIDAY_LINK.clear()
+        bot.REPORT_PENDING.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PARTIAL.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.LAST_LANG.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.PENDING_DELAYED.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.SPLIT_DRAFT.clear()
+        bot.BUDGET_OPTIONS.clear()
+        bot.PROMO_OFFER.clear()
+        bot.FRIDAY_PENDING.clear()
+        bot.FRIDAY_LINK.clear()
+        bot.REPORT_PENDING.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        # turns are (text, intent-or-None): an intent is only
+        # consumed when the turn reaches the classifier, so a report
+        # turn (answered before the classifier) passes None and the
+        # intents stay aligned to the calls.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns if intent is not None]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _run_callback(self, data, paxyo=None):
+        query = FakeQuery(data, message_text="My orders")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    def test_detection_unit_cases(self):
+        self.assertTrue(bot.is_report_problem_request(
+            "report a problem with order 1841"))
+        self.assertTrue(bot.is_report_problem_request(
+            "my order 1841 didn't arrive"))
+        self.assertTrue(bot.is_report_problem_request(
+            "there's a problem with my order"))
+        self.assertTrue(bot.is_report_problem_request(
+            "there is a problem with my order"))
+        self.assertTrue(bot.is_report_problem_request(
+            "my order didn't arrive"))
+        self.assertTrue(bot.is_report_problem_request(
+            "something wrong with my order"))
+        self.assertFalse(bot.is_report_problem_request("my orders"))
+        self.assertFalse(bot.is_report_problem_request("where is my order"))
+        self.assertFalse(bot.is_report_problem_request(
+            "I want 1000 Instagram followers"))
+        self.assertFalse(bot.is_report_problem_request("hello"))
+        self.assertEqual(
+            bot.extract_report_order_id("report a problem with order 1841"),
+            1841)
+        self.assertEqual(
+            bot.extract_report_order_id("order #1841"), 1841)
+        self.assertEqual(bot.extract_report_order_id("1841"), 1841)
+        self.assertEqual(bot.extract_report_order_id("#1841"), 1841)
+        self.assertEqual(
+            bot.extract_report_order_id("order number 1841"), 1841)
+        self.assertIsNone(bot.extract_report_order_id(
+            "my order 10k views didn't arrive"))
+        self.assertIsNone(bot.extract_report_order_id(
+            "there's a problem with my order"))
+        self.assertEqual(
+            bot.extract_quoted_order_id(
+                "✅ Your order is delivered — 100 TikTok views, "
+                "order #1841. Thank you for ordering with Paxyo! 🎉"),
+            1841)
+        self.assertEqual(
+            bot.extract_quoted_order_id(
+                "Order placed!\nService: TikTok Video Views\n"
+                "Quantity: 100\nLink: https://tiktok.com/x\n"
+                "Total: 1.89 ETB\nOrder ID: 1841\nStatus: pending"),
+            1841)
+        self.assertIsNone(bot.extract_quoted_order_id(
+            "Please confirm: 1000 TikTok views"))
+        self.assertIsNone(bot.extract_quoted_order_id(None))
+        self.assertTrue(bot.is_report_complaint("it never arrived"))
+        self.assertTrue(bot.is_report_complaint("this is wrong"))
+        self.assertTrue(bot.is_report_complaint("my order is stuck"))
+        self.assertFalse(bot.is_report_complaint("thanks!"))
+        self.assertFalse(bot.is_report_complaint("where is it"))
+        self.assertFalse(bot.is_report_complaint("got it, great"))
+
+    def test_amharic_templates(self):
+        self.assertIn(
+            "1841", bot.t("report_ask_order", "am", order_id=1841))
+        self.assertIn(
+            "t.me/paxyo", bot.t("report_filed", "am", order_id=1841))
+        self.assertIn(
+            "refund", bot.t("report_filed", "am", order_id=1841))
+        self.assertIn(
+            "t.me/paxyo", bot.t("report_not_live", "am", order_id=1841))
+        self.assertIn(
+            "t.me/paxyo",
+            bot.t("report_filed_no_order", "am"))
+
+    async def test_my_orders_row_carries_report_button(self):
+        msg = FakeMessage("/orders")
+        update = FakeUpdate(msg)
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, self.SECOND_ORDER])
+        with mock.patch("bot.paxyo", fake):
+            await bot.orders_cmd(update, None)
+        markup = msg.markups[0]
+        self.assertIsNotNone(markup)
+        callbacks = [b.callback_data for row in markup.inline_keyboard
+                     for b in row]
+        # Reorder rows stay first; the report rows follow them.
+        self.assertEqual(callbacks[0], "reorder:1827")
+        self.assertEqual(callbacks[1], "reorder:1828")
+        self.assertIn("report:1827", callbacks)
+        self.assertIn("report:1828", callbacks)
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        self.assertTrue(any("Report a problem" in label for label in labels))
+
+    async def test_report_button_starts_flow_asking_whats_wrong(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        query = await self._run_callback("report:1827", paxyo=fake)
+        self.assertTrue(query.answered)
+        self.assertEqual(len(query.edited), 1)
+        self.assertEqual(
+            query.edited[0], "What's wrong with order #1827? Send me "
+            "one message describing it — or say \"cancel\" to drop it.")
+        self.assertEqual(
+            bot.REPORT_PENDING[1],
+            {"order_id": 1827, "step": "describe"})
+
+    async def test_typed_report_with_order_id_asks_for_description(self):
+        msg, fake = await self._turns(
+            [("report a problem with order 1841", None)])
+        self.assertEqual(
+            msg.text_sent,
+            ["What's wrong with order #1841? Send me one message "
+             "describing it — or say \"cancel\" to drop it."])
+        self.assertEqual(
+            bot.REPORT_PENDING[1],
+            {"order_id": 1841, "step": "describe"})
+        self.assertEqual(fake.reports_filed, [])
+
+    async def test_my_order_didnt_arrive_detected(self):
+        msg, _ = await self._turns([("my order 1841 didn't arrive", None)])
+        self.assertIn("#1841", msg.text_sent[0])
+        self.assertIn("What's wrong", msg.text_sent[0])
+        self.assertEqual(
+            bot.REPORT_PENDING[1],
+            {"order_id": 1841, "step": "describe"})
+
+    async def test_description_filed_with_right_order_user_message(self):
+        # The filed message is the normalized (lowercased) text
+        # handle_order_text passes on — the same form the confusion
+        # log stores.
+        msg, fake = await self._turns([
+            ("report a problem with order 1841", None),
+            ("The views never arrived", None),
+        ])
+        self.assertEqual(fake.reports_filed, [{
+            "telegram_id": 1, "order_id": 1841,
+            "message": "the views never arrived",
+        }])
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertIn("Reported", msg.text_sent[1])
+        self.assertIn("#1841", msg.text_sent[1])
+
+    async def test_confirmation_names_order_and_says_no_refund(self):
+        msg, _ = await self._turns([
+            ("report a problem with order 1841", None),
+            ("The views never arrived", None),
+        ])
+        self.assertEqual(
+            msg.text_sent[1],
+            "Reported — I've sent this to our support team with order "
+            "#1841. They'll look into it. This doesn't refund the "
+            "order — if you need a refund, talk to support at "
+            "t.me/paxyo.")
+
+    async def test_no_order_id_asks_which_order(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, self.SECOND_ORDER])
+        msg, _ = await self._turns(
+            [("there's a problem with my order", None)], paxyo=fake)
+        self.assertIn("Which order is this about?", msg.text_sent[0])
+        self.assertEqual(
+            bot.REPORT_PENDING[1], {"order_id": None, "step": "pick"})
+        markup = msg.markups[0]
+        self.assertIsNotNone(markup)
+        callbacks = [b.callback_data for row in markup.inline_keyboard
+                     for b in row]
+        self.assertIn("report:1827", callbacks)
+        self.assertIn("report:1828", callbacks)
+        self.assertIn("report:none", callbacks)
+
+    async def test_no_recent_orders_asks_for_number_in_text(self):
+        fake = FakePaxyo(recent=[])
+        msg, _ = await self._turns(
+            [("there's a problem with my order", None)], paxyo=fake)
+        self.assertIn("Which order is this about?", msg.text_sent[0])
+        self.assertIn("order number", msg.text_sent[0])
+        self.assertIsNone(msg.markups[0])
+
+    async def test_typed_id_in_pick_step_accepted_then_filed(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg, fake = await self._turns([
+            ("there's a problem with my order", None),
+            ("1841", None),
+            ("The views never arrived", None),
+        ], paxyo=fake)
+        self.assertIn("#1841", msg.text_sent[1])
+        self.assertEqual(fake.reports_filed, [{
+            "telegram_id": 1, "order_id": 1841,
+            "message": "the views never arrived",
+        }])
+        self.assertIn("Reported", msg.text_sent[2])
+
+    async def test_pick_step_button_tap_files_with_that_order(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, self.SECOND_ORDER])
+        msg, fake = await self._turns(
+            [("there's a problem with my order", None)], paxyo=fake)
+        query = await self._run_callback("report:1828", paxyo=fake)
+        self.assertIn("#1828", query.edited[0])
+        msg2, fake = await self._turns(
+            [("The followers dropped the next day", None)], paxyo=fake)
+        # The callback set the flow; the turn above files it.
+        self.assertEqual(fake.reports_filed, [{
+            "telegram_id": 1, "order_id": 1828,
+            "message": "the followers dropped the next day",
+        }])
+        self.assertIn("#1828", msg2.text_sent[0])
+
+    async def test_no_order_typed_files_without_order(self):
+        msg, fake = await self._turns([
+            ("there's a problem with my order", None),
+            ("no order", None),
+            ("The bot keeps crashing", None),
+        ])
+        self.assertEqual(fake.reports_filed, [{
+            "telegram_id": 1, "order_id": None,
+            "message": "the bot keeps crashing",
+        }])
+        self.assertEqual(
+            msg.text_sent[2],
+            "Reported — I've sent this to our support team. They'll "
+            "look into it. This doesn't refund any order — if you "
+            "need a refund, talk to support at t.me/paxyo.")
+
+    async def test_no_order_button_files_without_order(self):
+        fake = FakePaxyo()
+        query = await self._run_callback("report:none", paxyo=fake)
+        self.assertEqual(
+            query.edited[0],
+            "What's wrong? Send me one message describing it — or "
+            "say \"cancel\" to drop it.")
+        self.assertEqual(
+            bot.REPORT_PENDING[1],
+            {"order_id": None, "step": "describe"})
+        msg, fake = await self._turns(
+            [("I deposited but my balance never changed", None)],
+            paxyo=fake)
+        self.assertEqual(fake.reports_filed, [{
+            "telegram_id": 1, "order_id": None,
+            "message": "i deposited but my balance never changed",
+        }])
+
+    async def test_endpoint_not_live_answered_honestly(self):
+        fake = FakePaxyo(report_none=True)
+        msg, fake = await self._turns([
+            ("report a problem with order 1841", None),
+            ("The views never arrived", None),
+        ], paxyo=fake)
+        self.assertEqual(fake.reports_filed, [])
+        self.assertEqual(
+            msg.text_sent[1],
+            "I couldn't file that right now — please message our "
+            "support at t.me/paxyo with order #1841 and what "
+            "happened.")
+        self.assertNotIn("Reported", msg.text_sent[1])
+
+    async def test_endpoint_error_answered_honestly(self):
+        fake = FakePaxyo(report_error=500)
+        msg, fake = await self._turns([
+            ("report a problem with order 1841", None),
+            ("The views never arrived", None),
+        ], paxyo=fake)
+        self.assertEqual(fake.reports_filed, [])
+        self.assertIn("t.me/paxyo", msg.text_sent[1])
+        self.assertNotIn("Reported", msg.text_sent[1])
+
+    async def test_endpoint_not_live_no_order_answered_honestly(self):
+        fake = FakePaxyo(report_none=True, recent=[])
+        msg, fake = await self._turns([
+            ("there's a problem with my order", None),
+            ("no order", None),
+            ("The bot keeps crashing", None),
+        ], paxyo=fake)
+        self.assertEqual(fake.reports_filed, [])
+        self.assertEqual(
+            msg.text_sent[2],
+            "I couldn't file that right now — please message our "
+            "support at t.me/paxyo and tell them what happened.")
+        self.assertNotIn("Reported", msg.text_sent[2])
+
+    async def test_cancel_drops_flow_with_no_report(self):
+        msg, fake = await self._turns([
+            ("report a problem with order 1841", None),
+            ("cancel", None),
+        ])
+        self.assertEqual(fake.reports_filed, [])
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertEqual(msg.text_sent[1], "Okay — I didn't send anything.")
+
+    async def test_cancel_in_pick_step_drops_flow(self):
+        msg, fake = await self._turns([
+            ("there's a problem with my order", None),
+            ("never mind", None),
+        ])
+        self.assertEqual(fake.reports_filed, [])
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertEqual(msg.text_sent[1], "Okay — I didn't send anything.")
+
+    async def test_bare_yes_in_describe_step_reasks(self):
+        msg, fake = await self._turns([
+            ("report a problem with order 1841", None),
+            ("yes", None),
+        ])
+        self.assertEqual(fake.reports_filed, [])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn(
+            "What's wrong with order #1841?", msg.text_sent[1])
+
+    async def test_quick_reply_tap_mid_flow_drops_flow(self):
+        msg, fake = await self._turns([
+            ("report a problem with order 1841", None),
+            ("💰 Balance", None),
+        ])
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertEqual(fake.reports_filed, [])
+        self.assertIn("1,000", msg.text_sent[1])
+        self.assertNotIn("What's wrong", msg.text_sent[1])
+
+    async def test_draft_not_hijacked(self):
+        msg, fake = await self._turns([
+            ("I want 1000 Instagram followers",
+             intent_of("order", platform="instagram",
+                       service_hint="followers", quantity=1000)),
+            ("report a problem with order 1841", None),
+        ])
+        self.assertEqual(fake.reports_filed, [])
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertEqual(
+            msg.text_sent[1],
+            "You have an order in progress — finish it or tap Cancel "
+            "first, then tell me what's wrong.")
+        # The draft is untouched: the link is still missing, so the
+        # next message still completes the same order.
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "instagram")
+        self.assertEqual(bot.PARTIAL[1].get("quantity"), 1000)
+
+    async def test_confirm_card_not_hijacked(self):
+        bot.PENDING["c1"] = {
+            "user_id": 1, "service": SAMPLE_SERVICES[0],
+            "link": "https://instagram.com/p/x",
+            "quantity": 1000, "total": 42.0,
+        }
+        msg, fake = await self._turns(
+            [("report a problem with order 1841", None)])
+        self.assertEqual(fake.reports_filed, [])
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertIn("order in progress", msg.text_sent[0])
+        self.assertIn("c1", bot.PENDING)
+
+    async def test_report_button_busy_while_draft_open(self):
+        bot.PARTIAL[1] = {
+            "platform": "instagram", "service_hint": "followers",
+        }
+        query = await self._run_callback("report:1827")
+        self.assertIn("order in progress", query.edited[0])
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "instagram")
+
+    async def test_reply_to_delivery_message_complaint_starts_report(self):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = FakePaxyo()
+        quoted = ("✅ Your order is delivered — 100 TikTok views, "
+                  "order #1841. Thank you for ordering with Paxyo! 🎉")
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=[])
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "it never arrived", quoted_text=quoted)
+            await bot.handle_order_text(
+                update, None, "The views never showed up")
+        self.assertEqual(
+            msg.text_sent[0],
+            "What's wrong with order #1841? Send me one message "
+            "describing it — or say \"cancel\" to drop it.")
+        self.assertEqual(fake.reports_filed, [{
+            "telegram_id": 1, "order_id": 1841,
+            "message": "the views never showed up",
+        }])
+        self.assertIn("Reported", msg.text_sent[1])
+
+    async def test_reply_to_delivery_message_thanks_is_not_a_report(self):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = FakePaxyo()
+        quoted = ("✅ Your order is delivered — 100 TikTok views, "
+                  "order #1841. Thank you for ordering with Paxyo! 🎉")
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                side_effect=[intent_of("greeting")]),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "thanks!", quoted_text=quoted)
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertEqual(fake.reports_filed, [])
+        self.assertNotIn("What's wrong", msg.text_sent[0])
+
+    async def test_plain_orders_question_is_not_a_report(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg, _ = await self._turns([("my orders", None)], paxyo=fake)
+        self.assertEqual(bot.REPORT_PENDING, {})
+        self.assertIn("1827", msg.text_sent[0])
+
+    async def test_order_10k_views_is_not_an_order_id(self):
+        msg, fake = await self._turns(
+            [("my order 10k views didn't arrive", None)])
+        # Detected as a problem, but 10k is a quantity, not an order
+        # id — so the bot asks which order instead of filing
+        # against order #10.
+        self.assertIn("Which order is this about?", msg.text_sent[0])
+        self.assertEqual(
+            bot.REPORT_PENDING[1], {"order_id": None, "step": "pick"})
+
+    async def test_amharic_report_request_bridged_to_english(self):
+        # The bridge translates the Amharic report request to
+        # English first, so the deterministic detection still fires;
+        # the back-translation fails offline, so the English ask is
+        # sent as-is.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = FakePaxyo()
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=[])
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"), \
+            mock.patch(
+                "bot.translate_to_english",
+                new=mock.AsyncMock(
+                    return_value="report a problem with order 1841")), \
+            mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(return_value="")):
+            await bot.handle_order_text(
+                update, None, "በorder 1841 ላይ ችግር አለ")
+        self.assertIn("#1841", msg.text_sent[0])
+        self.assertIn("What's wrong", msg.text_sent[0])
+
+
 class TestDelayedOrdersApiClient(unittest.IsolatedAsyncioTestCase):
     """GET /delayed-orders request shape. Regression (live retest
     15 Nov 2026): list_delayed_orders used to send telegram_id and
@@ -3671,6 +5315,12 @@ class TestGuideMe(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3681,6 +5331,12 @@ class TestGuideMe(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3833,6 +5489,12 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -3845,6 +5507,12 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4220,6 +5888,12 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4231,6 +5905,12 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4453,6 +6133,12 @@ class TestSecrecy(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4464,6 +6150,12 @@ class TestSecrecy(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4610,6 +6302,12 @@ class TestUsual(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4623,6 +6321,12 @@ class TestUsual(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4703,6 +6407,12 @@ class TestGoalAndBudget(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4716,6 +6426,12 @@ class TestGoalAndBudget(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4799,6 +6515,12 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4812,6 +6534,12 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4986,6 +6714,12 @@ class TestMidOrderChanges(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -4999,6 +6733,12 @@ class TestMidOrderChanges(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5130,6 +6870,12 @@ class TestPaymentEdgeCases(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5143,6 +6889,12 @@ class TestPaymentEdgeCases(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5218,6 +6970,12 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5231,6 +6989,12 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5357,6 +7121,12 @@ class TestLinkProblems(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5370,6 +7140,12 @@ class TestLinkProblems(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5475,6 +7251,12 @@ class TestVoiceMixedAndPhoto(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5489,6 +7271,12 @@ class TestVoiceMixedAndPhoto(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5563,6 +7351,12 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -5576,6 +7370,12 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -6342,6 +8142,9 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -6352,6 +8155,9 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -6654,6 +8460,9 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -6664,6 +8473,9 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -6889,6 +8701,9 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -6899,6 +8714,9 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -7110,13 +8928,18 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
         return msg
 
     async def test_paxyo_facts_owner_when_ai_down(self):
+        # Owner rule (15 Nov 2026): "who owns paxyo?" matches the
+        # contact patterns, so it gets the generic support line —
+        # never a name — even with the AI down.
         msg = await self._paxyo_info_with_ai_down("who owns paxyo?")
-        self.assertIn("Yohannes Abate", msg.text_sent[0])
+        self.assertEqual(msg.text_sent, [bot.t("contact_owner", "en")])
+        self.assertNotIn("Yohannes Abate", msg.text_sent[0])
         # And in Amharic too.
         msg = await self._paxyo_info_with_ai_down(
             "Paxyo ባለቤት ማን ነው?", user=FakeUser(language_code="am")
         )
-        self.assertIn("Yohannes Abate", msg.text_sent[0])
+        self.assertEqual(msg.text_sent, [bot.t("contact_owner", "am")])
+        self.assertNotIn("Yohannes Abate", msg.text_sent[0])
 
     async def test_paxyo_facts_what_is_when_ai_down(self):
         msg = await self._paxyo_info_with_ai_down("what is paxyo?")
@@ -7236,6 +9059,9 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -7261,6 +9087,9 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -8073,6 +9902,9 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -8099,6 +9931,9 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -8526,6 +10361,9 @@ class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -8551,6 +10389,9 @@ class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -8793,6 +10634,9 @@ class TestRoundSevenFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -8818,6 +10662,9 @@ class TestRoundSevenFixes(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -10478,6 +12325,9 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -10504,6 +12354,9 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -10768,6 +12621,9 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -10793,6 +12649,9 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -12027,6 +13886,9 @@ class TestRoundEightOneFixes(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -12052,6 +13914,9 @@ class TestRoundEightOneFixes(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -12374,6 +14239,9 @@ class TestNextBatchContactResellerNeverDrop(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -12399,6 +14267,9 @@ class TestNextBatchContactResellerNeverDrop(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -12528,8 +14399,11 @@ class TestNextBatchContactResellerNeverDrop(unittest.IsolatedAsyncioTestCase):
     async def test_contact_who_is_the_owner_local(self):
         msg = await self._send_local("who is the owner")
         self.assertEqual(msg.text_sent, [bot.t("contact_owner", "en")])
-        # The owner question still gets its answer: the name.
-        self.assertIn("Yohannes Abate", msg.text_sent[0])
+        # Owner rule (15 Nov 2026): a support reply never names a
+        # person — the owner question gets the same generic support
+        # line, not the name.
+        self.assertNotIn("Yohannes Abate", msg.text_sent[0])
+        self.assertNotIn("William", msg.text_sent[0])
 
     async def test_contact_intent_routed(self):
         msg = await self._send("I need support", intent_of("contact"))
@@ -12772,6 +14646,9 @@ class TestPausedServices(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -12797,6 +14674,9 @@ class TestPausedServices(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -13049,6 +14929,9 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -13074,6 +14957,9 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -13342,13 +15228,13 @@ class TestPromptShrink(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         bot.CHAT_HISTORY.clear()
         bot._CHAT_HISTORY_LOADED = True
-        for store in (bot.PARTIAL, bot.PENDING, bot.LAST_ORDER):
+        for store in (bot.PARTIAL, bot.PENDING, bot.LAST_ORDER, bot.USER_TRAITS, bot.USUAL_SERVICE, bot._USUAL_COUNTS, bot._TONE_SIGNALS, bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE):
             store.clear()
 
     def tearDown(self):
         bot.CHAT_HISTORY.clear()
         bot._CHAT_HISTORY_LOADED = False
-        for store in (bot.PARTIAL, bot.PENDING, bot.LAST_ORDER):
+        for store in (bot.PARTIAL, bot.PENDING, bot.LAST_ORDER, bot.USER_TRAITS, bot.USUAL_SERVICE, bot._USUAL_COUNTS, bot._TONE_SIGNALS, bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE):
             store.clear()
 
     # (1) TikTok followers: only TikTok follower services -----------
@@ -13455,8 +15341,16 @@ class TestPromptShrink(unittest.IsolatedAsyncioTestCase):
         # that is the whole allowance for this feature.
         # Ideas batch (15 Nov 2026) re-grew it to ~9,660: one
         # intent ("invite") in one short line.
-        self.assertLess(len(bot.SYSTEM_PROMPT), 9700)
-        self.assertLess(len(bot.SYSTEM_PROMPT.split()) * 1.33, 2100)
+        # Service types (15 Nov 2026) re-grew it to ~11,350 /
+        # ~2,360: the platform list went from 6 to 30, the metric
+        # vocabulary from 4 examples to the full catalogue list
+        # (grouped, not enumerated per kind), and 6 new few-shot
+        # examples. Without the vocabulary the AI classifier drops
+        # new types before the deterministic code ever sees them,
+        # so the list earns its tokens; the deterministic fallback
+        # is still the safety net.
+        self.assertLess(len(bot.SYSTEM_PROMPT), 11500)
+        self.assertLess(len(bot.SYSTEM_PROMPT.split()) * 1.33, 2400)
         # Every intent the code switches on is still listed.
         for intent in (
             "order", "recurring", "schedules", "stop_schedule",
@@ -13575,6 +15469,9 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -13602,6 +15499,9 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._history_patch.stop()
         for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
             bot.PENDING, bot.LAST_ORDER, bot.PARTIAL,
             bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
             bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
@@ -17069,12 +18969,16 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
         self.assertIn("10 🙏", bot.FEW_SHOT_EXAMPLES)
 
     def test_few_shot_block_stays_compact(self):
-        # 1 header + 21 examples, each one short line: the whole
+        # 1 header + 27 examples, each one short line: the whole
         # dataset does NOT go in the prompt (that would be ~1,000
         # lines and every chat would get slow and costly).
+        # Service types (15 Nov 2026) added 6 examples for the new
+        # platforms and multi-word kinds (spotify plays, twitch
+        # live viewers, whatsapp poll votes, twitter retweets,
+        # instagram story views, cheapest telegram post views).
         lines = bot.FEW_SHOT_EXAMPLES.splitlines()
-        self.assertEqual(len(lines), 22)
-        self.assertLess(len(bot.FEW_SHOT_EXAMPLES), 1200)
+        self.assertEqual(len(lines), 28)
+        self.assertLess(len(bot.FEW_SHOT_EXAMPLES), 1700)
         for line in lines[1:]:
             with self.subTest(line=line):
                 self.assertLess(len(line), 100)
@@ -17198,8 +19102,11 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
                 self.assertIsNone(result["intent"])
 
     async def test_unknown_platform_becomes_null(self):
+        # "myspace" is not a platform Paxyo sells (snapchat IS one
+        # now — service-types inventory, 15 Nov 2026 — so it no
+        # longer tests the unknown-platform path).
         result = await self._extract(
-            {"intent": "order", "platform": "snapchat",
+            {"intent": "order", "platform": "myspace",
              "service_hint": "views", "quantity": 1000}
         )
         self.assertEqual(result["intent"], "order")
@@ -17288,7 +19195,7 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
     async def test_batch_entry_platform_and_quantity_cleaned(self):
         result = await self._extract(
             {"intent": "batch", "orders": [
-                {"platform": "snapchat", "service_hint": "likes",
+                {"platform": "myspace", "service_hint": "likes",
                  "link": "https://example.com/p/1", "quantity": "1k"},
                 {"platform": "Twitter", "service_hint": "followers",
                  "link": "https://example.com/u", "quantity": 500},
@@ -17492,6 +19399,48 @@ def _views_fixture():
     return services
 
 
+def _watch_hours_fixture():
+    """YouTube catalogue for the watch-hours fault (live, 15 Nov
+    2026): a cheap subscribers service (1.60) and a views service
+    sit next to the watch-time services — the cheapest watch-time
+    match is #2408 "YouTube Views + Watch Hours" at 441.00, while
+    the pure watch-hours service #2749 is far pricier at 2,520.00.
+    The old code answered the watch-hour question with the
+    subscribers service, because no metric word matched and the
+    hint was platform-only."""
+    return [
+        {
+            "service": 8001, "name": "YouTube Subscribers | Fast",
+            "category": "YouTube Subscribers", "type": "Default",
+            "rate_etb_per_1000": 1.6, "min": 10, "max": 1000000,
+            "average_time": "1 minute", "active": True,
+            "provider_service_id": 8001,
+        },
+        {
+            "service": 8002, "name": "YouTube Views | Fast",
+            "category": "YouTube Views", "type": "Default",
+            "rate_etb_per_1000": 5.0, "min": 10, "max": 1000000,
+            "average_time": "1 minute", "active": True,
+            "provider_service_id": 8002,
+        },
+        {
+            "service": 2408, "name": "YouTube Views + Watch Hours",
+            "category": "YouTube Views + Watch Hours",
+            "type": "Default",
+            "rate_etb_per_1000": 441.0, "min": 10, "max": 1000000,
+            "average_time": "1 hour", "active": True,
+            "provider_service_id": 2408,
+        },
+        {
+            "service": 2749, "name": "YouTube Watch Hours",
+            "category": "YouTube Watch Hours", "type": "Default",
+            "rate_etb_per_1000": 2520.0, "min": 10, "max": 1000000,
+            "average_time": "24 hours", "active": True,
+            "provider_service_id": 2749,
+        },
+    ]
+
+
 class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
     """Ideas batch (owner, 15 Nov 2026): proactive delivery updates,
     one-tap reorder, first-order nudge, invite link, persistent
@@ -17502,6 +19451,12 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -17519,6 +19474,12 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -17722,6 +19683,11 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
     # --- one-tap reorder -----------------------------------------
 
     def test_reorder_keyboard_shape(self):
+        # Report a problem (ideas batch 2, feature 2, 15 Nov 2026):
+        # the keyboard now carries one "⚠️ Report a problem" row
+        # per order AFTER the reorder rows, so the reorder shape the
+        # old assertions pin (row 0/1 are the reorder buttons) is
+        # unchanged and the row count is 2 per order, not 1.
         orders = [
             {"id": 1827, "service_name": "Instagram Followers | Fast",
              "quantity": 1000},
@@ -17730,12 +19696,17 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         ]
         markup = bot.reorder_keyboard(orders)
         rows = markup.inline_keyboard
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 4)
         self.assertEqual(rows[0][0].callback_data, "reorder:1827")
         self.assertIn("🔁", rows[0][0].text)
         self.assertIn("#1827", rows[0][0].text)
         self.assertIn("Instagram Followers", rows[0][0].text)
         self.assertEqual(rows[1][0].callback_data, "reorder:1828")
+        self.assertEqual(rows[2][0].callback_data, "report:1827")
+        self.assertIn("⚠️", rows[2][0].text)
+        self.assertIn("Report a problem", rows[2][0].text)
+        self.assertIn("#1827", rows[2][0].text)
+        self.assertEqual(rows[3][0].callback_data, "report:1828")
 
     def test_reorder_keyboard_empty_for_no_orders(self):
         self.assertEqual(len(bot.reorder_keyboard([]).inline_keyboard), 0)
@@ -17892,15 +19863,20 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
                 bot.local_intent(text)["intent"], "invite", text
             )
 
-    async def test_invite_intent_sends_code_and_link(self):
+    async def test_invite_intent_sends_own_code_and_link(self):
+        # UPDATED deliberately (per-user invite codes, 15 Nov 2026):
+        # the invite reply used to show the shared REF3723FB335 for
+        # everyone; it now shows the ASKING user's own code + link
+        # (FakeUser id 1 -> REF163). The shared code must not appear.
         msg = await self._send("my invite link", intent_of("invite"))
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("REF3723FB335", msg.text_sent[0])
+        self.assertIn("REF163", msg.text_sent[0])
         self.assertIn(
-            "https://t.me/paxorder_bot?start=REF3723FB335",
+            "https://t.me/paxorder_bot?start=REF163",
             msg.text_sent[0],
         )
         self.assertIn("20%", msg.text_sent[0])
+        self.assertNotIn("REF3723FB335", msg.text_sent[0])
 
     # --- persistent quick-reply buttons --------------------------
 
@@ -18138,6 +20114,467 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
             await client._client.aclose()
 
 
+class TestStallRescue(unittest.IsolatedAsyncioTestCase):
+    """Automatic stall rescue (feature 2, 15 Nov 2026): a stuck
+    order is cancelled + refunded once and re-placed on the
+    next-best service in the same category — at most twice per
+    chain (#1 -> #2 -> #3), then the bot stops and says so
+    honestly. The rescue never shows a Confirm card (the user
+    already confirmed the order), uses a fresh idempotency key,
+    and only ever touches orders the bot placed and watches."""
+
+    def setUp(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.LAST_ORDER.clear()
+
+    def tearDown(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.LAST_ORDER.clear()
+
+    def _watch(self, order_id, minutes_ago=200, avg_minutes=1,
+               service=None, quantity=1000, user_id=1, total=None,
+               rescue_count=0, failed_services=None):
+        import time
+
+        svc = service or {
+            "service": 7000,
+            "name": "TikTok Video Views | Fastest",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 10.0, "min": 10, "max": 1000000,
+            "average_time": "1 minute", "active": True,
+            "provider_service_id": 7000,
+        }
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": user_id,
+            "service": svc,
+            "quantity": quantity,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time() - minutes_ago * 60,
+            "avg_minutes": avg_minutes,
+            "warned": False,
+            "total": total if total is not None else
+                bot.estimated_total_etb(
+                    float(svc.get("rate_etb_per_1000") or 0), quantity),
+            "rescue_count": rescue_count,
+            "rescue_attempted": False,
+            "failed_services": list(failed_services or []),
+        }
+
+    def _rescue_fixture(self):
+        # Three TikTok views services, fastest first, with
+        # different prices — so the rescue message must state two
+        # different figures (refund 10.00, new total 5.00).
+        return [
+            {
+                "service": 7000, "name": "TikTok Video Views | Fastest",
+                "category": "TikTok Video Views", "type": "Default",
+                "rate_etb_per_1000": 10.0, "min": 10, "max": 1000000,
+                "average_time": "1 minute", "active": True,
+                "provider_service_id": 7000,
+            },
+            {
+                "service": 7001, "name": "TikTok Video Views | Second",
+                "category": "TikTok Video Views", "type": "Default",
+                "rate_etb_per_1000": 5.0, "min": 10, "max": 1000000,
+                "average_time": "2 minutes", "active": True,
+                "provider_service_id": 7001,
+            },
+            {
+                "service": 7002, "name": "TikTok Video Views | Third",
+                "category": "TikTok Video Views", "type": "Default",
+                "rate_etb_per_1000": 20.0, "min": 10, "max": 1000000,
+                "average_time": "3 minutes", "active": True,
+                "provider_service_id": 7002,
+            },
+        ]
+
+    def _refund(self, order_id=1841, refunded=10.0):
+        return {
+            "success": True, "ok": True, "order_id": order_id,
+            "refunded_etb": refunded, "provider_status": "canceled",
+            "duplicate": False,
+        }
+
+    def _http_error(self, status, url):
+        req = bot.httpx.Request("POST", url)
+        resp = bot.httpx.Response(
+            status, json={"error": "boom"}, request=req
+        )
+        return bot.httpx.HTTPStatusError("error", request=req, response=resp)
+
+    # --- cancel_refund client ------------------------------------
+
+    async def test_cancel_refund_posts_expected_body(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=self._refund()),
+            ) as send:
+                result = await client.cancel_refund(1841, 1)
+            self.assertEqual(result, self._refund())
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(
+                request.url.path.endswith("/orders/1841/cancel-refund")
+            )
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(json.loads(request.content), {"telegram_id": 1})
+        finally:
+            await client._client.aclose()
+
+    async def test_cancel_refund_duplicate_returns_recorded_result(self):
+        # The server returns the recorded refund with duplicate:true
+        # — the client passes it through unchanged, never a second
+        # refund.
+        recorded = self._refund()
+        recorded["duplicate"] = True
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=recorded),
+            ):
+                result = await client.cancel_refund(1841, 1)
+            self.assertTrue(result["duplicate"])
+            self.assertEqual(result["refunded_etb"], 10.0)
+        finally:
+            await client._client.aclose()
+
+    async def test_cancel_refund_404_returns_none(self):
+        # The endpoint is not live yet — the caller falls back to
+        # the stuck warning, never an exception into a chat.
+        client = bot.PaxyoClient()
+        try:
+            err = self._http_error(
+                404, "https://paxyo.et/api/bot/orders/1841/cancel-refund"
+            )
+            with mock.patch.object(client, "_send", side_effect=err):
+                self.assertIsNone(await client.cancel_refund(1841, 1))
+        finally:
+            await client._client.aclose()
+
+    async def test_cancel_refund_409_raises(self):
+        # Already completed / already cancelled / provider refused:
+        # the caller must decide, so the error raises.
+        client = bot.PaxyoClient()
+        try:
+            err = self._http_error(
+                409, "https://paxyo.et/api/bot/orders/1841/cancel-refund"
+            )
+            with mock.patch.object(client, "_send", side_effect=err):
+                with self.assertRaises(bot.httpx.HTTPStatusError):
+                    await client.cancel_refund(1841, 1)
+        finally:
+            await client._client.aclose()
+
+    # --- next-service pick ---------------------------------------
+
+    def test_next_rescue_service_excludes_failed(self):
+        services = self._rescue_fixture()
+        nxt = bot._next_rescue_service(services, services[0], [])
+        self.assertEqual(nxt["service"], 7001)
+        # Both earlier failures are excluded — the second rescue
+        # must not go back to the first failure.
+        nxt2 = bot._next_rescue_service(services, services[1], [7000])
+        self.assertEqual(nxt2["service"], 7002)
+
+    def test_next_rescue_service_none_when_all_failed(self):
+        services = self._rescue_fixture()
+        self.assertIsNone(
+            bot._next_rescue_service(services, services[2], [7000, 7001])
+        )
+        self.assertIsNone(bot._next_rescue_service([], services[0], []))
+
+    def test_watch_order_starts_rescue_state(self):
+        service = self._rescue_fixture()[0]
+        bot.watch_order(1, 1841, service, 1000,
+                        "https://tiktok.com/@x/video/1", total=10.0)
+        entry = bot.WATCHED_ORDERS["1841"]
+        self.assertEqual(entry["total"], 10.0)
+        self.assertEqual(entry["rescue_count"], 0)
+        self.assertFalse(entry["rescue_attempted"])
+        self.assertEqual(entry["failed_services"], [])
+
+    # --- rescue happy path ---------------------------------------
+
+    async def test_rescue_happy_path(self):
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        # One message: the rescue message, not the stuck warning.
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("#1842", text)
+        self.assertIn("cancelled", text)
+        self.assertIn("refunded", text)
+        self.assertIn("10.00", text)  # the refunded order
+        self.assertIn("5.00", text)  # the new order — a different price
+        self.assertIn("moved", text)
+        self.assertNotIn("longer than usual", text)
+        # The refund was called once, for this order and user.
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        # The replacement is on the NEXT service (7001, not 7000),
+        # same link and quantity, with a FRESH idempotency key.
+        self.assertEqual(
+            fake.orders_created,
+            [(7001, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        self.assertEqual(len(fake.order_keys), 1)
+        key = fake.order_keys[0]
+        self.assertEqual(len(key), 32)
+        self.assertTrue(all(c in "0123456789abcdef" for c in key))
+        # Old id dropped, new id watched — with the chain carried
+        # forward, so a second stall can be rescued once more.
+        self.assertEqual(set(bot.WATCHED_ORDERS), {"1842"})
+        new_entry = bot.WATCHED_ORDERS["1842"]
+        self.assertEqual(new_entry["service"]["service"], 7001)
+        self.assertEqual(new_entry["rescue_count"], 1)
+        self.assertEqual(new_entry["failed_services"], [7000])
+        self.assertFalse(new_entry["rescue_attempted"])
+        self.assertEqual(bot.LAST_ORDER.get(1), 1842)
+
+    async def test_rescue_attempted_once(self):
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1841": "pending", "1842": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        # One rescue message, one refund call, one replacement —
+        # the later cycles do nothing new.
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(len(fake.orders_created), 1)
+        self.assertEqual(set(bot.WATCHED_ORDERS), {"1842"})
+
+    async def test_replacement_order_is_watched(self):
+        # The replacement completes: its delivery message arrives
+        # and it is dropped from the watch, like any placed order.
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1841": "pending", "1842": "completed"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 2)
+        self.assertIn("#1842", app.bot.sent[1][1])
+        self.assertIn("delivered", app.bot.sent[1][1])
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    # --- rescue failures: warning, no retry ----------------------
+
+    async def test_cancel_refund_409_warns_and_never_retries(self):
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1841": "pending"},
+            cancel_refund_error=409,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        # The one honest stuck warning, with the support link — no
+        # replacement, and the failed rescue is not tried again.
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("longer than usual", text)
+        self.assertIn("#1841", text)
+        self.assertIn("t.me/paxyo", text)
+        self.assertNotIn("refunded", text)
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertTrue(bot.WATCHED_ORDERS["1841"]["rescue_attempted"])
+        self.assertTrue(bot.WATCHED_ORDERS["1841"]["warned"])
+
+    async def test_cancel_refund_none_warns_and_never_retries(self):
+        # Endpoint not live yet (404 -> None): same behaviour as a
+        # refusal — warn once, place nothing, try no again.
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1841": "pending"},
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("longer than usual", app.bot.sent[0][1])
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertTrue(bot.WATCHED_ORDERS["1841"]["rescue_attempted"])
+
+    async def test_cancel_refund_502_warns_and_never_retries(self):
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1841": "pending"},
+            cancel_refund_error=502,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("longer than usual", app.bot.sent[0][1])
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_no_next_service_warns_only(self):
+        # The stuck service is the only one in its category: the
+        # order is left alone (not even cancelled) and the user
+        # gets the stuck warning.
+        services = [self._rescue_fixture()[0]]
+        self._watch("1841", service=services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("longer than usual", app.bot.sent[0][1])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertEqual(fake.orders_created, [])
+        self.assertIn("1841", bot.WATCHED_ORDERS)
+
+    async def test_replacement_failure_warns_and_never_retries(self):
+        # The refund went through but the replacement could not be
+        # placed (the order call itself failed): no retry, and the
+        # user still gets the stuck warning.
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            with mock.patch.object(
+                fake, "create_order",
+                new=mock.AsyncMock(side_effect=Exception("boom")),
+            ):
+                await bot.run_delivery_watch_cycle(app)
+                await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("longer than usual", app.bot.sent[0][1])
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertTrue(bot.WATCHED_ORDERS["1841"]["rescue_attempted"])
+
+    # --- all three services fail ---------------------------------
+
+    async def test_all_three_fail_final_message_then_stop(self):
+        import time
+
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={
+                "1841": "pending", "1842": "pending", "1843": "pending",
+            },
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842, 1843],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)  # #1 stalls -> #2
+            # The replacement stalls too: age its watch entry.
+            bot.WATCHED_ORDERS["1842"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #2 stalls -> #3
+            bot.WATCHED_ORDERS["1843"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #3 stalls: stop
+            await bot.run_delivery_watch_cycle(app)  # nothing new
+        self.assertEqual(len(app.bot.sent), 3)
+        self.assertIn("#1842", app.bot.sent[0][1])
+        self.assertIn("#1843", app.bot.sent[1][1])
+        final = app.bot.sent[2][1]
+        self.assertIn("#1843", final)
+        self.assertIn("still not delivering", final)
+        self.assertIn("stopped", final)
+        self.assertIn("still in progress", final)
+        self.assertIn("t.me/paxyo", final)
+        self.assertNotIn("refund", final.lower())
+        # Two rescues, two different fresh keys, two replacements
+        # on the next service each time — and no third attempt.
+        self.assertEqual(len(fake.cancel_refund_calls), 2)
+        self.assertEqual(len(fake.orders_created), 2)
+        self.assertEqual(
+            [s for s, _, _ in fake.orders_created], [7001, 7002]
+        )
+        self.assertEqual(len(set(fake.order_keys)), 2)
+        self.assertTrue(bot.WATCHED_ORDERS["1843"]["warned"])
+
+    # --- non-stuck orders untouched ------------------------------
+
+    async def test_slow_but_within_time_untouched(self):
+        self._watch("1843", minutes_ago=5, avg_minutes=60)
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1843": "pending"},
+            cancel_refund_result=self._refund(),
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertEqual(fake.orders_created, [])
+        self.assertIn("1843", bot.WATCHED_ORDERS)
+
+    async def test_no_average_time_never_rescued(self):
+        service = {
+            "service": 7000,
+            "name": "TikTok Video Views | Fastest",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 10.0, "min": 10, "max": 1000000,
+            "average_time": "New Service", "active": True,
+            "provider_service_id": 7000,
+        }
+        self._watch("1843", minutes_ago=99999, avg_minutes=None,
+                    service=service)
+        fake = FakePaxyo(
+            services=self._rescue_fixture(),
+            status_by_order={"1843": "pending"},
+            cancel_refund_result=self._refund(),
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertEqual(fake.orders_created, [])
+        self.assertIn("1843", bot.WATCHED_ORDERS)
+
+
 class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
     """Cheapest-question routing (live fault, 15 Nov 2026): the owner
     asked "What is the cheapest tiktok views" and the bot replied
@@ -18151,6 +20588,12 @@ class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -18168,6 +20611,12 @@ class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
@@ -18384,6 +20833,2790 @@ class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
         self.assertEqual(bot.PENDING, {})
+
+    # --- watch hours (live fault, 15 Nov 2026) -------------------
+
+    def test_watch_hours_kind_detected(self):
+        # "watch hour(s)", "watchhour", "watch time" all read as
+        # the "watch hours" metric — never subscribers, never views.
+        for text in (
+            "what is the cheapest youtube watch hour",
+            "what is the cheapest Youtube watchhour",
+            "cheapest youtube watch hours",
+            "cheapest youtube watch time",
+            "youtube watchtime price",
+            "order 1000 youtube watch hours",
+        ):
+            self.assertEqual(
+                bot.kind_from_text(text), "watch hours", text
+            )
+            self.assertEqual(
+                bot.metric_from_text(text), "watch hours", text
+            )
+        # A bare "watch" is a verb, not the metric.
+        self.assertIsNone(bot.kind_from_text("watch my video"))
+        self.assertEqual(bot.kind_from_text("youtube views"), "views")
+        # The cheapest-question detector accepts the watch-hour
+        # phrasings (question form and bare phrase alike).
+        for text in (
+            "what is the cheapest youtube watch hour",
+            "what is the cheapest Youtube watchhour",
+            "cheapest youtube watch hours",
+            "cheapest youtube watch time",
+        ):
+            self.assertTrue(bot.is_cheapest_question(text), text)
+            self.assertTrue(bot.is_price_question(text), text)
+
+    async def test_cheapest_watch_hours_names_watch_service(self):
+        # The exact live fault: "what is cheapest youtube watch
+        # hour" was answered with "Youtube Subscribers: 1.60".
+        # The mocked intent is "order", as the AI classified it
+        # live — the deterministic fast path must still answer with
+        # the cheapest WATCH-TIME service (#2408, 441.00), not the
+        # cheapest YouTube service overall (subscribers, 1.60) and
+        # not the pure watch-hours service (#2749, 2,520.00).
+        msg, fake = await self._send(
+            "what is the cheapest youtube watch hour",
+            intent_of("order", platform="youtube",
+                      service_hint="cheapest youtube watch hour"),
+            paxyo=FakePaxyo(services=_watch_hours_fixture()),
+        )
+        self.assertIn("441.00", msg.text_sent[0])
+        self.assertIn("Watch Hours", msg.text_sent[0])
+        self.assertNotIn("Subscribers", msg.text_sent[0])
+        self.assertNotIn("1.60", msg.text_sent[0])
+        self.assertNotIn("2,520.00", msg.text_sent[0])
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+        self.assertIsNone(msg.markups[0])  # no Confirm card
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(fake.orders_created, [])
+        # The one-word spelling asks the same question.
+        msg, _ = await self._send(
+            "what is the cheapest Youtube watchhour",
+            intent_of("order", platform="youtube",
+                      service_hint="cheapest youtube watchhour"),
+            paxyo=FakePaxyo(services=_watch_hours_fixture()),
+        )
+        self.assertIn("441.00", msg.text_sent[0])
+        self.assertIn("Watch Hours", msg.text_sent[0])
+        self.assertNotIn("Subscribers", msg.text_sent[0])
+
+    async def test_watch_hours_order_picks_watch_service(self):
+        # An order for watch hours picks a watch-hours service for
+        # the Confirm card — never subscribers, never views. The
+        # pick is fastest-first (orders), so #2408 (1 hour) wins
+        # over #2749 (24 hours).
+        msg, _ = await self._send(
+            "order 1000 youtube watch hours "
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            intent_of("order", platform="youtube",
+                      service_hint="youtube watch hours",
+                      link="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                      quantity=1000),
+            paxyo=FakePaxyo(services=_watch_hours_fixture()),
+        )
+        self.assertIn("Watch Hours", msg.text_sent[0])
+        self.assertIn("1000", msg.text_sent[0])
+        self.assertNotIn("Subscribers", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+        self.assertEqual(len(bot.PENDING), 1)
+
+
+class TestSupportNeverNamesAPerson(unittest.IsolatedAsyncioTestCase):
+    """Support replies never name a person (owner rule, 15 Nov
+    2026): the contact and reseller replies say "our customer
+    support" + t.me/paxyo, in every language. The detector still
+    matches the user's own words ("contact william") — matching
+    what the user typed is not the bot naming anyone."""
+
+    def test_templates_name_no_person(self):
+        for key in ("contact_owner", "reseller_contact"):
+            for lang in ("en", "am", "om", "ti"):
+                text = bot.t(key, lang)
+                self.assertIn("t.me/paxyo", text, (key, lang))
+                for name in ("William", "Yohannes", "Abate"):
+                    self.assertNotIn(name, text, (key, lang))
+                # No "he will" either — the reply speaks of the
+                # support team, never of one man.
+                self.assertNotIn("he will", text.lower(), (key, lang))
+
+    def test_templates_keep_support_wording(self):
+        self.assertEqual(
+            bot.t("contact_owner", "en"),
+            "You can reach our customer support by t.me/paxyo "
+            "— they will help you.",
+        )
+        self.assertIn(
+            "our customer support",
+            bot.t("reseller_contact", "en"),
+        )
+        # The Oromo contact reply keeps its "argachuu" wording.
+        self.assertIn("argachuu", bot.t("contact_owner", "om"))
+
+
+class TestPerUserInviteCodes(unittest.IsolatedAsyncioTestCase):
+    """Per-user invite codes (15 Nov 2026, feature 1): every user
+    has one stable code derived from their Telegram id, /start with
+    a code records the referrer before the first deposit, and the
+    invite reply shows the user's OWN code + link. The server
+    contract lives in server/api-referrals.php — the bot side must
+    match it exactly (same base-36 + SHA-256 algorithm)."""
+
+    # --- code derivation -------------------------------------------
+
+    def test_known_codes_match_server_contract(self):
+        # The two examples from api-referrals.php, byte-identical.
+        self.assertEqual(bot.user_invite_code(779060335), "REFCVTYSVA3")
+        self.assertEqual(bot.user_invite_code(123456789), "REF21I3V91B")
+
+    def test_code_round_trips(self):
+        for telegram_id in (1, 42, 123456789, 779060335, 9876543210):
+            code = bot.user_invite_code(telegram_id)
+            self.assertEqual(
+                bot.invite_code_owner(code), telegram_id, code
+            )
+
+    def test_tampered_checksum_rejected(self):
+        # Last char changed: the checksum fails, nobody is credited.
+        self.assertIsNone(bot.invite_code_owner("REF21I3V91C"))
+        self.assertIsNone(bot.invite_code_owner("REFCVTYSVA4"))
+        # A middle char changed fails the re-derive too.
+        self.assertIsNone(bot.invite_code_owner("REF21I3V81B"))
+
+    def test_code_validation_tolerates_case_and_whitespace(self):
+        self.assertEqual(
+            bot.invite_code_owner("  ref21i3v91b "), 123456789
+        )
+        self.assertEqual(bot.invite_code_owner("refcvtysva3"), 779060335)
+
+    def test_shared_code_fails_per_user_validation(self):
+        # Deliberately: REF3723FB335 is not a per-user code (the
+        # server maps it to referrer 0 instead).
+        self.assertIsNone(bot.invite_code_owner("REF3723FB335"))
+        self.assertIsNone(bot.invite_code_owner("ref3723fb335"))
+
+    def test_invalid_codes_rejected(self):
+        for bad in ("", "REF", "hello", "REF21I3V91", "REF21I3V91BBB",
+                    "REF21I3V91!", "123456789", None, 123456789):
+            self.assertIsNone(bot.invite_code_owner(bad), bad)
+
+    def test_own_code_resolves_to_self(self):
+        # The self-check start() relies on: a user's own code
+        # resolves to their own id.
+        for telegram_id in (1, 779060335):
+            code = bot.user_invite_code(telegram_id)
+            self.assertEqual(bot.invite_code_owner(code), telegram_id)
+
+    def test_invite_link_carries_own_code(self):
+        self.assertEqual(
+            bot.user_invite_link(779060335),
+            "https://t.me/paxorder_bot?start=REFCVTYSVA3",
+        )
+        self.assertEqual(
+            bot.user_invite_link(123456789),
+            "https://t.me/paxorder_bot?start=REF21I3V91B",
+        )
+
+    # --- PaxyoClient: record_referral / my_referral ----------------
+
+    async def test_record_referral_posts_expected_body(self):
+        client = bot.PaxyoClient()
+        try:
+            payload = {
+                "success": True, "ok": True,
+                "referrer_telegram_id": 123456789,
+                "code_used": "REF21I3V91B", "already_recorded": False,
+            }
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=payload),
+            ) as send:
+                result = await client.record_referral(1, "REF21I3V91B")
+            self.assertEqual(result, payload)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/referrals"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(
+                json.loads(request.content),
+                {"telegram_id": 1, "code": "REF21I3V91B"},
+            )
+        finally:
+            await client._client.aclose()
+
+    async def test_record_referral_already_recorded(self):
+        client = bot.PaxyoClient()
+        try:
+            payload = {
+                "success": True, "ok": True,
+                "referrer_telegram_id": 123456789,
+                "code_used": "REF21I3V91B", "already_recorded": True,
+            }
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=payload),
+            ):
+                result = await client.record_referral(1, "REF3723FB335")
+            self.assertTrue(result["already_recorded"])
+            self.assertEqual(result["referrer_telegram_id"], 123456789)
+        finally:
+            await client._client.aclose()
+
+    async def test_record_referral_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "POST", "https://paxyo.et/api/bot/referrals"
+            )
+            resp = bot.httpx.Response(404, request=req)
+            err = bot.httpx.HTTPStatusError(
+                "not found", request=req, response=resp
+            )
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertIsNone(
+                    await client.record_referral(1, "REF21I3V91B")
+                )
+            # A real server error still raises — it is not "not live".
+            resp400 = bot.httpx.Response(
+                400, json={"error": "Invite code is not valid."},
+                request=req,
+            )
+            err400 = bot.httpx.HTTPStatusError(
+                "bad request", request=req, response=resp400
+            )
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err400)
+            ):
+                with self.assertRaises(bot.httpx.HTTPStatusError):
+                    await client.record_referral(1, "BOGUS")
+        finally:
+            await client._client.aclose()
+
+    async def test_my_referral_returns_stats(self):
+        client = bot.PaxyoClient()
+        try:
+            payload = {
+                "success": True, "code": "REF163",
+                "invite_link": "https://t.me/paxorder_bot?start=REF163",
+                "referrals": 2, "bonus_earned": 0.0, "bonus_pending": 1,
+            }
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=payload),
+            ) as send:
+                result = await client.my_referral(1)
+            self.assertEqual(result, payload)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "GET")
+            self.assertTrue(request.url.path.endswith("/referrals"))
+            self.assertIn("telegram_id=1", str(request.url))
+        finally:
+            await client._client.aclose()
+
+    async def test_my_referral_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "GET", "https://paxyo.et/api/bot/referrals?telegram_id=1"
+            )
+            resp = bot.httpx.Response(404, request=req)
+            err = bot.httpx.HTTPStatusError(
+                "not found", request=req, response=resp
+            )
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertIsNone(await client.my_referral(1))
+        finally:
+            await client._client.aclose()
+
+    # --- start(): the deep-link payload ----------------------------
+
+    def _start_context(self, *args):
+        context = mock.Mock()
+        context.args = list(args)
+        return context
+
+    async def _run_start(self, fake, context, user=None, update_id=900101):
+        msg = FakeMessage("/start")
+        update = FakeUpdate(msg, user=user or FakeUser())
+        update.update_id = update_id
+        with mock.patch("bot.paxyo", fake):
+            await bot.start(update, context)
+        return msg
+
+    async def test_start_with_valid_code_records_referral(self):
+        fake = FakePaxyo()
+        msg = await self._run_start(
+            fake, self._start_context("REF21I3V91B"), update_id=900101
+        )
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": "REF21I3V91B"},
+        ])
+        self.assertEqual(len(msg.text_sent), 1)  # greeting still sent
+
+    async def test_start_with_lowercase_code_records_normalised(self):
+        fake = FakePaxyo()
+        await self._run_start(
+            fake, self._start_context("  ref21i3v91b  "), update_id=900102
+        )
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": "REF21I3V91B"},
+        ])
+
+    async def test_start_with_shared_code_records_it(self):
+        fake = FakePaxyo()
+        await self._run_start(
+            fake, self._start_context("REF3723FB335"), update_id=900103
+        )
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": "REF3723FB335"},
+        ])
+
+    async def test_start_with_invalid_code_records_nothing(self):
+        fake = FakePaxyo()
+        msg = await self._run_start(
+            fake, self._start_context("NOTACODE"), update_id=900104
+        )
+        self.assertEqual(fake.referrals_recorded, [])
+        self.assertEqual(len(msg.text_sent), 1)  # greeting still sent
+
+    async def test_start_with_own_code_records_nothing(self):
+        # User 1's own code is REF163 — self-referral is never sent.
+        fake = FakePaxyo()
+        await self._run_start(
+            fake, self._start_context("REF163"), update_id=900105
+        )
+        self.assertEqual(fake.referrals_recorded, [])
+
+    async def test_start_with_no_args_records_nothing(self):
+        fake = FakePaxyo()
+        msg = await self._run_start(fake, None, update_id=900106)
+        self.assertEqual(fake.referrals_recorded, [])
+        self.assertEqual(len(msg.text_sent), 1)
+        # An empty args list records nothing either.
+        fake2 = FakePaxyo()
+        await self._run_start(
+            fake2, self._start_context(), update_id=900107
+        )
+        self.assertEqual(fake2.referrals_recorded, [])
+
+    async def test_start_referral_failure_never_blocks_start(self):
+        fake = FakePaxyo(referral_error="Invite code is not valid.")
+        msg = await self._run_start(
+            fake, self._start_context("REF21I3V91B"), update_id=900108
+        )
+        self.assertEqual(len(msg.text_sent), 1)  # greeting still sent
+        self.assertEqual(fake.referrals_recorded, [])
+
+    # --- invite reply: the user's own code -------------------------
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def test_invite_reply_shows_that_users_code(self):
+        # A different user gets a different code: 779060335's code
+        # is REFCVTYSVA3, not user 1's REF163 and not the shared one.
+        msg = await self._send(
+            "my invite link", intent_of("invite"),
+            user=FakeUser(user_id=779060335),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("REFCVTYSVA3", msg.text_sent[0])
+        self.assertIn(
+            "https://t.me/paxorder_bot?start=REFCVTYSVA3",
+            msg.text_sent[0],
+        )
+        self.assertIn("20%", msg.text_sent[0])
+        self.assertNotIn("REF3723FB335", msg.text_sent[0])
+
+    async def test_invite_reply_amharic_carries_code_too(self):
+        # Amharic in: the bridge translation fails here, so the
+        # Amharic template answers directly — and it must still
+        # carry the user's own code + link, not the shared code.
+        amharic_a = bot.t(
+            "invite_link", "am",
+            link="https://t.me/paxorder_bot?start=REFCVTYSVA3",
+            code="REFCVTYSVA3",
+        )
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value=""),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("no bridge without translation")
+            ),
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("invite")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            msg = FakeMessage()
+            await bot.handle_order_text(
+                FakeUpdate(msg, FakeUser(
+                    user_id=779060335, language_code="am")),
+                None, "የእኔ invite link",
+            )
+        self.assertEqual(msg.text_sent, [amharic_a])
+        self.assertIn("REFCVTYSVA3", msg.text_sent[0])
+        self.assertIn(
+            "https://t.me/paxorder_bot?start=REFCVTYSVA3",
+            msg.text_sent[0],
+        )
+        self.assertNotIn("REF3723FB335", msg.text_sent[0])
+
+
+class TestAbandonedNudge(unittest.IsolatedAsyncioTestCase):
+    """Abandoned-order nudge (feature 4, 15 Nov 2026): a half-built
+    NORMAL order draft whose owner goes quiet for ~30 minutes gets
+    ONE nudge with a Resume button. Never twice for the same draft,
+    never while a Confirm card is open, never after the draft was
+    cancelled or the order completed, never for delayed/recurring
+    drafts. The nudge only invites the user back — it never places,
+    confirms, or changes an order."""
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.PARTIAL.clear()
+        bot.PARTIAL_ACTIVITY.clear()
+        bot.LAST_LANG.clear()
+        bot.WATCHED_ORDERS.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot._SESSION_RESTORED.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.PARTIAL.clear()
+        bot.PARTIAL_ACTIVITY.clear()
+        bot.LAST_LANG.clear()
+        bot.WATCHED_ORDERS.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot._SESSION_RESTORED.clear()
+
+    def _draft(self, user_id=1, minutes_quiet=31, **draft):
+        """Seed a half-built draft with a quiet clock that already
+        ran `minutes_quiet` minutes (real time.time() offsets, the
+        same style as the delivery-watch tests)."""
+        import time
+
+        bot.PARTIAL[user_id] = dict(draft)
+        bot.PARTIAL_ACTIVITY[user_id] = {
+            "last_active": time.time() - minutes_quiet * 60,
+            "nudged_at": None,
+            "draft_key": bot._partial_draft_key(bot.PARTIAL[user_id]),
+        }
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _run_callback(self, data, paxyo=None, message_text=""):
+        query = FakeQuery(data, message_text=message_text)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def _cycle(self, paxyo=None, **kw):
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.run_abandoned_nudge_cycle(app, **kw)
+        return app
+
+    # --- the nudge fires -----------------------------------------
+
+    async def test_nudge_fires_once_after_30_min_link_no_quantity(self):
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        app = await self._cycle()
+        self.assertEqual(len(app.bot.sent), 1)
+        chat_id, text = app.bot.sent[0]
+        self.assertEqual(chat_id, 1)
+        self.assertIn("half-built", text)
+        self.assertIn("want to finish it", text)
+        markup = app.bot.sent_markups[0]
+        self.assertEqual(len(markup.inline_keyboard), 1)
+        self.assertEqual(
+            markup.inline_keyboard[0][0].callback_data, "resume_draft"
+        )
+        self.assertIn("Resume", markup.inline_keyboard[0][0].text)
+        # The nudge never places, confirms, or changes an order.
+        self.assertEqual(bot.PENDING, {})
+        self.assertIsNotNone(bot.PARTIAL_ACTIVITY[1]["nudged_at"])
+        # A second cycle sends nothing more for the same draft.
+        app2 = await self._cycle()
+        self.assertEqual(app2.bot.sent, [])
+
+    async def test_nudge_fires_for_quantity_no_link(self):
+        self._draft(
+            platform="instagram", service_hint="followers",
+            quantity=1000,
+        )
+        app = await self._cycle()
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("half-built", app.bot.sent[0][1])
+        self.assertEqual(
+            app.bot.sent_markups[0].inline_keyboard[0][0].callback_data,
+            "resume_draft",
+        )
+
+    async def test_no_nudge_before_30_min(self):
+        self._draft(
+            minutes_quiet=29, platform="tiktok",
+            service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        app = await self._cycle()
+        self.assertEqual(app.bot.sent, [])
+        self.assertIsNone(bot.PARTIAL_ACTIVITY[1]["nudged_at"])
+
+    async def test_no_second_nudge_even_much_later(self):
+        import time
+
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        app = await self._cycle()
+        self.assertEqual(len(app.bot.sent), 1)
+        # An hour later the same draft is still nudged only once.
+        app2 = await self._cycle(now=time.time() + 3600)
+        self.assertEqual(app2.bot.sent, [])
+
+    async def test_nudge_clock_starts_when_draft_first_seen(self):
+        # A draft built in the same turn as the user's last message
+        # has no activity entry yet (the touch ran before the draft
+        # existed): the first cycle seeds the clock instead of
+        # nudging at once, and the nudge comes ~30 minutes later.
+        import time
+
+        bot.PARTIAL[1] = {
+            "platform": "tiktok", "service_hint": "tiktok views",
+            "link": "https://tiktok.com/@x/video/1",
+        }
+        app = await self._cycle()
+        self.assertEqual(app.bot.sent, [])
+        self.assertIn(1, bot.PARTIAL_ACTIVITY)
+        app2 = await self._cycle(now=time.time() + 31 * 60)
+        self.assertEqual(len(app2.bot.sent), 1)
+
+    async def test_nudge_uses_users_language(self):
+        bot.LAST_LANG[1] = "am"
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        app = await self._cycle()
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("ትዕዛዝ", app.bot.sent[0][1])
+        self.assertIn(
+            "ቀጥል",
+            app.bot.sent_markups[0].inline_keyboard[0][0].text,
+        )
+
+    # --- the nudge does NOT fire ---------------------------------
+
+    async def test_no_nudge_while_confirm_card_open(self):
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        # A Confirm card open for the same user: they are deciding,
+        # not abandoning.
+        bot.PENDING["abc123"] = make_pending(user_id=1)
+        app = await self._cycle()
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_no_nudge_after_cancel(self):
+        paxyo = FakePaxyo()
+        await self._send(
+            "I want 1000 tiktok views",
+            intent_of(
+                "order", platform="tiktok",
+                service_hint="tiktok views", quantity=1000,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn(1, bot.PARTIAL)
+        msg = await self._send(
+            "I don't want to", intent_of("cancel"), paxyo=paxyo
+        )
+        self.assertEqual(msg.text_sent[-1], "Order cancelled.")
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(bot.PARTIAL_ACTIVITY, {})
+        app = await self._cycle(paxyo=paxyo)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_no_nudge_after_order_completed(self):
+        paxyo = FakePaxyo()
+        await self._send(
+            "order 1000 instagram followers https://instagram.com/p/x",
+            intent_of(
+                "order", platform="instagram",
+                service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+            ),
+            paxyo=paxyo,
+        )
+        # The Confirm card is shown; the draft now lives in PENDING.
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(len(bot.PENDING), 1)
+        confirm_id = next(iter(bot.PENDING))
+        query = await self._run_callback(
+            f"confirm:{confirm_id}", paxyo=paxyo
+        )
+        self.assertEqual(len(paxyo.orders_created), 1)
+        self.assertEqual(bot.PENDING, {})
+        self.assertIn("1827", query.edited[0])
+        app = await self._cycle(paxyo=paxyo)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_no_nudge_for_delayed_or_recurring_drafts(self):
+        # Delayed and recurring drafts live in their own stores,
+        # never in PARTIAL — the cycle iterates PARTIAL only, so
+        # they are never nudged.
+        bot.DELAYED_DRAFT[1] = {
+            "platform": "tiktok", "service_hint": "tiktok views",
+            "link": "https://tiktok.com/@x/video/1", "quantity": 1000,
+            "delay_minutes": 180,
+        }
+        bot.RECURRING_DRAFT[1] = {
+            "platform": "instagram", "service_hint": "followers",
+            "link": "https://instagram.com/p/x", "quantity": 1000,
+            "interval_minutes": 180,
+        }
+        app = await self._cycle()
+        self.assertEqual(app.bot.sent, [])
+
+    # --- a fresh message resets the quiet timer ------------------
+
+    async def test_fresh_message_resets_quiet_timer(self):
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        # Any message from the user — even one that does not touch
+        # the draft — means they are not quiet.
+        await self._send("hello", intent_of("greeting"))
+        self.assertIn(1, bot.PARTIAL)
+        app = await self._cycle()
+        self.assertEqual(app.bot.sent, [])
+        self.assertIsNone(bot.PARTIAL_ACTIVITY[1]["nudged_at"])
+
+    # --- the Resume button ---------------------------------------
+
+    async def test_resume_button_reasks_missing_quantity(self):
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        app = await self._cycle()
+        self.assertEqual(len(app.bot.sent), 1)
+        query = await self._run_callback("resume_draft")
+        self.assertEqual(query.edited, ["How many? (for example 1000)"])
+        # The draft survives the tap, so the answer completes it.
+        self.assertIn(1, bot.PARTIAL)
+
+    async def test_resume_button_reasks_missing_link(self):
+        self._draft(
+            platform="instagram", service_hint="followers",
+            quantity=1000,
+        )
+        await self._cycle()
+        query = await self._run_callback("resume_draft")
+        self.assertEqual(len(query.edited), 1)
+        self.assertIn("link", query.edited[0])
+        self.assertIn("Instagram", query.edited[0])
+
+    async def test_resume_button_reasks_missing_platform(self):
+        # A bare quantity with no context: the draft has nothing
+        # but the number, so the platform question comes first.
+        self._draft(quantity=1000)
+        await self._cycle()
+        query = await self._run_callback("resume_draft")
+        self.assertEqual(
+            query.edited,
+            ["Which platform? (Instagram, TikTok, Telegram, YouTube...)"],
+        )
+
+    async def test_resume_complete_draft_shows_confirm_card(self):
+        # Every piece is there: the next step of the flow is the
+        # Confirm card, not another question.
+        self._draft(
+            platform="instagram", service_hint="followers",
+            link="https://instagram.com/p/x", quantity=1000,
+        )
+        await self._cycle()
+        query = await self._run_callback("resume_draft")
+        self.assertEqual(query.edited, [])
+        self.assertEqual(len(query.message.text_sent), 1)
+        self.assertIn("42.00", query.message.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_resume_with_gone_draft_answers_honestly(self):
+        query = await self._run_callback("resume_draft")
+        self.assertEqual(len(query.edited), 1)
+        self.assertIn("no half-built order", query.edited[0])
+        self.assertNotIn("Confirm", query.edited[0])
+
+    async def test_resume_in_amharic(self):
+        bot.LAST_LANG[1] = "am"
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        app = await self._cycle()
+        nudge_text = app.bot.sent[0][1]
+        query = await self._run_callback(
+            "resume_draft", message_text=nudge_text
+        )
+        self.assertEqual(query.edited, ["Quantity ስንት ይሁን? (ለምሳሌ 1000)"])
+
+    # --- wired into the scheduler --------------------------------
+
+    async def test_nudge_runs_inside_scheduler_cycle(self):
+        self._draft(
+            platform="tiktok", service_hint="tiktok views",
+            link="https://tiktok.com/@x/video/1",
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", FakePaxyo()):
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("half-built", app.bot.sent[0][1])
+
+
+class TestTraitsApiClient(unittest.IsolatedAsyncioTestCase):
+    """POST/GET /user-traits and POST /user-traits/clear (feature 5,
+    15 Nov 2026): request shape, the merge body, and the 404 -> None
+    mapping — the endpoints are not live yet, so the bot must keep
+    working from memory when they answer 404."""
+
+    def _http_error(self, status):
+        req = bot.httpx.Request("POST", "https://paxyo.et/api/bot/user-traits")
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError("error", request=req, response=resp)
+
+    async def test_save_traits_posts_expected_body(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={
+                    "ok": True, "traits": {"tone": "brief"},
+                }),
+            ) as send:
+                result = await client.save_traits(1, {"tone": "brief"})
+            self.assertEqual(result["traits"], {"tone": "brief"})
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/user-traits"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(
+                json.loads(request.content),
+                {"telegram_id": 1, "traits": {"tone": "brief"}},
+            )
+        finally:
+            await client._client.aclose()
+
+    async def test_save_traits_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(side_effect=self._http_error(404)),
+            ):
+                self.assertIsNone(
+                    await client.save_traits(1, {"tone": "brief"})
+                )
+        finally:
+            await client._client.aclose()
+
+    async def test_load_traits_returns_traits(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={
+                    "success": True,
+                    "traits": {"tone": "brief", "usual_platform": "tiktok"},
+                    "updated_at": "2026-11-15 07:00:00",
+                }),
+            ) as send:
+                result = await client.load_traits(1)
+            self.assertEqual(
+                result, {"tone": "brief", "usual_platform": "tiktok"}
+            )
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "GET")
+            self.assertTrue(request.url.path.endswith("/user-traits"))
+            self.assertIn("telegram_id=1", str(request.url))
+        finally:
+            await client._client.aclose()
+
+    async def test_load_traits_null_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"success": True, "traits": None}
+                ),
+            ):
+                self.assertIsNone(await client.load_traits(1))
+        finally:
+            await client._client.aclose()
+
+    async def test_load_traits_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(side_effect=self._http_error(404)),
+            ):
+                self.assertIsNone(await client.load_traits(1))
+        finally:
+            await client._client.aclose()
+
+    async def test_clear_traits_posts_expected_body(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={"ok": True}),
+            ) as send:
+                result = await client.clear_traits(1)
+            self.assertEqual(result, {"ok": True})
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/user-traits/clear"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(json.loads(request.content), {"telegram_id": 1})
+        finally:
+            await client._client.aclose()
+
+    async def test_clear_traits_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(side_effect=self._http_error(404)),
+            ):
+                self.assertIsNone(await client.clear_traits(1))
+        finally:
+            await client._client.aclose()
+
+
+class TestPerUserPersonality(_SmartLoopBase):
+    """Per-user personality (feature 5, 15 Nov 2026): the bot
+    remembers each user's usual order and tone — learned only from
+    their own messages and placed orders, never invented — shapes
+    its prose replies for the tone, and falls back to the stored
+    usuals for "same as usual" when there is no recent order.
+    Prices, the Confirm flow and order logic are untouched."""
+
+    # Long messages that vote "chatty": 19+ words, no formal words,
+    # no order words, no feeling words (tired/bored) — so no local
+    # branch claims them before the mocked classifier runs.
+    CHATTY = (
+        "I have been working all day and I just want to relax with "
+        "my friends tonight, it has been a very long week",
+        "My cousin is visiting from out of town and we are going to "
+        "walk around the city together tomorrow morning",
+        "The weather has been really nice lately and I hope it stays "
+        "like this for the whole weekend ahead",
+    )
+
+    def setUp(self):
+        super().setUp()
+        bot.WATCHED_ORDERS.clear()
+
+    def tearDown(self):
+        super().tearDown()
+        bot.WATCHED_ORDERS.clear()
+
+    async def _send(self, text, intent, paxyo=None):
+        """One turn with its own mocked classifier result (unlike
+        _turns, no side-effect list to drift: the usual request and
+        the forget request are both caught locally, before the
+        classifier is ever called). Flushes background tasks while
+        bot.paxyo is still patched."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = paxyo or FakePaxyo()
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(return_value=intent)
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+            await self._flush()
+        return msg, fake
+
+    async def _confirm_pending(self, paxyo):
+        """Tap Confirm on the user's open card; flush the traits
+        save the placement schedules while bot.paxyo is still
+        patched, so it is observable right after."""
+        confirm_id = next(iter(bot.PENDING))
+        query = FakeQuery(
+            f"confirm:{confirm_id}", message_text="Please confirm:"
+        )
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.on_callback(update, None)
+            await self._flush()
+        return query
+
+    async def _place_views_order(self, paxyo=None):
+        """Build the 1000-TikTok-views Confirm card and tap Confirm:
+        one real placed order (FakePaxyo records it, nothing is
+        charged). Returns (query, fake_paxyo)."""
+        fake = paxyo or TikTokPaxyo()
+        await self._build_pending_views(paxyo=fake)
+        query = await self._confirm_pending(fake)
+        return query, fake
+
+    # --- learning: the usuals -------------------------------------
+
+    async def test_first_order_updates_mirror_but_not_yet_usual(self):
+        query, fake = await self._place_views_order()
+        # The mirror keeps the most recent placed order...
+        self.assertEqual(bot.USER_TRAITS[1], {
+            "usual_platform": "tiktok",
+            "usual_metric": "views",
+            "usual_quantity": 1000,
+            "usual_service_id": 2001,
+        })
+        # ...but one placement is a one-off, not a pattern yet.
+        self.assertFalse(bot._usual_is_established(1))
+        self.assertEqual(fake.traits_saved, [])
+        self.assertEqual(
+            fake.orders_created,
+            [(2001, "https://vt.tiktok.com/ZSpQWTSmH/", 1000)],
+        )
+        self.assertIn("Order placed!", query.edited[0])
+
+    async def test_second_same_order_establishes_usual_and_saves(self):
+        await self._place_views_order()
+        query, fake = await self._place_views_order(paxyo=TikTokPaxyo())
+        self.assertTrue(bot._usual_is_established(1))
+        # Exactly one save, sending only the four usual fields.
+        self.assertEqual(len(fake.traits_saved), 1)
+        telegram_id, saved = fake.traits_saved[0]
+        self.assertEqual(telegram_id, 1)
+        self.assertEqual(saved, {
+            "usual_platform": "tiktok",
+            "usual_metric": "views",
+            "usual_quantity": 1000,
+            "usual_service_id": 2001,
+        })
+        self.assertIn("Order placed!", query.edited[0])
+
+    async def test_different_metric_does_not_establish(self):
+        _, views_fake = await self._place_views_order()
+        ig_fake = FakePaxyo()
+        await self._turns([
+            ("I want 1000 Instagram followers https://instagram.com/p/x",
+             intent_of("order", platform="instagram",
+                       service_hint="followers",
+                       link="https://instagram.com/p/x", quantity=1000)),
+        ], paxyo=ig_fake)
+        await self._confirm_pending(ig_fake)
+        # The mirror keeps the MOST RECENT order (Instagram), but
+        # one placement of it is not a usual yet.
+        self.assertEqual(bot.USER_TRAITS[1]["usual_platform"], "instagram")
+        self.assertEqual(bot.USER_TRAITS[1]["usual_metric"], "followers")
+        self.assertEqual(bot.USER_TRAITS[1]["usual_service_id"], 1001)
+        self.assertFalse(bot._usual_is_established(1))
+        self.assertEqual(views_fake.traits_saved, [])
+        self.assertEqual(ig_fake.traits_saved, [])
+
+    def test_learn_slugifies_comment_likes(self):
+        service = {"service": 2003, "name": "Tiktok Comment Likes | Fast",
+                   "category": "Tiktok Comment Likes"}
+        bot.learn_from_placed_order(1, service, 500)
+        self.assertEqual(bot.USER_TRAITS[1]["usual_metric"], "comment_likes")
+        self.assertEqual(bot.USER_TRAITS[1]["usual_platform"], "tiktok")
+        self.assertFalse(bot._usual_is_established(1))
+        bot.learn_from_placed_order(1, service, 500)
+        self.assertTrue(bot._usual_is_established(1))
+
+    def test_learn_ignores_unrecognised_service(self):
+        bot.learn_from_placed_order(
+            1, {"service": 9999, "name": "???", "category": ""}, 100
+        )
+        self.assertEqual(bot.USER_TRAITS, {})
+
+    # --- learning: tone --------------------------------------------
+
+    async def test_tone_stays_unset_before_three_observations(self):
+        msg, fake = await self._turns([
+            ("ok", intent_of("unclear")),
+            ("got it", intent_of("unclear")),
+        ])
+        self.assertNotIn("tone", bot.USER_TRAITS.get(1, {}))
+        self.assertEqual(fake.traits_saved, [])
+
+    async def test_tone_sets_after_three_short_messages(self):
+        msg, fake = await self._turns([
+            ("ok", intent_of("unclear")),
+            ("got it", intent_of("unclear")),
+            ("yes", intent_of("unclear")),
+        ])
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "brief")
+        self.assertEqual(fake.traits_saved, [(1, {"tone": "brief"})])
+
+    async def test_formal_tone_from_repeated_please(self):
+        msg, fake = await self._turns([
+            ("please help me order 1000 views", intent_of("unclear")),
+            ("kindly help me with my order", intent_of("unclear")),
+            ("please send me the link for my order", intent_of("unclear")),
+        ])
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "formal")
+        self.assertEqual(fake.traits_saved, [(1, {"tone": "formal"})])
+
+    async def test_chatty_tone_from_repeated_long_messages(self):
+        msg, fake = await self._turns([
+            (text, intent_of("unclear")) for text in self.CHATTY
+        ])
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "chatty")
+        self.assertEqual(fake.traits_saved, [(1, {"tone": "chatty"})])
+
+    async def test_one_contrary_message_does_not_flip_tone(self):
+        fake = FakePaxyo()
+        msg, _ = await self._turns([
+            ("ok", intent_of("unclear")),
+            ("got it", intent_of("unclear")),
+            ("yes", intent_of("unclear")),
+            # One long, chatty message: a single contrary vote.
+            (self.CHATTY[0], intent_of("unclear")),
+            (self.CHATTY[1], intent_of("unclear")),
+            (self.CHATTY[2], intent_of("unclear")),
+        ], paxyo=fake)
+        # 3 chatty votes vs 3 brief votes — the challenger does not
+        # lead yet, so the tone stays brief.
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "brief")
+        # Three more chatty messages: 6 vs 3, the flip margin is
+        # met, so the tone flips to chatty.
+        bot._LAST_TRAITS_SAVE.pop(1, None)  # the 5s save throttle
+        msg, _ = await self._turns([
+            (text, intent_of("unclear")) for text in self.CHATTY
+        ], paxyo=fake)
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "chatty")
+        self.assertEqual(fake.traits_saved, [
+            (1, {"tone": "brief"}),
+            (1, {"tone": "chatty"}),
+        ])
+
+    def test_tone_signal_rules(self):
+        # A bare number, link or emoji carries no words: no vote.
+        self.assertIsNone(bot._tone_signal("1000"))
+        self.assertIsNone(bot._tone_signal("https://tiktok.com/@x/video/1"))
+        self.assertIsNone(bot._tone_signal("👍"))
+        # Four words, no politeness: no vote either.
+        self.assertIsNone(bot._tone_signal("I want 1000 tiktok views"))
+        self.assertEqual(bot._tone_signal("ok"), "brief")
+        # Formal wins over brief: "please help" is 2 words AND polite.
+        self.assertEqual(bot._tone_signal("please help"), "formal")
+        self.assertEqual(bot._tone_signal(self.CHATTY[0]), "chatty")
+
+    def test_tone_order_summary_variants(self):
+        summary = "Order placed!\nTotal: 18.90 ETB"
+        # No traits: the summary is returned unchanged.
+        self.assertEqual(bot.tone_order_summary(1, "en", summary), summary)
+        bot.USER_TRAITS[1] = {"tone": "brief"}
+        self.assertEqual(bot.tone_order_summary(1, "en", summary), summary)
+        bot.USER_TRAITS[1] = {"tone": "chatty"}
+        shaped = bot.tone_order_summary(1, "en", summary)
+        self.assertIn("Thanks so much", shaped)
+        self.assertTrue(shaped.startswith(summary))
+        bot.USER_TRAITS[1] = {"tone": "formal"}
+        shaped = bot.tone_order_summary(1, "en", summary)
+        self.assertTrue(shaped.startswith("Thank you for your order."))
+        self.assertIn(summary, shaped)
+
+    # --- forgetting --------------------------------------------------
+
+    def test_forget_request_detection(self):
+        for phrase in (
+            "forget what you know about me",
+            "forget everything you know about me",
+            "forget about me",
+            "forget me",
+            "delete what you know about me",
+            "please forget what you know about me",
+        ):
+            self.assertTrue(bot.is_forget_traits_request(phrase), phrase)
+        for phrase in (
+            "don't forget me",
+            "never forget me",
+            "do not forget what you know about me",
+            "hello",
+            "forget the order",
+        ):
+            self.assertFalse(bot.is_forget_traits_request(phrase), phrase)
+
+    async def test_forget_clears_traits(self):
+        fake = FakePaxyo(traits={
+            "tone": "brief", "usual_platform": "tiktok",
+            "usual_metric": "views", "usual_quantity": 1000,
+            "usual_service_id": 2001,
+        })
+        msg, _ = await self._send(
+            "Give me the usual.", intent_of("usual"), paxyo=fake,
+        )
+        self.assertEqual(bot.USER_TRAITS[1]["usual_service_id"], 2001)
+        msg, _ = await self._send(
+            "forget what you know about me", intent_of("unclear"),
+            paxyo=fake,
+        )
+        self.assertEqual(bot.USER_TRAITS, {})
+        self.assertEqual(fake.traits_cleared, [1])
+        self.assertIn("forgotten", msg.text_sent[0])
+        # The session is untouched by forgetting traits: the
+        # conversation history and the draft survive.
+        self.assertTrue(bot.CHAT_HISTORY.get(1))
+        self.assertIn("platform", bot.PARTIAL.get(1, {}))
+
+    async def test_dont_forget_me_does_not_clear(self):
+        fake = FakePaxyo(traits={"tone": "brief"})
+        msg, _ = await self._send(
+            "don't forget me", intent_of("unclear"), paxyo=fake,
+        )
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "brief")
+        self.assertEqual(fake.traits_cleared, [])
+        self.assertNotIn("forgotten", " ".join(msg.text_sent))
+
+    # --- using traits: tone shapes the confirmation -----------------
+
+    async def test_brief_user_gets_short_confirmation(self):
+        fake = TikTokPaxyo()
+        await self._turns([
+            ("ok", intent_of("unclear")),
+            ("got it", intent_of("unclear")),
+            ("yes", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "brief")
+        query, _ = await self._place_views_order(paxyo=fake)
+        summary = query.edited[0]
+        self.assertIn("Order placed!", summary)
+        self.assertIn("18.90", summary)
+        # Brief: the summary alone — no humour line.
+        self.assertFalse(
+            any(line in summary for line in bot.HUMOR_LINES["en"]),
+            summary,
+        )
+
+    async def test_chatty_user_gets_warmer_line(self):
+        fake = TikTokPaxyo()
+        await self._turns([
+            (text, intent_of("unclear")) for text in self.CHATTY
+        ], paxyo=fake)
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "chatty")
+        query, _ = await self._place_views_order(paxyo=fake)
+        summary = query.edited[0]
+        self.assertIn("Order placed!", summary)
+        self.assertIn("Thanks so much — enjoy the boost!", summary)
+        # Chatty keeps the humour line too.
+        self.assertTrue(
+            any(line in summary for line in bot.HUMOR_LINES["en"]),
+            summary,
+        )
+
+    async def test_formal_user_gets_polite_form(self):
+        fake = TikTokPaxyo()
+        await self._turns([
+            ("please help me order 1000 views", intent_of("unclear")),
+            ("kindly help me with my order", intent_of("unclear")),
+            ("please send me the link for my order", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "formal")
+        query, _ = await self._place_views_order(paxyo=fake)
+        summary = query.edited[0]
+        self.assertTrue(summary.startswith("Thank you for your order."))
+        self.assertIn("Order placed!", summary)
+        self.assertIn("18.90", summary)
+
+    async def test_no_traits_gets_default_replies_unchanged(self):
+        # A fresh user: the text-acceptance path sends the summary
+        # with its humour line, plus the quick-reply hint message —
+        # exactly as before this feature.
+        fake = TikTokPaxyo()
+        await self._build_pending_views(paxyo=fake)
+        msg, _ = await self._turns([
+            ("yes", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("Order placed!", msg.text_sent[0])
+        self.assertTrue(
+            any(line in msg.text_sent[0] for line in bot.HUMOR_LINES["en"]),
+            msg.text_sent[0],
+        )
+        self.assertIn("buttons below", msg.text_sent[1])
+
+    async def test_prices_and_confirm_untouched_by_traits(self):
+        # A chatty user with a learned tone still gets the
+        # catalogue price and a normal Confirm card for a different
+        # order — traits never touch money or the Confirm flow.
+        fake = FakePaxyo()
+        await self._turns([
+            (text, intent_of("unclear")) for text in self.CHATTY
+        ], paxyo=fake)
+        self.assertEqual(bot.USER_TRAITS[1].get("tone"), "chatty")
+        msg, _ = await self._turns([
+            ("I want 1000 Instagram followers https://instagram.com/p/x",
+             intent_of("order", platform="instagram",
+                       service_hint="followers",
+                       link="https://instagram.com/p/x", quantity=1000)),
+        ], paxyo=fake)
+        self.assertIn("42.00", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+        self.assertEqual(len(bot.PENDING), 1)
+
+    # --- using traits: the usual fallback ---------------------------
+
+    async def test_usual_fallback_after_restart_with_empty_memory(self):
+        # A restart: no history, no draft, no mirror — the stored
+        # usuals come back from the server on the first turn.
+        fake = TikTokPaxyo(traits={
+            "usual_platform": "tiktok", "usual_metric": "views",
+            "usual_quantity": 1000, "usual_service_id": 2001,
+        })
+        msg, _ = await self._send(
+            "Give me the usual.", intent_of("usual"), paxyo=fake,
+        )
+        self.assertEqual(bot.USER_TRAITS[1]["usual_platform"], "tiktok")
+        self.assertIn(1, bot._TRAITS_FROM_SERVER)
+        self.assertIn("Your usual is TikTok Video Views", msg.text_sent[0])
+        self.assertIn("×1000", msg.text_sent[0])
+        self.assertIn("Please send the link of the video.", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1], {
+            "platform": "tiktok", "service_hint": "tiktok views",
+            "quantity": 1000,
+        })
+        self.assertEqual(bot.USUAL_SERVICE[1], 2001)
+        # The link completes it: the Confirm card pins the usual
+        # service (#2001, 18.90 ETB), not the fastest pick.
+        msg2, _ = await self._send(
+            "https://vt.tiktok.com/ZSpQWTSmH/",
+            intent_of("order", link="https://vt.tiktok.com/ZSpQWTSmH/"),
+            paxyo=fake,
+        )
+        self.assertIn("TikTok Video Views", msg2.text_sent[0])
+        self.assertIn("18.90", msg2.text_sent[0])
+        self.assertIsNotNone(msg2.markups[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2001)
+
+    async def test_single_order_does_not_drive_usual_fallback(self):
+        await self._place_views_order()
+        # No recent order on the server (the fake's history is
+        # empty), and the one placement is not a usual yet.
+        msg, _ = await self._send(
+            "Give me the usual.", intent_of("usual"),
+            paxyo=FakePaxyo(),
+        )
+        self.assertEqual(msg.text_sent, [bot.t("no_usual", "en")])
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(bot.USUAL_SERVICE, {})
+
+    # --- restore ------------------------------------------------------
+
+    async def test_traits_restore_loads_from_server(self):
+        seeded = {"tone": "brief", "usual_platform": "tiktok",
+                  "usual_metric": "views", "usual_quantity": 1000,
+                  "usual_service_id": 2001}
+        fake = FakePaxyo(traits=seeded)
+        with mock.patch("bot.paxyo", fake):
+            await bot.restore_session(1)
+        self.assertEqual(bot.USER_TRAITS[1], seeded)
+        self.assertIn(1, bot._TRAITS_FROM_SERVER)
+        self.assertEqual(fake.traits_loads, [1])
+
+    async def test_traits_restore_with_nothing_stored_is_noop(self):
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake):
+            await bot.restore_session(1)
+        self.assertEqual(bot.USER_TRAITS, {})
+        self.assertEqual(fake.traits_loads, [1])
+
+
+
+# ------------------------------------------------- service types (15 Nov 2026)
+# Teach the bot every service type in the catalogue (221
+# platform+metric types, 30 platforms). The fixture and the
+# expected cheapest ids come from the live snapshot and the
+# inventory's §2 table — real service names/rates, not hand-made
+# names — so these tests pin the analyst's verdict, not a toy.
+_SNAPSHOT_FIXTURE_CACHE = None
+
+
+def _snapshot_fixture():
+    """Fixture from godofpanel-live-2026-11-15.json (7,175 services,
+    fetched 15 Nov 2026 07:03 EAT): rate x420 ETB, no average times
+    (the snapshot has none), blacklist 5379/5834 excluded."""
+    global _SNAPSHOT_FIXTURE_CACHE
+    if _SNAPSHOT_FIXTURE_CACHE is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "godofpanel-live-2026-11-15.json",
+        )
+        with open(path) as f:
+            raw = json.load(f)
+        _SNAPSHOT_FIXTURE_CACHE = [{
+            "service": int(s["service"]),
+            "name": s["name"],
+            "category": s["category"],
+            "rate_etb_per_1000": float(s["rate"]) * 420,
+            "min": int(s.get("min") or 0),
+            "max": int(s.get("max") or 0),
+            "average_time": None,
+            "active": True,
+        } for s in raw if int(s["service"]) not in (5379, 5834)]
+    return _SNAPSHOT_FIXTURE_CACHE
+
+
+def _inventory_cheapest_rows():
+    """(platform, metric, cheapest_id) from the §2 table of
+    service-types-inventory.md — the analyst's baseline."""
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "service-types-inventory.md",
+    )
+    rows = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("|") or "Cheapest (id" in line:
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) < 5:
+                continue
+            plat, metric, _n, cheap, _cq, _ord = cells[:6]
+            m = re.search(r"#(\d+)", cheap)
+            if not m or plat in ("Platform", "---"):
+                continue
+            if not re.fullmatch(r"[a-z\- ]+", plat):
+                continue
+            rows.append((plat.strip(), metric.strip(), int(m.group(1))))
+    return rows
+
+
+def _type_phrase(platform, metric):
+    """The user's phrasing for a type (analyst convention)."""
+    if platform == "max":
+        return f"private channel {metric}"
+    if platform == "website-traffic":
+        return "website traffic"
+    if platform == "x":
+        return f"twitter {metric}"
+    return f"{platform} {metric}"
+
+
+class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
+    """Service-types build (15 Nov 2026): every platform+metric
+    type in the catalogue. Cheapest questions are pinned by exact
+    service id against the inventory's §2 table; order picks are
+    pinned to the right pool (platform + kind). The four §2
+    cheapest ids below are documented CORRECTIONS, not failures:
+    the analyst's id is a contaminated/wrong-pool pick and the
+    bot's id is the cheapest service of the true pool."""
+
+    # §2 cheapest-id corrections (verified against the snapshot):
+    # - telegram views: §2 #6534 is "Reactions + Free Views" — the
+    #   views are a free bonus, not the product; #6139 is the
+    #   cheapest true post-views service (1.05 ETB).
+    # - tiktok live viewers: §2 #4332 is a live-stream LIKES
+    #   service (9.24 ETB); #3769 is the cheapest true live-viewers
+    #   service (176.40 ETB).
+    # - kick viewers: §2 #4072 is the 1-day subscription series
+    #   (21,000 ETB); bare "viewers" means live viewers (§4d) and
+    #   #7517 is the cheapest of those (29.40 ETB).
+    # - youtube viewers: §2 counts the row AMBIG (#7001, a
+    #   pre-premiere waiting service); bare "viewers" means live
+    #   viewers (§4d) and #1774 is the cheapest of those (18.90).
+    CORRECTED_CHEAPEST = {
+        ("telegram", "views"): 6139,
+        ("tiktok", "live viewers"): 3769,
+        ("kick", "viewers"): 7517,
+        ("youtube", "viewers"): 1774,
+    }
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PARTIAL.clear()
+        bot.LAST_ORDER.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.FASTEST_FALLBACK.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PARTIAL.clear()
+        bot.LAST_ORDER.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.FASTEST_FALLBACK.clear()
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        fake = paxyo or FakePaxyo(balance=100000.0)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", fake), \
+             mock.patch("bot.speak_reply") as speak:
+            await bot.handle_order_text(update, None, text)
+        self.assertEqual(msg.voice_sent, [])  # text in -> text only
+        return msg, fake
+
+    # --- every type: cheapest question --------------------------
+
+    def test_cheapest_question_every_type(self):
+        fixture = _snapshot_fixture()
+        rows = _inventory_cheapest_rows()
+        self.assertEqual(len(rows), 221)
+        for plat, metric, expected in rows:
+            if plat == "google":
+                # Untested in §2 (no cheapest id given).
+                continue
+            phrase = _type_phrase(plat, metric)
+            q = f"what is the cheapest {phrase}"
+            with self.subTest(type=phrase):
+                self.assertTrue(
+                    bot.is_cheapest_question(q)
+                    or bot.is_price_question(q), q,
+                )
+                if (plat, metric) == ("youtube", "auto views"):
+                    # No true auto-views subscription for YouTube:
+                    # the 5 "auto" services are Lifetime Auto /
+                    # Auto Replace refill wordings, not a
+                    # subscription. The bot must say so, not guess.
+                    self.assertIsNone(bot.cheapest_service(
+                        fixture, platform="youtube",
+                        service_hint="youtube auto views",
+                    ))
+                    self.assertIn(
+                        "auto-views subscription",
+                        bot.no_service_reply(
+                            "youtube", "youtube auto views", q, "en",
+                        ),
+                    )
+                    continue
+                expected = self.CORRECTED_CHEAPEST.get(
+                    (plat, metric), expected,
+                )
+                dplat, _dmetric = bot.detect_platform_metric(q)
+                pick = bot.cheapest_service(
+                    fixture, platform=dplat, service_hint=phrase,
+                )
+                self.assertIsNotNone(pick, q)
+                self.assertEqual(int(pick["service"]), expected, q)
+
+    # --- every type: order pick in the right pool ---------------
+
+    def test_order_every_type(self):
+        fixture = _snapshot_fixture()
+        for plat, metric, _expected in _inventory_cheapest_rows():
+            if plat == "google":
+                continue
+            if (plat, metric) == ("youtube", "auto views"):
+                self.assertEqual(bot.pick_services(
+                    fixture, platform="youtube",
+                    service_hint="youtube auto views",
+                ), [])
+                continue
+            phrase = _type_phrase(plat, metric)
+            with self.subTest(type=phrase):
+                dplat, _dmetric = bot.detect_platform_metric(
+                    f"order 1000 {phrase}",
+                )
+                picks = bot.pick_services(
+                    fixture, platform=dplat, service_hint=phrase,
+                    limit=3,
+                )
+                self.assertTrue(picks, phrase)
+                top = picks[0]
+                self.assertTrue(bot._platform_matches_service(
+                    "x" if plat == "twitter" else plat,
+                    (top.get("name") or "").lower(),
+                    (top.get("category") or "").lower(),
+                ), phrase)
+                self.assertTrue(bot._kinds_compatible(
+                    bot._name_kinds(
+                        top.get("name"), top.get("category"),
+                    ),
+                    {bot.kind_from_text(phrase)},
+                ), phrase)
+
+    # --- detection: new platforms -------------------------------
+
+    def test_detect_new_platforms(self):
+        cases = {
+            "what is the cheapest spotify plays": ("spotify", "plays"),
+            "order 500 twitch live viewers": ("twitch", "live viewers"),
+            "what is the cheapest private channel views": ("max", "views"),
+            "cheapest website traffic": ("website-traffic", "traffic"),
+            "order 1000 twitter retweets": ("x", "retweets"),
+            "order 1000 x retweets": ("x", "retweets"),
+            "cheapest snapchat views": ("snapchat", "views"),
+            "cheapest linkedin connections": ("linkedin", "connections"),
+            "cheapest whatsapp poll votes": ("whatsapp", "poll votes"),
+            "cheapest kick live viewers": ("kick", "live viewers"),
+            "cheapest shopee live viewers": ("shopee", "live viewers"),
+            "cheapest rutube views": ("rutube", "views"),
+        }
+        for text, (plat, kind) in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(
+                    bot.detect_platform_metric(text), (plat, kind),
+                )
+        # Price gates only for the cheapest phrasings — an order
+        # phrasing ("order 500 ...") is not a price question.
+        for text in (
+            "what is the cheapest spotify plays",
+            "what is the cheapest private channel views",
+            "cheapest website traffic",
+            "cheapest snapchat views",
+            "cheapest linkedin connections",
+            "cheapest whatsapp poll votes",
+            "cheapest kick live viewers",
+            "cheapest shopee live viewers",
+            "cheapest rutube views",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(bot.is_cheapest_question(text)
+                                or bot.is_price_question(text), text)
+
+    def test_bare_cheapest_new_types_are_price_questions(self):
+        for text in (
+            "cheapest spotify plays",
+            "cheapest twitch live viewers",
+            "cheapest whatsapp poll votes",
+            "cheapest instagram story views",
+            "cheapest telegram post views",
+            "cheapest tiktok auto likes",
+            "cheapest linkedin endorsements",
+            "cheapest youtube live viewers",
+            "cheapest kick live chat comments",
+            "cheapest private channel views",
+            "cheapest website traffic",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(bot.is_cheapest_question(text), text)
+                self.assertTrue(bot.is_price_question(text), text)
+
+    # --- representative order flows -----------------------------
+
+    async def test_order_spotify_plays(self):
+        msg, fake = await self._send(
+            "order 1000 spotify plays https://open.spotify.com/track/x",
+            intent_of("order", platform="spotify",
+                      service_hint="spotify plays",
+                      link="https://open.spotify.com/track/x",
+                      quantity=1000),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_snapshot_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("(#8161)", msg.text_sent[0])
+        self.assertIn("37.80 ETB / 1000", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # Confirm card
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_order_twitch_live_viewers(self):
+        msg, _ = await self._send(
+            "order 1000 twitch live viewers https://twitch.tv/x",
+            intent_of("order", platform="twitch",
+                      service_hint="twitch live viewers",
+                      link="https://twitch.tv/x", quantity=1000),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_snapshot_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("(#1804)", msg.text_sent[0])
+        self.assertIn("535.50 ETB / 1000", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_order_whatsapp_poll_votes(self):
+        msg, _ = await self._send(
+            "order 1000 whatsapp poll votes https://chat.whatsapp.com/x",
+            intent_of("order", platform="whatsapp",
+                      service_hint="whatsapp poll votes",
+                      link="https://chat.whatsapp.com/x", quantity=1000),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_snapshot_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("(#8773)", msg.text_sent[0])
+        self.assertIn("362.88 ETB / 1000", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_order_snapchat_views_bundle(self):
+        # Snapchat views exist ONLY as a Likes+Views bundle (#8765):
+        # the bundle must be reachable, not rejected for having
+        # two kinds.
+        msg, _ = await self._send(
+            "order 1000 snapchat views https://snapchat.com/add/x",
+            intent_of("order", platform="snapchat",
+                      service_hint="snapchat views",
+                      link="https://snapchat.com/add/x", quantity=1000),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_snapshot_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("(#8765)", msg.text_sent[0])
+        self.assertIn("1,600.20 ETB / 1000", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_order_telegram_followers_is_honest(self):
+        # Telegram has no followers product (the 20 name hits are
+        # "Members … Views From Followers" — followers as the
+        # source, not the metric). Never silently sell members.
+        msg, fake = await self._send(
+            "order 1000 telegram followers https://t.me/paxyo",
+            intent_of("order", platform="telegram",
+                      service_hint="telegram followers",
+                      link="https://t.me/paxyo", quantity=1000),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_snapshot_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("doesn't have followers", msg.text_sent[0])
+        self.assertIn("members", msg.text_sent[0])
+        self.assertIsNone(msg.markups[0])  # no Confirm card
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_order_youtube_views_excludes_live_streams(self):
+        # The watch-hour fault's sibling: plain "views" must never
+        # land on a timed live-stream service (the old code quoted
+        # live-stream #1928 at 54.60 ETB instead of plain views).
+        msg, _ = await self._send(
+            "order 1000 youtube views https://youtube.com/watch?v=x",
+            intent_of("order", platform="youtube",
+                      service_hint="youtube views",
+                      link="https://youtube.com/watch?v=x", quantity=1000),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_snapshot_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("(#1943)", msg.text_sent[0])
+        self.assertIn("151.20 ETB / 1000", msg.text_sent[0])
+        self.assertNotIn("Live Stream", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_order_twitter_retweets_both_words(self):
+        # "twitter" and "x" are the same platform (the old gate
+        # checked one while detection checked the other, so both
+        # failed in different places).
+        for text, hint in (
+            ("order 1000 twitter retweets https://x.com/x/status/1",
+             "twitter retweets"),
+            ("order 1000 x retweets https://x.com/x/status/1",
+             "x retweets"),
+        ):
+            with self.subTest(text=text):
+                msg, _ = await self._send(
+                    text,
+                    intent_of("order", platform="x", service_hint=hint,
+                              link="https://x.com/x/status/1",
+                              quantity=1000),
+                    paxyo=FakePaxyo(balance=100000.0,
+                                    services=_snapshot_fixture()),
+                )
+                self.assertEqual(len(msg.text_sent), 1)
+                self.assertIn("(#3980)", msg.text_sent[0])
+                self.assertIn("412.99 ETB / 1000", msg.text_sent[0])
+                self.assertIsNotNone(msg.markups[0])
+
+    # --- cheapest answers that changed --------------------------
+
+    async def test_cheapest_youtube_views_quotes_plain_views(self):
+        # Was live-stream #1928 at 54.60 ETB; plain views are
+        # #2494 at 125.71 ETB (live-stream services are a different
+        # product — concurrent viewers for a timed stream).
+        msg, _ = await self._send(
+            "what is the cheapest youtube views",
+            intent_of("order", platform="youtube",
+                      service_hint="cheapest youtube views"),
+            paxyo=FakePaxyo(services=_snapshot_fixture()),
+        )
+        self.assertIn("125.71 ETB per 1000", msg.text_sent[0])
+        self.assertNotIn("54.60", msg.text_sent[0])
+        self.assertNotIn("Live Stream", msg.text_sent[0])
+
+    async def test_cheapest_telegram_views_quotes_post_views(self):
+        # Was #6534 "Reactions + Free Views" (5.46 ETB) — the views
+        # are a free bonus on a reactions service. The cheapest
+        # true post-views service is #6139 at 1.05 ETB.
+        msg, _ = await self._send(
+            "what is the cheapest telegram views",
+            intent_of("order", platform="telegram",
+                      service_hint="cheapest telegram views"),
+            paxyo=FakePaxyo(services=_snapshot_fixture()),
+        )
+        self.assertIn("1.05 ETB per 1000", msg.text_sent[0])
+        self.assertNotIn("5.46", msg.text_sent[0])
+
+    async def test_cheapest_tiktok_live_viewers_quotes_viewers(self):
+        # Was #4332 (9.24 ETB) — a live-stream LIKES service, not
+        # viewers. The cheapest true live-viewers service is #3769
+        # at 176.40 ETB.
+        msg, _ = await self._send(
+            "what is the cheapest tiktok live viewers",
+            intent_of("order", platform="tiktok",
+                      service_hint="cheapest tiktok live viewers"),
+            paxyo=FakePaxyo(services=_snapshot_fixture()),
+        )
+        self.assertIn("176.40 ETB per 1000", msg.text_sent[0])
+        self.assertNotIn("9.24", msg.text_sent[0])
+
+    async def test_cheapest_youtube_auto_views_is_honest(self):
+        msg, _ = await self._send(
+            "what is the cheapest youtube auto views",
+            intent_of("order", platform="youtube",
+                      service_hint="cheapest youtube auto views"),
+            paxyo=FakePaxyo(services=_snapshot_fixture()),
+        )
+        self.assertIn("doesn't have an auto-views subscription",
+                      msg.text_sent[0])
+
+    # --- honest no-service answers (§5) --------------------------
+
+    def test_no_service_replies(self):
+        cases = {
+            ("telegram", "telegram followers",
+             "cheapest telegram followers"):
+                "Telegram doesn't have followers",
+            ("youtube", "youtube channel joins",
+             "cheapest youtube channel joins"):
+                "We don't have channel joins",
+            ("youtube", "youtube engagement package",
+             "cheapest youtube engagement package"):
+                "We don't have a YouTube engagement package",
+            ("shopee", "shopee views", "cheapest shopee views"):
+                "Shopee doesn't have plain views",
+            ("youtube", "youtube auto views",
+             "cheapest youtube auto views"):
+                "YouTube doesn't have an auto-views subscription",
+        }
+        for (plat, hint, text), expected in cases.items():
+            with self.subTest(text=text):
+                self.assertIn(
+                    expected,
+                    bot.no_service_reply(plat, hint, text, "en"),
+                )
+        # Reaction word forms get the same honest answer as the
+        # emoji form.
+        self.assertIn(
+            "🙏-only service",
+            bot.no_service_reply(
+                "facebook", "facebook pray reactions",
+                "cheapest facebook pray reactions", "en",
+            ),
+        )
+        self.assertIn(
+            "❤️-only service",
+            bot.no_service_reply(
+                "instagram", "instagram heart reactions",
+                "order 10 instagram heart reactions", "en",
+            ),
+        )
+        # No platform/kind named: no specific case, the caller
+        # keeps its generic line.
+        self.assertIsNone(
+            bot.no_service_reply(None, None, "how much is it?", "en"),
+        )
+
+    def test_reaction_word_forms_find_the_service(self):
+        fixture = _snapshot_fixture()
+        # Facebook ❤️ exists (#5105) — the word form must sell it,
+        # not answer honestly.
+        pick = bot.cheapest_service(
+            fixture, platform="facebook",
+            service_hint="facebook heart reactions",
+        )
+        self.assertIsNotNone(pick)
+        self.assertEqual(int(pick["service"]), 5105)
+        # Telegram 🙏 exists (#1723) — same for the word form.
+        pick = bot.cheapest_service(
+            fixture, platform="telegram",
+            service_hint="telegram pray reactions",
+        )
+        self.assertIsNotNone(pick)
+        self.assertEqual(int(pick["service"]), 1723)
+        # Facebook 🙏 does not exist — no pick, honest answer.
+        self.assertIsNone(bot.cheapest_service(
+            fixture, platform="facebook",
+            service_hint="facebook pray reactions",
+        ))
+        self.assertEqual(
+            bot.reaction_emoji("cheapest facebook pray reactions"),
+            "🙏",
+        )
+        self.assertEqual(
+            bot.reaction_emoji("order 10 instagram heart reactions"),
+            "❤️",
+        )
+
+    def test_blacklisted_services_never_sold(self):
+        fixture = _snapshot_fixture()
+        for plat, metric in (
+            ("instagram", "followers"), ("tiktok", "views"),
+            ("telegram", "members"), ("youtube", "views"),
+        ):
+            phrase = _type_phrase(plat, metric)
+            picks = bot.pick_services(
+                fixture, platform=plat, service_hint=phrase, limit=100,
+            )
+            ids = {int(p["service"]) for p in picks}
+            self.assertFalse(ids & {5379, 5834}, phrase)
+
+
+class TestFridayPatterns(_SmartLoopBase):
+    """Friday patterns (feature 5, 15 Nov 2026): the bot notices
+    the SAME service + quantity ordered on the SAME EAT weekday at
+    least twice, and — when the user messages on that weekday
+    again — offers it once that week. Accepting pre-fills the
+    draft and asks for the link; the old link is only ever offered
+    as a button, never reused silently; the normal Confirm card
+    still gates the order. Never auto-places, never nags."""
+
+    def setUp(self):
+        super().setUp()
+        for store in (
+            bot.FRIDAY_OFFERED, bot.FRIDAY_PENDING, bot.FRIDAY_LINK,
+        ):
+            store.clear()
+
+    def tearDown(self):
+        for store in (
+            bot.FRIDAY_OFFERED, bot.FRIDAY_PENDING, bot.FRIDAY_LINK,
+        ):
+            store.clear()
+        super().tearDown()
+
+    def _today_weekday(self):
+        return datetime.now(timezone.utc).astimezone(bot.EAT_TZ).weekday()
+
+    def _today_name(self):
+        return bot._WEEKDAY_NAMES["en"][self._today_weekday()]
+
+    def _weekday_orders(self, weekday, weeks_ago=(1, 2), service_id=1001,
+                        quantity=1000,
+                        link="https://instagram.com/p/x"):
+        """Orders on the given EAT weekday (0=Mon), weeks_ago weeks
+        back, at 10:00 UTC (= 13:00 EAT, so the EAT weekday is the
+        one asked for). Newest first, like the server sends them."""
+        now_eat = datetime.now(timezone.utc).astimezone(bot.EAT_TZ)
+        days_back = (now_eat.weekday() - weekday) % 7
+        orders = []
+        for i, w in enumerate(weeks_ago):
+            day = now_eat.date() - timedelta(days=days_back + 7 * w)
+            created = datetime(
+                day.year, day.month, day.day, 10, 0, tzinfo=timezone.utc
+            )
+            orders.append({
+                "id": 1900 + i, "service_id": service_id,
+                "service_name": "Instagram Followers | Fast",
+                "link": link, "quantity": quantity,
+                "charge": 42.0, "status": "completed",
+                "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+        return orders
+
+    def _pattern_orders(self, **kw):
+        """Two orders for the pattern, on today's EAT weekday,
+        one and two weeks ago."""
+        return self._weekday_orders(self._today_weekday(), **kw)
+
+    # -- detection (pure) -------------------------------------------------
+
+    def test_detect_two_same_weekday_orders(self):
+        orders = [
+            {"service_id": 1001, "service_name": "Instagram Followers | Fast",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-13T10:00:00Z"},
+            {"service_id": 1001, "service_name": "Instagram Followers | Fast",
+             "link": "https://instagram.com/p/y", "quantity": 1000,
+             "created_at": "2026-11-06T10:00:00Z"},
+        ]
+        patterns = bot.detect_weekly_patterns(orders)
+        self.assertEqual(len(patterns), 1)
+        self.assertEqual(patterns[0]["service_id"], 1001)
+        self.assertEqual(patterns[0]["quantity"], 1000)
+        self.assertEqual(patterns[0]["weekday"], 4)  # Friday
+        # The newest matching order's link is the one offered.
+        self.assertEqual(
+            patterns[0]["link"], "https://instagram.com/p/x"
+        )
+
+    def test_detect_one_order_is_no_pattern(self):
+        orders = [
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-13T10:00:00Z"},
+        ]
+        self.assertEqual(bot.detect_weekly_patterns(orders), [])
+
+    def test_detect_quantity_differs_is_no_pattern(self):
+        orders = [
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-13T10:00:00Z"},
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 2000,
+             "created_at": "2026-11-06T10:00:00Z"},
+        ]
+        self.assertEqual(bot.detect_weekly_patterns(orders), [])
+
+    def test_detect_weekday_differs_is_no_pattern(self):
+        orders = [
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-13T10:00:00Z"},  # Friday
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-14T10:00:00Z"},  # Saturday
+        ]
+        self.assertEqual(bot.detect_weekly_patterns(orders), [])
+
+    def test_detect_weekday_is_eat_not_utc(self):
+        # 22:30 UTC on a Friday is already 01:30 EAT on Saturday:
+        # both orders count for Saturday, not Friday.
+        orders = [
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-13T22:30:00Z"},
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-06T22:30:00Z"},
+        ]
+        patterns = bot.detect_weekly_patterns(orders)
+        self.assertEqual(len(patterns), 1)
+        self.assertEqual(patterns[0]["weekday"], 5)  # Saturday in EAT
+
+    def test_detect_ignores_orders_without_a_date(self):
+        orders = [
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-13T10:00:00Z"},
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "2026-11-06T10:00:00Z"},
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000,
+             "created_at": "not a date"},
+            {"service_id": 1001, "service_name": "Instagram Followers",
+             "link": "https://instagram.com/p/x", "quantity": 1000},
+        ]
+        self.assertEqual(len(bot.detect_weekly_patterns(orders)), 1)
+
+    # -- the offer ---------------------------------------------------------
+
+    async def test_offer_fires_on_pattern_weekday(self):
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn(
+            "usually order 1000 Instagram Followers", msg.text_sent[0]
+        )
+        self.assertIn(f"on {self._today_name()}s", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        buttons = msg.markups[0].inline_keyboard[0]
+        self.assertEqual(buttons[0].callback_data, "friday:1001:1000")
+        self.assertEqual(buttons[1].callback_data, "fridayno:1001:1000")
+
+    async def test_offer_once_per_week(self):
+        msg, _ = await self._turns(
+            [
+                ("Hello", intent_of("greeting")),
+                ("Hello", intent_of("greeting")),
+            ],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("usually order", msg.text_sent[0])
+        self.assertNotIn("usually order", msg.text_sent[1])
+        self.assertIn("Tell me the service you want", msg.text_sent[1])
+
+    async def test_offer_not_on_a_different_weekday(self):
+        other = (self._today_weekday() + 1) % 7
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))],
+            paxyo=FakePaxyo(recent=self._weekday_orders(other)),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertNotIn("usually order", msg.text_sent[0])
+
+    async def test_offer_not_when_ordered_this_week(self):
+        # Pattern (1 and 2 weeks ago) plus the same order already
+        # placed this week: nothing to offer.
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))],
+            paxyo=FakePaxyo(
+                recent=self._pattern_orders(weeks_ago=(0, 1, 2))
+            ),
+        )
+        self.assertNotIn("usually order", msg.text_sent[0])
+
+    async def test_offer_not_while_a_draft_exists(self):
+        bot.PARTIAL[1] = {
+            "platform": "tiktok", "service_hint": "tiktok views",
+            "quantity": 1000,
+        }
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertNotIn("usually order", msg.text_sent[0])
+
+    async def test_offer_not_while_a_confirm_card_is_open(self):
+        await self._build_pending_views()
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertNotIn("usually order", msg.text_sent[0])
+
+    async def test_offer_fires_again_next_week(self):
+        fake = FakePaxyo(recent=self._pattern_orders())
+        now = datetime.now(timezone.utc)
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            first = await bot.maybe_friday_pattern_offer(
+                update, 1, "en", now=now
+            )
+            same_week = await bot.maybe_friday_pattern_offer(
+                update, 1, "en", now=now
+            )
+            next_week = await bot.maybe_friday_pattern_offer(
+                update, 1, "en", now=now + timedelta(days=7)
+            )
+        self.assertTrue(first)
+        self.assertFalse(same_week)
+        # The ignored offer from last week does not block this one.
+        self.assertTrue(next_week)
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertTrue(
+            all("usually order" in text for text in msg.text_sent)
+        )
+
+    async def test_offer_in_amharic(self):
+        msg, _ = await self._turns(
+            [("ሰላም", intent_of("greeting"))],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("ያዝዛሉ", msg.text_sent[0])
+        self.assertIn("1000", msg.text_sent[0])
+
+    # -- accepting ----------------------------------------------------------
+
+    async def test_accept_yes_prefills_and_asks_for_link(self):
+        msg, fake = await self._turns(
+            [
+                ("Hello", intent_of("greeting")),
+                ("yes", intent_of("unclear")),
+            ],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("usually order", msg.text_sent[0])
+        accept = msg.text_sent[1]
+        self.assertIn("Instagram Followers", accept)
+        self.assertIn("1000", accept)
+        self.assertIn("42.00", accept)  # catalogue price, never invented
+        self.assertIn("Send me your link", accept)
+        self.assertIn("Same link as last time?", accept)
+        self.assertEqual(
+            bot.PARTIAL[1],
+            {
+                "platform": "instagram",
+                "service_hint": "instagram followers",
+                "quantity": 1000,
+            },
+        )
+        self.assertEqual(bot.USUAL_SERVICE[1], 1001)
+        # Nothing placed, no Confirm card yet: the link comes first.
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_accept_then_link_shows_confirm_card(self):
+        msg, fake = await self._turns(
+            [
+                ("Hello", intent_of("greeting")),
+                ("yes", intent_of("unclear")),
+                (
+                    "https://instagram.com/p/x",
+                    intent_of(
+                        "order", platform="instagram",
+                        service_hint="followers",
+                        link="https://instagram.com/p/x", quantity=1000,
+                    ),
+                ),
+            ],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertEqual(len(msg.text_sent), 3)
+        card = msg.text_sent[2]
+        self.assertIn("Please confirm", card)
+        self.assertIn("Instagram Followers", card)
+        self.assertIn("1000", card)
+        self.assertIn("https://instagram.com/p/x", card)
+        self.assertIn("42.00", card)
+        self.assertIsNotNone(msg.markups[2])  # the Confirm card
+        self.assertEqual(fake.orders_created, [])  # still unconfirmed
+
+    async def test_accept_button_then_same_link_shows_confirm(self):
+        fake = FakePaxyo(recent=self._pattern_orders())
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))], paxyo=fake
+        )
+        self.assertIn("usually order", msg.text_sent[0])
+        query = FakeQuery("friday:1001:1000")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update, None)
+        self.assertTrue(query.answered)
+        self.assertIn("Send me your link", query.edited[0])
+        self.assertEqual(
+            query.edited_markups[0].inline_keyboard[0][0].callback_data,
+            "fridaylink:1001:1000",
+        )
+        query2 = FakeQuery("fridaylink:1001:1000")
+        update2 = FakeCallbackUpdate(query2)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update2, None)
+        card = query2.message.text_sent[0]
+        self.assertIn("Please confirm", card)
+        self.assertIn("Instagram Followers", card)
+        self.assertIn("1000", card)
+        self.assertIn("https://instagram.com/p/x", card)
+        self.assertIn("42.00", card)
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertEqual(fake.orders_created, [])  # Confirm still gates
+
+    # -- declining ----------------------------------------------------------
+
+    async def test_decline_button_ends_it_quietly(self):
+        fake = FakePaxyo(recent=self._pattern_orders())
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))], paxyo=fake
+        )
+        self.assertIn("usually order", msg.text_sent[0])
+        query = FakeQuery("fridayno:1001:1000")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update, None)
+        self.assertEqual(query.edited, ["No problem — just message me when you want it."])
+        msg2, _ = await self._turns(
+            [("Hello", intent_of("greeting"))], paxyo=fake
+        )
+        self.assertNotIn("usually order", msg2.text_sent[0])
+
+    async def test_decline_text_ends_it_quietly(self):
+        msg, _ = await self._turns(
+            [
+                ("Hello", intent_of("greeting")),
+                ("no thanks", intent_of("unclear")),
+                ("Hello", intent_of("greeting")),
+            ],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
+        self.assertEqual(len(msg.text_sent), 3)
+        self.assertIn("usually order", msg.text_sent[0])
+        self.assertEqual(
+            msg.text_sent[1],
+            "No problem — just message me when you want it.",
+        )
+        self.assertNotIn("usually order", msg.text_sent[2])
+
+
+class TestRateOrderApiClient(unittest.IsolatedAsyncioTestCase):
+    """POST /orders/{id}/rate + GET /ratings/services: request
+    shape, the 404 -> None mapping, the 409 passthrough (already
+    rated vs not completed yet), and the non-404 raise."""
+
+    def _err(self, status, body=None):
+        req = bot.httpx.Request(
+            "POST", "https://paxyo.et/api/bot/orders/1839/rate"
+        )
+        resp = bot.httpx.Response(
+            status, json=body or {}, request=req
+        )
+        return bot.httpx.HTTPStatusError("error", request=req, response=resp)
+
+    async def test_rate_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=self._err(404))
+            ):
+                self.assertIsNone(
+                    await client.rate_order(1839, 1, "good")
+                )
+        finally:
+            await client._client.aclose()
+
+    async def test_rate_posts_expected_body(self):
+        client = bot.PaxyoClient()
+        try:
+            record = {"ok": True, "order_id": 1839, "rating": "good"}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ) as send:
+                result = await client.rate_order(1839, 1, "good")
+            self.assertEqual(result, record)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/orders/1839/rate"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(
+                json.loads(request.content),
+                {"telegram_id": 1, "rating": "good"},
+            )
+        finally:
+            await client._client.aclose()
+
+    async def test_rate_409_already_rated_passthrough(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(side_effect=self._err(
+                    409,
+                    {"success": False,
+                     "error": "Order #1839 was already rated \"good\"."},
+                )),
+            ):
+                result = await client.rate_order(1839, 1, "bad")
+            self.assertEqual(result, {
+                "ok": False, "already_rated": True,
+                "error": "Order #1839 was already rated \"good\".",
+            })
+        finally:
+            await client._client.aclose()
+
+    async def test_rate_409_not_completed_passthrough(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(side_effect=self._err(
+                    409,
+                    {"success": False,
+                     "error": "Order is not completed yet, so it "
+                              "cannot be rated."},
+                )),
+            ):
+                result = await client.rate_order(1839, 1, "good")
+            self.assertEqual(result, {
+                "ok": False, "already_rated": False,
+                "error": "Order is not completed yet, so it cannot "
+                         "be rated.",
+            })
+        finally:
+            await client._client.aclose()
+
+    async def test_rate_other_error_raises(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=self._err(500))
+            ):
+                with self.assertRaises(bot.httpx.HTTPStatusError):
+                    await client.rate_order(1839, 1, "good")
+        finally:
+            await client._client.aclose()
+
+    async def test_service_ratings_shape(self):
+        client = bot.PaxyoClient()
+        try:
+            record = {"success": True, "ratings": {
+                "1665": {"good": 12, "bad": 2},
+                "999999": {"good": 0, "bad": 0},
+            }}
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=record),
+            ) as send:
+                result = await client.service_ratings([1665, 999999])
+            self.assertEqual(result, record["ratings"])
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "GET")
+            self.assertTrue(
+                request.url.path.endswith("/ratings/services"))
+            self.assertIn("service_ids=1665,999999", str(request.url))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+        finally:
+            await client._client.aclose()
+
+    async def test_service_ratings_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "GET",
+                "https://paxyo.et/api/bot/ratings/services"
+                "?service_ids=1665",
+            )
+            resp = bot.httpx.Response(404, request=req)
+            err = bot.httpx.HTTPStatusError(
+                "error", request=req, response=resp)
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertIsNone(await client.service_ratings([1665]))
+        finally:
+            await client._client.aclose()
+
+    async def test_service_ratings_empty_list_makes_no_call(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock()
+            ) as send:
+                self.assertEqual(await client.service_ratings([]), {})
+                send.assert_not_called()
+        finally:
+            await client._client.aclose()
+
+    async def test_service_ratings_other_error_raises(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "GET",
+                "https://paxyo.et/api/bot/ratings/services"
+                "?service_ids=1665",
+            )
+            resp = bot.httpx.Response(500, request=req)
+            err = bot.httpx.HTTPStatusError(
+                "error", request=req, response=resp)
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                with self.assertRaises(bot.httpx.HTTPStatusError):
+                    await client.service_ratings([1665])
+        finally:
+            await client._client.aclose()
+
+
+class TestRateOrder(unittest.IsolatedAsyncioTestCase):
+    """Rate your order (ideas batch 2, feature 3, 15 Nov 2026):
+    the delivery message carries one 👍/👎 ask, one tap files the
+    rating (good or bad) and answers with one short line, a second
+    tap answers "Already noted" and files nothing, an ignored ask
+    never re-appears, and the endpoint not being live yet is
+    answered honestly. Bad ratings demote the service in future
+    fastest-first picks — never the price, never a blacklisted
+    service, never the cheapest quote."""
+
+    RATED_SERVICES = [
+        {
+            "service": 2001, "name": "TikTok Views | Fast",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 10.0, "min": 10, "max": 1000000,
+            "average_time": "10 minutes", "active": True,
+            "provider_service_id": 2001,
+        },
+        {
+            "service": 2002, "name": "TikTok Views | Slower",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 10.0, "min": 10, "max": 1000000,
+            "average_time": "10 minutes", "active": True,
+            "provider_service_id": 2002,
+        },
+        {
+            "service": 2003, "name": "TikTok Views | Slowest",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 10.0, "min": 10, "max": 1000000,
+            "average_time": "30 minutes", "active": True,
+            "provider_service_id": 2003,
+        },
+    ]
+
+    DELIVERY_TEXT = (
+        "✅ Your order is delivered — 100 TikTok views, order "
+        "#1839. Thank you for ordering with Paxyo! 🎉\n"
+        "How was it? Tap 👍 if it went well, 👎 if not."
+    )
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PARTIAL.clear()
+        bot.WATCHED_ORDERS.clear()
+        bot.RATING_ASKED.clear()
+        bot.RATED_ORDERS.clear()
+        bot.LAST_LANG.clear()
+        bot._SERVICE_RATINGS_CACHE["at"] = 0.0
+        bot._SERVICE_RATINGS_CACHE["data"].clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PARTIAL.clear()
+        bot.WATCHED_ORDERS.clear()
+        bot.RATING_ASKED.clear()
+        bot.RATED_ORDERS.clear()
+        bot.LAST_LANG.clear()
+        bot._SERVICE_RATINGS_CACHE["at"] = 0.0
+        bot._SERVICE_RATINGS_CACHE["data"].clear()
+
+    def _watch(self, order_id, status_minutes_ago=0, avg_minutes=10,
+               service=None, quantity=100, user_id=1):
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": user_id,
+            "service": service or {
+                "service": 5535,
+                "name": "TikTok Video Views | Cheapest",
+                "average_time": f"{avg_minutes} minutes",
+            },
+            "quantity": quantity,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time() - status_minutes_ago * 60,
+            "avg_minutes": avg_minutes,
+            "warned": False,
+        }
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns if intent is not None]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _run_callback(self, data, paxyo=None):
+        query = FakeQuery(data, message_text=self.DELIVERY_TEXT)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    # --- demotion: the rule itself -------------------------------
+
+    def test_demotion_3_bad_below_same_speed_clean(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+            ratings={"2001": {"good": 0, "bad": 3}},
+        )
+        self.assertEqual(picks[0]["service"], 2002)
+        # Demoted below every clean service, not just the same-speed
+        # one — so the bad-rated fastest service lands last.
+        self.assertEqual(picks[-1]["service"], 2001)
+
+    def test_demotion_2_bad_untouched(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+            ratings={"2001": {"good": 0, "bad": 2}},
+        )
+        self.assertEqual(picks[0]["service"], 2001)
+
+    def test_demotion_more_good_than_bad_untouched(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+            ratings={"2001": {"good": 5, "bad": 3}},
+        )
+        self.assertEqual(picks[0]["service"], 2001)
+
+    def test_demotion_10_bad_skipped_with_alternative(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+            ratings={"2001": {"good": 0, "bad": 10}},
+        )
+        self.assertEqual(
+            [p["service"] for p in picks], [2002, 2003])
+        self.assertNotIn(2001, [p["service"] for p in picks])
+
+    def test_demotion_10_bad_kept_when_lone(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES[:1], platform="tiktok",
+            service_hint="tiktok views",
+            ratings={"2001": {"good": 0, "bad": 10}},
+        )
+        self.assertEqual([p["service"] for p in picks], [2001])
+
+    def test_demotion_all_10_bad_kept(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+            ratings={
+                "2001": {"good": 0, "bad": 10},
+                "2002": {"good": 0, "bad": 12},
+                "2003": {"good": 0, "bad": 10},
+            },
+        )
+        self.assertEqual(
+            [p["service"] for p in picks], [2001, 2002, 2003])
+
+    def test_demotion_never_picks_blacklisted(self):
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="tiktok",
+            service_hint="tiktok likes",
+            ratings={"5379": {"good": 100, "bad": 0}},
+        )
+        self.assertEqual(picks, [])
+
+    def test_demotion_does_not_change_prices(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+            ratings={"2001": {"good": 0, "bad": 3}},
+        )
+        # The same service dicts, prices untouched — only the order
+        # changes.
+        self.assertIs(picks[0], self.RATED_SERVICES[1])
+        self.assertEqual(picks[0]["rate_etb_per_1000"], 10.0)
+        self.assertIs(picks[-1], self.RATED_SERVICES[0])
+        self.assertEqual(picks[-1]["rate_etb_per_1000"], 10.0)
+
+    def test_demotion_cheapest_ranking_untouched(self):
+        # A cheapest question must quote the true cheapest, even
+        # when that service has bad ratings.
+        picks = bot.pick_services(
+            _views_fixture(), platform="tiktok",
+            service_hint="cheapest tiktok views",
+            ratings={"5535": {"good": 0, "bad": 50}},
+        )
+        self.assertEqual(picks[0]["service"], 5535)
+
+    # --- demotion: the async pick path ---------------------------
+
+    async def test_pick_services_rated_fetches_once_and_demotes(self):
+        fake = FakePaxyo(ratings={"2001": {"good": 0, "bad": 5}})
+        picks = await bot.pick_services_rated(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views", client=fake,
+        )
+        self.assertEqual(picks[0]["service"], 2002)
+        self.assertEqual(len(fake.ratings_calls), 1)
+        # Second pick reuses the 5-minute cache: no second call.
+        await bot.pick_services_rated(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views", client=fake,
+        )
+        self.assertEqual(len(fake.ratings_calls), 1)
+
+    async def test_pick_services_rated_failure_changes_nothing(self):
+        fake = FakePaxyo(ratings_none=True)
+        plain = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+        )
+        rated = await bot.pick_services_rated(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views", client=fake,
+        )
+        self.assertEqual(rated, plain)
+        self.assertEqual(rated[0]["service"], 2001)
+
+    async def test_pick_services_rated_client_without_method(self):
+        plain = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
+        )
+        rated = await bot.pick_services_rated(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views", client=object(),
+        )
+        self.assertEqual(rated, plain)
+
+    async def test_complete_order_demotes_bad_fastest_pick(self):
+        msg = FakeMessage()
+        fake = FakePaxyo(
+            services=SAMPLE_SERVICES,
+            ratings={"1001": {"good": 0, "bad": 5}},
+        )
+        with mock.patch("bot.paxyo", fake):
+            result = await bot.complete_order(
+                msg, 1,
+                {
+                    "platform": "instagram",
+                    "service_hint": "followers",
+                    "link": "https://instagram.com/p/x",
+                    "quantity": 1000,
+                },
+                "en",
+            )
+        self.assertTrue(result)
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        # The fastest service (#1001, 12 min) has 5 bad ratings,
+        # so the Confirm card shows the clean #1002 instead — same
+        # catalogue price maths, different service.
+        self.assertEqual(pending["service"]["service"], 1002)
+        self.assertEqual(pending["total"], 21.0)
+        self.assertEqual(len(fake.ratings_calls), 1)
+
+    # --- asking: the delivery message ----------------------------
+
+    async def test_delivery_message_carries_rating_buttons(self):
+        self._watch("1839")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1839": "completed"},
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        chat_id, text = app.bot.sent[0]
+        self.assertEqual(chat_id, 1)
+        self.assertIn("delivered", text)
+        self.assertIn("#1839", text)
+        self.assertIn("How was it?", text)
+        markup = app.bot.sent_markups[0]
+        self.assertIsNotNone(markup)
+        callbacks = [b.callback_data for row in markup.inline_keyboard
+                     for b in row]
+        self.assertEqual(
+            callbacks, ["rate:1839:good", "rate:1839:bad"])
+        self.assertIn("1839", bot.RATING_ASKED)
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    async def test_delivery_message_asks_once(self):
+        self._watch("1839")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1839": "completed"},
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertEqual(bot.RATING_ASKED, {"1839"})
+
+    def test_amharic_templates(self):
+        self.assertIn("👍", bot.t("rate_ask", "am"))
+        self.assertIn(
+            "ተመዝግቧል", bot.t("rate_thanks_good", "am"))
+        self.assertIn("ይቅርታ", bot.t("rate_thanks_bad", "am"))
+        self.assertIn(
+            "ተመዝግቧል", bot.t("rate_already", "am"))
+        self.assertIn("Ratings", bot.t("rate_not_live", "am"))
+
+    # --- asking: tapping -----------------------------------------
+
+    async def test_tap_good_files_and_thanks(self):
+        fake = FakePaxyo()
+        query = await self._run_callback("rate:1839:good", paxyo=fake)
+        self.assertEqual(fake.ratings_filed, [{
+            "order_id": "1839", "telegram_id": 1, "rating": "good",
+        }])
+        self.assertEqual(len(query.edited), 1)
+        self.assertIn("Thanks — noted.", query.edited[0])
+        self.assertIn("delivered", query.edited[0])
+        self.assertIn("1839", bot.RATED_ORDERS)
+
+    async def test_tap_bad_files_and_sorry(self):
+        fake = FakePaxyo()
+        query = await self._run_callback("rate:1839:bad", paxyo=fake)
+        self.assertEqual(fake.ratings_filed, [{
+            "order_id": "1839", "telegram_id": 1, "rating": "bad",
+        }])
+        self.assertIn("Sorry it wasn't great", query.edited[0])
+        self.assertIn("better services next time", query.edited[0])
+
+    async def test_tap_twice_files_once(self):
+        fake = FakePaxyo()
+        await self._run_callback("rate:1839:good", paxyo=fake)
+        query = await self._run_callback("rate:1839:good", paxyo=fake)
+        self.assertEqual(len(fake.ratings_filed), 1)
+        self.assertIn("Already noted", query.edited[0])
+
+    async def test_tap_not_live_answers_honestly(self):
+        fake = FakePaxyo(rate_none=True)
+        query = await self._run_callback("rate:1839:good", paxyo=fake)
+        self.assertEqual(fake.ratings_filed, [])
+        self.assertIn("Ratings aren't switched on yet", query.edited[0])
+        self.assertNotIn("1839", bot.RATED_ORDERS)
+
+    async def test_tap_already_rated_answers_already_noted(self):
+        fake = FakePaxyo(rate_already=True)
+        query = await self._run_callback("rate:1839:bad", paxyo=fake)
+        self.assertEqual(fake.ratings_filed, [])
+        self.assertIn("Already noted", query.edited[0])
+        self.assertIn("1839", bot.RATED_ORDERS)
+
+    async def test_tap_error_answers_honestly_and_retry_files(self):
+        failing = FakePaxyo(rate_error=500)
+        query = await self._run_callback("rate:1839:good", paxyo=failing)
+        self.assertIn("couldn't save that right now", query.edited[0])
+        self.assertNotIn("1839", bot.RATED_ORDERS)
+        # A retry tap still files: the failed tap marked nothing.
+        working = FakePaxyo()
+        query = await self._run_callback("rate:1839:good", paxyo=working)
+        self.assertEqual(len(working.ratings_filed), 1)
+        self.assertIn("Thanks — noted.", query.edited[0])
+
+    async def test_ignored_ask_never_reappears_on_later_messages(self):
+        self._watch("1839")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1839": "completed"},
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        # The user ignores the ask and just says hello later: no
+        # rating ask, no rating buttons, no nag.
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))], paxyo=fake,
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertNotIn("How was it?", msg.text_sent[0])
+        self.assertNotIn("👍", msg.text_sent[0])
+        for markup in msg.markups:
+            if markup is None or not hasattr(markup, "inline_keyboard"):
+                continue
+            callbacks = [b.callback_data for row in markup.inline_keyboard
+                         for b in row]
+            self.assertNotIn("rate:1839:good", callbacks)
+        self.assertEqual(bot.RATING_ASKED, {"1839"})
 
 
 if __name__ == "__main__":
