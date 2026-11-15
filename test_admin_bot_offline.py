@@ -21,7 +21,13 @@ yesterday's five figures from a seeded stats record labelled
 from the response's own date fields, 404 -> "not connected yet",
 and the once-a-day background gate: before 8am nothing, already
 sent today nothing, stats 404 marks nothing, server marker down
-falls back to the in-memory marker), and the free-form AI fallback
+falls back to the in-memory marker), the first-use password gate
+(gate off when ADMIN_BOT_PASSWORD is unset; when set, commands
+and questions are blocked before unlock, a wrong password is
+refused, 5 wrong in an hour locks the user out, the correct
+password unlocks for the run, non-admins never see the prompt,
+Confirm taps are blocked before unlock, the password is never
+echoed), and the free-form AI fallback
 (no key -> short reply; the AI is never called for a broadcast, a
 setting change, a refund or a promo-code creation). No network
 calls, no Telegram connection, no real messages sent.
@@ -1955,6 +1961,164 @@ class TestSafetyLine(AdminBotBase):
     def test_fallback_lists_refund_and_promo(self):
         self.assertIn("Refund order #1841", admin_bot.FALLBACK_REPLY)
         self.assertIn("Create promo code PAXYO20 20%", admin_bot.FALLBACK_REPLY)
+
+
+class PasswordGateBase(AdminBotBase):
+    """Base with the password gate ON (fake password, never real)."""
+
+    PASSWORD = "test-password-123"
+
+    def setUp(self):
+        super().setUp()
+        admin_bot.UNLOCKED_USERS.clear()
+        admin_bot._WRONG_PASSWORD_ATTEMPTS.clear()
+        self._pw_patch = mock.patch.object(
+            admin_bot, "ADMIN_BOT_PASSWORD", self.PASSWORD
+        )
+        self._pw_patch.start()
+        self.addCleanup(self._pw_patch.stop)
+
+    def tearDown(self):
+        admin_bot.UNLOCKED_USERS.clear()
+        admin_bot._WRONG_PASSWORD_ATTEMPTS.clear()
+        super().tearDown()
+
+
+class TestPasswordGate(PasswordGateBase):
+    """First-use password gate (William, 15 Nov 11:38 EAT): when
+    ADMIN_BOT_PASSWORD is set, an allowlisted user must enter it
+    once per process run before ANY command, question, broadcast
+    or setting change is answered. Non-allowlisted users never
+    reach the prompt. Unset/empty = gate off, allowlist only."""
+
+    async def test_question_blocked_before_unlock(self):
+        fake = FakeAdminPaxyo(stats=STATS)
+        message = await self._text(
+            "How much did we make today?", fake=fake
+        )
+        self.assertEqual(message.text_sent, [admin_bot.PASSWORD_WRONG])
+        self.assertEqual(fake.stats_days_seen, [])
+        self.assertNotIn(ADMIN_ID, admin_bot.UNLOCKED_USERS)
+
+    async def test_command_blocked_before_unlock(self):
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        message = await self._command(admin_bot.morning_cmd, fake=fake)
+        self.assertEqual(message.text_sent, [admin_bot.PASSWORD_PROMPT])
+        self.assertEqual(fake.stats_day_seen, [])
+
+    async def test_start_blocked_before_unlock(self):
+        message = FakeMessage("/start")
+        update = FakeUpdate(message, FakeUser(ADMIN_ID))
+        await admin_bot.start_cmd(update, FakeContext())
+        self.assertEqual(message.text_sent, [admin_bot.PASSWORD_PROMPT])
+        self.assertNotIn("How much did we make today", message.text_sent[0])
+
+    async def test_correct_password_unlocks_and_next_command_works(self):
+        message = await self._text(self.PASSWORD)
+        self.assertEqual(message.text_sent, [admin_bot.PASSWORD_UNLOCKED])
+        self.assertIn(ADMIN_ID, admin_bot.UNLOCKED_USERS)
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        report = await self._command(admin_bot.morning_cmd, fake=fake)
+        self.assertIn("420.00", report.text_sent[0])
+        self.assertEqual(fake.stats_day_seen, ["yesterday"])
+
+    async def test_wrong_password_refused_and_still_locked(self):
+        message = await self._text("not-the-password")
+        self.assertEqual(message.text_sent, [admin_bot.PASSWORD_WRONG])
+        self.assertNotIn(ADMIN_ID, admin_bot.UNLOCKED_USERS)
+        fake = FakeAdminPaxyo(stats=STATS_YESTERDAY)
+        report = await self._command(admin_bot.morning_cmd, fake=fake)
+        self.assertEqual(report.text_sent, [admin_bot.PASSWORD_PROMPT])
+        self.assertEqual(fake.stats_day_seen, [])
+
+    async def test_unlock_persists_across_messages(self):
+        await self._text(self.PASSWORD)
+        fake = FakeAdminPaxyo(stats=STATS)
+        first = await self._text("How much did we make today?", fake=fake)
+        second = await self._text(
+            "How many users in the last 7 days?", fake=fake
+        )
+        self.assertIn("486.20", first.text_sent[0])
+        self.assertIn("3 new users", second.text_sent[0])
+        self.assertEqual(fake.stats_days_seen, [1, 7])
+        self.assertIn(ADMIN_ID, admin_bot.UNLOCKED_USERS)
+
+    async def test_sixth_wrong_attempt_locked_out(self):
+        for i in range(5):
+            message = await self._text(f"wrong-{i}")
+            self.assertEqual(message.text_sent, [admin_bot.PASSWORD_WRONG])
+        sixth = await self._text("wrong-5")
+        self.assertEqual(sixth.text_sent, [admin_bot.PASSWORD_LOCKED_OUT])
+        # The correct password does not unlock while locked out.
+        correct = await self._text(self.PASSWORD)
+        self.assertEqual(correct.text_sent, [admin_bot.PASSWORD_LOCKED_OUT])
+        self.assertNotIn(ADMIN_ID, admin_bot.UNLOCKED_USERS)
+
+    def test_rate_limit_expires_after_an_hour(self):
+        for i in range(5):
+            self.assertEqual(
+                admin_bot.try_password(ADMIN_ID, f"wrong-{i}", now=1000.0),
+                "wrong",
+            )
+        self.assertEqual(
+            admin_bot.try_password(ADMIN_ID, "wrong-5", now=1000.0 + 3599),
+            "locked",
+        )
+        self.assertEqual(
+            admin_bot.try_password(
+                ADMIN_ID, self.PASSWORD, now=1000.0 + 3601
+            ),
+            "ok",
+        )
+        self.assertIn(ADMIN_ID, admin_bot.UNLOCKED_USERS)
+
+    async def test_non_admin_never_gets_password_prompt(self):
+        message = await self._text(
+            "How much did we make today?", user_id=OTHER_ID,
+            fake=FakeAdminPaxyo(stats=STATS),
+        )
+        self.assertEqual(message.text_sent, [admin_bot.REFUSAL])
+        password = await self._text(self.PASSWORD, user_id=OTHER_ID)
+        self.assertEqual(password.text_sent, [admin_bot.REFUSAL])
+        self.assertNotIn(OTHER_ID, admin_bot.UNLOCKED_USERS)
+
+    async def test_non_admin_start_never_gets_password_prompt(self):
+        message = FakeMessage("/start")
+        update = FakeUpdate(message, FakeUser(OTHER_ID))
+        await admin_bot.start_cmd(update, FakeContext())
+        self.assertEqual(message.text_sent, [admin_bot.REFUSAL])
+
+    async def test_callback_blocked_before_unlock(self):
+        fake = FakeAdminPaxyo()
+        self._patch_api(fake)
+        admin_bot.PENDING[ADMIN_ID] = {
+            "kind": "setting",
+            "key": admin_bot.TICKER_SETTING_KEY,
+            "value": "hello",
+        }
+        query = await self._callback("admin_confirm")
+        self.assertEqual(query.edited, [admin_bot.PASSWORD_PROMPT])
+        self.assertEqual(fake.settings_written, [])
+
+    async def test_password_never_echoed_in_replies(self):
+        replies = []
+        replies += (await self._text("not-the-password")).text_sent
+        replies += (await self._text(self.PASSWORD)).text_sent
+        replies += (await self._text(
+            "How much did we make today?",
+            fake=FakeAdminPaxyo(stats=STATS),
+        )).text_sent
+        for reply in replies:
+            self.assertNotIn(self.PASSWORD, reply)
+
+    async def test_gate_off_when_password_unset(self):
+        with mock.patch.object(admin_bot, "ADMIN_BOT_PASSWORD", ""):
+            fake = FakeAdminPaxyo(stats=STATS)
+            message = await self._text(
+                "How much did we make today?", fake=fake
+            )
+            self.assertIn("486.20", message.text_sent[0])
+            self.assertEqual(fake.stats_days_seen, [1])
 
 
 if __name__ == "__main__":

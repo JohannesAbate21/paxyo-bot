@@ -55,6 +55,21 @@ SAFETY (never break):
   * ONLY William can use it. Allowlist from env ADMIN_TELEGRAM_IDS
     (same pattern as bot.py's is_admin_user); EMPTY by default means
     the bot refuses EVERYONE until William's Telegram id is set.
+  * FIRST-USE PASSWORD GATE (William, 15 Nov 11:38 EAT — a Telegram
+    bot cannot be made private/hidden, so this is the second lock):
+    env ADMIN_BOT_PASSWORD. When set, an allowlisted user must enter
+    the password once per process run before ANY command, question,
+    broadcast or setting change is answered; until unlocked, every
+    message gets one short line (the password prompt for commands,
+    a short refusal for a wrong attempt) and no admin content leaks.
+    Wrong password: short refusal, no hint. 5 wrong attempts in an
+    hour locks that user out for an hour. The password itself is
+    never logged, echoed or stored anywhere except the env var. A
+    redeploy/restart clears the unlock — the password is entered
+    again. When ADMIN_BOT_PASSWORD is unset/empty the gate is OFF
+    and behaviour is exactly the allowlist-only behaviour. Non-
+    allowlisted users get the existing refusal and never reach the
+    password prompt.
   * EVERY change (broadcast, setting, refund, promo code) needs an
     explicit Confirm step — a Confirm tap or a typed "yes" while a
     preview is pending. Nothing sends, writes or refunds on a single
@@ -94,6 +109,9 @@ Env vars (values NEVER recorded — only names):
   BOT_API_SECRET    (required) — same secret as the order bot
   PAXYO_API_BASE    (default https://paxyo.et/api/bot)
   ADMIN_TELEGRAM_IDS (comma-separated; empty = refuses everyone)
+  ADMIN_BOT_PASSWORD (optional) — first-use password; when set, an
+    allowlisted user must enter it once per process run before any
+    command is answered (unset/empty = gate off, allowlist only)
   DEEPSEEK_API_KEY  (optional) — free-form answers only
   DEEPSEEK_MODEL    (default deepseek-chat)
   GEMINI_API_KEY    (optional) — free-form answers only, after DeepSeek
@@ -109,6 +127,7 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -174,6 +193,10 @@ def _admin_ids_from_env():
 
 ADMIN_TELEGRAM_IDS = _admin_ids_from_env()
 
+# First-use password gate (William, 15 Nov 11:38 EAT). No default,
+# no hardcoded fallback: unset/empty means the gate is OFF.
+ADMIN_BOT_PASSWORD = os.environ.get("ADMIN_BOT_PASSWORD", "") or ""
+
 
 def is_admin_user(user_id: int) -> bool:
     """True when this Telegram user may use the admin bot."""
@@ -184,6 +207,110 @@ def is_admin_user(user_id: int) -> bool:
 
 
 REFUSAL = "Sorry — this bot is only for the Paxyo owner."
+
+# ------------------------------------------------------ password gate ---
+
+PASSWORD_PROMPT = (
+    "This bot is locked — please send the password to continue."
+)
+PASSWORD_WRONG = "Wrong password."
+PASSWORD_LOCKED_OUT = "Too many wrong passwords — try again later."
+PASSWORD_UNLOCKED = "Unlocked. What would you like to do?"
+
+PASSWORD_MAX_WRONG = 5
+PASSWORD_WINDOW_SECONDS = 3600
+
+# In-memory password-gate state (per process run): ids that entered
+# the correct password, and per-user monotonic timestamps of wrong
+# attempts (pruned to the last hour). A redeploy/restart clears
+# both — the password must be entered again. The password itself
+# is never stored here, only the fact that a user unlocked.
+# Tests clear both sets in setUp/tearDown.
+UNLOCKED_USERS = set()
+_WRONG_PASSWORD_ATTEMPTS = {}
+
+
+def _password_gate_on() -> bool:
+    """True when a password is configured: the gate is on."""
+    return bool(ADMIN_BOT_PASSWORD)
+
+
+def is_unlocked(user_id: int) -> bool:
+    """True when this user may use the bot right now: the gate is
+    off, or they entered the correct password in this process run."""
+    if not _password_gate_on():
+        return True
+    try:
+        return int(user_id) in UNLOCKED_USERS
+    except (TypeError, ValueError):
+        return False
+
+
+def _prune_wrong_attempts(user_id: int, now: float):
+    """Wrong-attempt timestamps inside the last hour for this user
+    (older ones are forgotten)."""
+    attempts = _WRONG_PASSWORD_ATTEMPTS.get(int(user_id)) or []
+    attempts = [t for t in attempts
+                if now - t < PASSWORD_WINDOW_SECONDS]
+    if attempts:
+        _WRONG_PASSWORD_ATTEMPTS[int(user_id)] = attempts
+    else:
+        _WRONG_PASSWORD_ATTEMPTS.pop(int(user_id), None)
+    return attempts
+
+
+def _password_locked_out(user_id: int, now: float = None) -> bool:
+    """True when this user made 5 wrong attempts in the last hour."""
+    if now is None:
+        now = time.monotonic()
+    return len(_prune_wrong_attempts(user_id, now)) >= PASSWORD_MAX_WRONG
+
+
+def try_password(user_id: int, text: str, now: float = None) -> str:
+    """Check one password attempt. Returns "ok" (unlocked),
+    "wrong" (recorded) or "locked" (5 wrong in the last hour).
+    The password itself is never logged, echoed or returned.
+    compare_digest keeps the check time from leaking the password.
+    Only call when the gate is on."""
+    if now is None:
+        now = time.monotonic()
+    if _password_locked_out(user_id, now):
+        return "locked"
+    if hmac.compare_digest(text or "", ADMIN_BOT_PASSWORD):
+        UNLOCKED_USERS.add(int(user_id))
+        _WRONG_PASSWORD_ATTEMPTS.pop(int(user_id), None)
+        return "ok"
+    attempts = _prune_wrong_attempts(user_id, now)
+    attempts.append(now)
+    _WRONG_PASSWORD_ATTEMPTS[int(user_id)] = attempts
+    return "wrong"
+
+
+async def _check_password_gate(update, text, try_as_password: bool) -> bool:
+    """The password gate for one incoming message. Returns True
+    when the handler may proceed. Gate off, or user already
+    unlocked: always True. Otherwise:
+      * a command (try_as_password False) -> the prompt line, False.
+      * a text message -> treated as a password attempt: correct
+        unlocks ("Unlocked..."), wrong -> short refusal, 5 wrong
+        in an hour -> locked-out refusal. All False — the message
+        was the password, not a command, so nothing else runs.
+    An empty text message is not an attempt: it gets the prompt.
+    Never logs or echoes the password."""
+    user = update.effective_user
+    if not _password_gate_on() or is_unlocked(user.id):
+        return True
+    if not try_as_password or not (text or "").strip():
+        await update.message.reply_text(PASSWORD_PROMPT)
+        return False
+    result = try_password(user.id, text)
+    if result == "ok":
+        await update.message.reply_text(PASSWORD_UNLOCKED)
+    elif result == "locked":
+        await update.message.reply_text(PASSWORD_LOCKED_OUT)
+    else:
+        await update.message.reply_text(PASSWORD_WRONG)
+    return False
 
 # ------------------------------------------------------------- API client ---
 
@@ -1521,6 +1648,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(user.id):
         await update.message.reply_text(REFUSAL)
         return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
     await update.message.reply_text(CAPABILITIES)
 
 
@@ -1531,6 +1660,8 @@ async def winbacks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin_user(user.id):
         await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
         return
     try:
         audience = await admin_api.winback_audience()
@@ -1566,6 +1697,8 @@ async def morning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(user.id):
         await update.message.reply_text(REFUSAL)
         return
+    if not await _check_password_gate(update, None, try_as_password=False):
+        return
     try:
         stats = await admin_api.admin_stats(day="yesterday")
     except Exception as exc:
@@ -1587,6 +1720,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin_user(user.id):
         await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, None, try_as_password=False):
         return
     await update.message.reply_text(
         CAPABILITIES
@@ -1614,6 +1749,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if not is_admin_user(user.id):
         await update.message.reply_text(REFUSAL)
+        return
+    if not await _check_password_gate(update, text, try_as_password=True):
         return
     if not text:
         await update.message.reply_text(FALLBACK_REPLY)
@@ -1810,6 +1947,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if not is_admin_user(user.id):
         await query.edit_message_text(REFUSAL)
+        return
+    if _password_gate_on() and not is_unlocked(user.id):
+        # A locked user can never have created a pending preview
+        # (every handler is gated), so a tap here is refused and
+        # nothing executes.
+        await query.edit_message_text(PASSWORD_PROMPT)
         return
     if query.data == "admin_confirm":
         outcome = await _execute_pending(user.id, context)
