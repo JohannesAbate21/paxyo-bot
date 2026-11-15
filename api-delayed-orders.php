@@ -187,11 +187,23 @@ function bot_del_create() {
 
     $stmt = $db->prepare('INSERT INTO delayed_orders (telegram_id, service_id, link, quantity, total, run_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?)');
     $stmt->bind_param('iisidss', $telegram_id, $service_id, $link, $quantity, $total, $run_at, $key);
-    if (!$stmt->execute()) {
+    // PHP 8.1+ mysqli throws mysqli_sql_exception on error instead of
+    // returning false, so a duplicate idempotency key (1062) must be
+    // caught here — the old errno-only check never ran and the
+    // exception escaped as an empty HTTP 500 (found live 15 Nov 2026).
+    $duplicate = false;
+    $inserted = false;
+    try {
+        $inserted = $stmt->execute();
+        if (!$inserted) $duplicate = ((int)$db->errno === 1062);
+    } catch (mysqli_sql_exception $e) {
+        $duplicate = ((int)$e->getCode() === 1062);
+    }
+    if (!$inserted) {
         // Duplicate idempotency key: the same order was already
         // scheduled (a retried Confirm) — return the existing row
         // instead of failing or double-scheduling.
-        if ($db->errno === 1062) {
+        if ($duplicate) {
             $stmt->close();
             $stmt2 = $db->prepare('SELECT * FROM delayed_orders WHERE idempotency_key = ? LIMIT 1');
             $stmt2->bind_param('s', $key);
