@@ -416,7 +416,12 @@ class FakePaxyo:
                  price_snapshot_error=None, price_snapshot_save_none=False,
                  price_snapshot_save_error=None, loyalty_result=None,
                  loyalty_error=None, feedback_asked_result=None,
-                 feedback_asked_error=None, feedback_mark_none=False):
+                 feedback_asked_error=None, feedback_mark_none=False,
+                 cancel_order_result=None, cancel_order_none=False,
+                 cancel_order_error=None, partial_result=None,
+                 partial_none=False, partial_error=None,
+                 fraud_flags=None, fraud_none=False,
+                 order_records=None, order_status_none=False):
         self._balance = balance
         self._status = status
         self._status_by_order = dict(status_by_order or {})
@@ -438,6 +443,30 @@ class FakePaxyo:
         self._cancel_refund_error = cancel_refund_error
         self._next_order_ids = list(next_order_ids or [])
         self.cancel_refund_calls = []
+        # Round 3 (15 Nov 2026): cancel order / partial refund /
+        # fraud watch. cancel_order_none / partial_none mirror the
+        # real client's 404 (endpoint not live yet); _error=409
+        # returns the refusal passthrough (ok:false + the server's
+        # reason); any other status raises the HTTP error the real
+        # client raises. fraud_flags=None (default) returns an
+        # empty flags list; fraud_none=True returns None (404).
+        self._cancel_order_result = cancel_order_result
+        self._cancel_order_none = cancel_order_none
+        self._cancel_order_error = cancel_order_error
+        self.cancel_order_calls = []
+        self._partial_result = partial_result
+        self._partial_none = partial_none
+        self._partial_error = partial_error
+        self.partial_refund_calls = []
+        self._fraud_flags = fraud_flags
+        self._fraud_none = fraud_none
+        self.fraud_watch_calls = 0
+        # Round 3 (15 Nov 2026): full order records for
+        # order_status (cancel in chat needs service/total), and a
+        # 404 mode (order_status_none) mirroring the real client's
+        # None-on-404 for an unknown order id.
+        self._order_records = dict(order_records or {})
+        self._order_status_none = order_status_none
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
         self.order_keys = []
@@ -655,10 +684,93 @@ class FakePaxyo:
             return dict(self._refill_result)
         return {"ok": True, "order_id": order_id, "refill_id": "77"}
 
+    async def cancel_order(self, order_id, telegram_id):
+        """Mirror POST /orders/{id}/cancel (cancel in chat, 12,
+        15 Nov 2026). Returns the seeded result (a cancel dict) or
+        the default success ({ok, order_id, refunded_etb}); None
+        when cancel_order_none (endpoint not live yet); the refusal
+        passthrough on cancel_order_error=409 (ok:false + the
+        provider's reason); any other status raises the HTTP error
+        the real client raises."""
+        self.cancel_order_calls.append((order_id, telegram_id))
+        if self._cancel_order_none:
+            return None
+        if self._cancel_order_error is not None:
+            if self._cancel_order_error == 409:
+                return {
+                    "ok": False,
+                    "error": "The provider has already started this order.",
+                }
+            req = bot.httpx.Request(
+                "POST",
+                f"https://paxyo.et/api/bot/orders/{order_id}/cancel",
+            )
+            resp = bot.httpx.Response(
+                self._cancel_order_error, json={"error": "boom"},
+                request=req,
+            )
+            raise bot.httpx.HTTPStatusError(
+                "cancel failed", request=req, response=resp
+            )
+        if self._cancel_order_result is not None:
+            return dict(self._cancel_order_result)
+        return {"ok": True, "order_id": order_id, "refunded_etb": 42.0}
+
+    async def partial_refund(self, order_id, telegram_id):
+        """Mirror POST /orders/{id}/partial-refund (partial orders,
+        13, 15 Nov 2026). Returns the seeded result or the default
+        success ({ok, order_id, delivered, remains, refunded_etb});
+        None when partial_none (endpoint not live yet); the refusal
+        passthrough on partial_error=409 (ok:false + the server's
+        reason); any other status raises the HTTP error the real
+        client raises."""
+        self.partial_refund_calls.append((order_id, telegram_id))
+        if self._partial_none:
+            return None
+        if self._partial_error is not None:
+            if self._partial_error == 409:
+                return {
+                    "ok": False,
+                    "error": "This order was not partial.",
+                }
+            req = bot.httpx.Request(
+                "POST",
+                f"https://paxyo.et/api/bot/orders/{order_id}/partial-refund",
+            )
+            resp = bot.httpx.Response(
+                self._partial_error, json={"error": "boom"},
+                request=req,
+            )
+            raise bot.httpx.HTTPStatusError(
+                "partial refund failed", request=req, response=resp
+            )
+        if self._partial_result is not None:
+            return dict(self._partial_result)
+        return {
+            "ok": True, "order_id": order_id,
+            "delivered": 700, "remains": 300, "refunded_etb": 12.6,
+        }
+
+    async def fraud_watch(self):
+        """Mirror GET /fraud-watch (17, 15 Nov 2026). Returns the
+        seeded flags (or an empty list by default); None when
+        fraud_none (endpoint not live yet)."""
+        self.fraud_watch_calls += 1
+        if self._fraud_none:
+            return None
+        return {"flags": list(self._fraud_flags or [])}
+
     async def order_status(self, order_id, telegram_id):
         # Per-order statuses (ideas batch, 15 Nov 2026): the delivery
         # watch needs one order completed and another still pending
-        # in the same cycle. Falls back to the single _status.
+        # in the same cycle. Falls back to the single _status. A
+        # seeded full record (round 3, cancel in chat) wins over
+        # the bare status, and order_status_none returns None
+        # (the real client's 404 for an unknown order id).
+        if self._order_status_none:
+            return None
+        if str(order_id) in self._order_records:
+            return dict(self._order_records[str(order_id)])
         if str(order_id) in self._status_by_order:
             return {"status": self._status_by_order[str(order_id)]}
         return {"status": self._status}
@@ -10186,8 +10298,21 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
             bot.WATCHED_ORDERS, bot.RATING_ASKED, bot.RATED_ORDERS,
             bot.BIG_DEPOSIT_ALERTED, bot.FEEDBACK_ASKED,
             bot.FEEDBACK_PENDING,
+        ) + (
+            # Round 3 (15 Nov 2026): cancel cards, browse lists,
+            # abandoned deposits, channel nudges, uptime state,
+            # deposit-method declines.
+            bot.PENDING_CANCEL, bot.BROWSE_LISTS, bot.DEPOSIT_ABANDONED,
+            bot.CHANNEL_NUDGE_SENT, bot.DEPOSIT_METHOD_DECLINED,
         ):
             store.clear()
+        # UPTIME_STATE is a dict of dicts: clear() would delete the
+        # "api"/"provider" keys the cycle reads, so re-init its shape.
+        bot.UPTIME_STATE.clear()
+        bot.UPTIME_STATE.update({
+            "api": {"fails": 0, "down": False, "last_alert": 0.0},
+            "provider": {"fails": 0, "down": False, "last_alert": 0.0},
+        })
         # Features 6–10 (15 Nov 2026): the watch state machines
         # are module-level scalars, not stores — reset them here
         # too, or one test's alerted balance / stored snapshot
@@ -10196,6 +10321,10 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
         bot._PRICE_WATCH_OFF = False
         bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
+        # Round 3 (15 Nov 2026): the uptime/fraud cycle scalars —
+        # monotonic-based, so "long ago" on a fresh VM too.
+        bot._UPTIME_LAST_CHECK = -1e9
+        bot._FRAUD_WATCH_LAST_CHECK = -1e9
         bot.CHAT_HISTORY.clear()
         bot._CHAT_HISTORY_LOADED = False
         self._history_file = os.path.join(
@@ -10226,12 +10355,27 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
             bot.WATCHED_ORDERS, bot.RATING_ASKED, bot.RATED_ORDERS,
             bot.BIG_DEPOSIT_ALERTED, bot.FEEDBACK_ASKED,
             bot.FEEDBACK_PENDING,
+        ) + (
+            # Round 3 (15 Nov 2026): cancel cards, browse lists,
+            # abandoned deposits, channel nudges, uptime state,
+            # deposit-method declines.
+            bot.PENDING_CANCEL, bot.BROWSE_LISTS, bot.DEPOSIT_ABANDONED,
+            bot.CHANNEL_NUDGE_SENT, bot.DEPOSIT_METHOD_DECLINED,
         ):
             store.clear()
+        bot.UPTIME_STATE.clear()
+        bot.UPTIME_STATE.update({
+            "api": {"fails": 0, "down": False, "last_alert": 0.0},
+            "provider": {"fails": 0, "down": False, "last_alert": 0.0},
+        })
         bot._PRICE_WATCH_LAST_REFRESH = None
         bot._PRICE_WATCH_OFF = False
         bot._PROVIDER_BALANCE_LAST_CHECK = -1e9  # long ago even on a fresh VM (monotonic starts at 0)
         bot._PROVIDER_BALANCE_STATE = "ok"
+        # Round 3 (15 Nov 2026): the uptime/fraud cycle scalars —
+        # monotonic-based, so "long ago" on a fresh VM too.
+        bot._UPTIME_LAST_CHECK = -1e9
+        bot._FRAUD_WATCH_LAST_CHECK = -1e9
         bot.CHAT_HISTORY.clear()
         bot._CHAT_HISTORY_LOADED = False
         if os.path.exists(self._history_file):
@@ -25797,6 +25941,897 @@ class TestFeedbackCheck(_SmartLoopBase):
         with mock.patch("bot.paxyo", fake):
             order_id, _ = await bot._first_completed_order(1)
         self.assertEqual(order_id, 1827)
+
+
+# ------------------------------------------------------- round 3 (15 Nov 2026) ---
+
+
+def _browse_followers_fixture():
+    """12 TikTok followers services with distinct claimed times and
+    rates, so the browse list paginates (10 per page) and the
+    fastest-first order is visible."""
+    services = []
+    for i, minutes in enumerate(
+        [1, 2, 3, 5, 10, 15, 30, 60, 120, 240, 480, 1440]
+    ):
+        services.append({
+            "service": 1100 + i,
+            "name": f"TikTok Followers | Fast {i}",
+            "category": "TikTok Followers", "type": "Default",
+            "rate_etb_per_1000": 10.0 + i, "min": 10, "max": 1000000,
+            "average_time": f"{minutes} minutes", "active": True,
+            "provider_service_id": 1100 + i,
+        })
+    return services
+
+
+class TestBrowseServices(_SmartLoopBase):
+    """Browse services in chat (11, 15 Nov 2026): a list of
+    matching services (name, price per 1000 ETB, fastest first),
+    paginated 10 per page with a Next button; tapping one starts
+    an order for it."""
+
+    def _callback(self, data, paxyo=None, user=None):
+        query = FakeQuery(data, message_text="Please confirm:")
+        update = FakeCallbackUpdate(query, user=user or FakeUser())
+        return query, update
+
+    async def _run_callback(self, data, paxyo=None, user=None):
+        query, update = self._callback(data, paxyo=paxyo, user=user)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    def test_detector_needs_browse_verb_and_services(self):
+        self.assertTrue(
+            bot.is_browse_services_request("show me TikTok followers services")
+        )
+        self.assertTrue(
+            bot.is_browse_services_request("list instagram likes services")
+        )
+        self.assertTrue(
+            bot.is_browse_services_request("what telegram views services are there?")
+        )
+        self.assertFalse(
+            bot.is_browse_services_request("order 1000 tiktok views")
+        )
+        self.assertFalse(
+            bot.is_browse_services_request("show me tiktok followers")
+        )
+        self.assertFalse(
+            bot.is_browse_services_request("cheapest tiktok views")
+        )
+
+    async def test_browse_lists_fastest_first_with_prices(self):
+        fake = FakePaxyo(services=_browse_followers_fixture())
+        msg, _ = await self._turns([
+            ("show me TikTok followers services", intent_of("unclear")),
+        ], paxyo=fake)
+        text = msg.text_sent[0]
+        self.assertIn("TikTok Followers", text)
+        self.assertIn("fastest first", text)
+        self.assertIn("10.00 ETB/1000", text)  # service 1100, 1 minute
+        self.assertIn("Page 1 of 2", text)
+        # The first item is the fastest (1 minute, 10.00), not the
+        # cheapest — short_service_name strips the "| Fast N" suffix,
+        # so order is read off the prices.
+        self.assertLess(text.index("10.00"), text.index("11.00"))
+        markup = msg.markups[0]
+        callbacks = [
+            b.callback_data
+            for row in markup.inline_keyboard for b in row
+        ]
+        self.assertIn("browse:1100", callbacks)
+        self.assertIn("browsepage:1", callbacks)
+        self.assertEqual(len(bot.BROWSE_LISTS[1]["services"]), 12)
+
+    async def test_browse_next_page(self):
+        fake = FakePaxyo(services=_browse_followers_fixture())
+        msg, _ = await self._turns([
+            ("show me TikTok followers services", intent_of("unclear")),
+        ], paxyo=fake)
+        query = await self._run_callback("browsepage:1", paxyo=fake)
+        self.assertIn("Page 2 of 2", query.edited[0])
+        self.assertIn("20.00 ETB/1000", query.edited[0])
+        callbacks = [
+            b.callback_data
+            for row in query.edited_markups[0].inline_keyboard for b in row
+        ]
+        self.assertIn("browse:1110", callbacks)
+        self.assertNotIn("browsepage:2", callbacks)
+
+    async def test_browse_without_platform_asks_which(self):
+        fake = FakePaxyo(services=_browse_followers_fixture())
+        msg, _ = await self._turns([
+            ("show me services", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertIn("which platform", msg.text_sent[0].lower())
+
+    async def test_browse_empty_when_no_matching_services(self):
+        fake = FakePaxyo(services=_browse_followers_fixture())
+        msg, _ = await self._turns([
+            ("show me YouTube subscribers services", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertIn("couldn't find", msg.text_sent[0].lower())
+
+    async def test_browse_tap_starts_order_for_that_service(self):
+        fake = FakePaxyo(services=_browse_followers_fixture())
+        await self._turns([
+            ("show me TikTok followers services", intent_of("unclear")),
+        ], paxyo=fake)
+        query = await self._run_callback("browse:1100", paxyo=fake)
+        self.assertEqual(bot.NUDGE_SERVICE[1], 1100)
+        self.assertIn("link", query.edited[0].lower())
+        # Link + quantity in one message: the Confirm card is for
+        # the tapped service (1100), not a fresh fastest pick.
+        # A followers order needs a profile link, not a video link.
+        msg, _ = await self._turns([
+            ("https://tiktok.com/@x 1000",
+             intent_of("order", platform="tiktok", service_hint="followers",
+                       link="https://tiktok.com/@x", quantity=1000)),
+        ], paxyo=fake)
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1100)
+        self.assertEqual(pending["quantity"], 1000)
+        self.assertEqual(pending["total"], 10.0)
+
+
+class TestCancelOrderApiClient(unittest.IsolatedAsyncioTestCase):
+    """The cancel-order client (12): seeded success, 404 (None),
+    and the 409 refusal passthrough."""
+
+    async def test_cancel_order_success(self):
+        fake = FakePaxyo()
+        result = await fake.cancel_order(1841, 1)
+        self.assertEqual(
+            result, {"ok": True, "order_id": 1841, "refunded_etb": 42.0}
+        )
+        self.assertEqual(fake.cancel_order_calls, [(1841, 1)])
+
+    async def test_cancel_order_none_on_404(self):
+        fake = FakePaxyo(cancel_order_none=True)
+        self.assertIsNone(await fake.cancel_order(1841, 1))
+
+    async def test_cancel_order_409_passthrough(self):
+        fake = FakePaxyo(cancel_order_error=409)
+        result = await fake.cancel_order(1841, 1)
+        self.assertFalse(result["ok"])
+        self.assertIn("already started", result["error"])
+
+
+class TestCancelOrderInChat(_SmartLoopBase):
+    """Cancel order in chat (12, 15 Nov 2026): the order + a
+    Confirm card; on Confirm the provider cancel runs and the
+    full total is refunded to the Paxyo balance."""
+
+    def _callback(self, data, paxyo=None, user=None):
+        query = FakeQuery(data, message_text="Please confirm:")
+        update = FakeCallbackUpdate(query, user=user or FakeUser())
+        return query, update
+
+    async def _run_callback(self, data, paxyo=None, user=None):
+        query, update = self._callback(data, paxyo=paxyo, user=user)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    def test_parse_cancel_order_request(self):
+        self.assertEqual(
+            bot.parse_cancel_order_request("cancel order #1841"), 1841
+        )
+        self.assertEqual(
+            bot.parse_cancel_order_request("cancel 1841"), 1841
+        )
+        self.assertEqual(
+            bot.parse_cancel_order_request("cancel my last order"), "last"
+        )
+        self.assertEqual(
+            bot.parse_cancel_order_request("cancel my latest order"), "last"
+        )
+        self.assertIsNone(
+            bot.parse_cancel_order_request("cancel my order")
+        )
+        # "cancel order 10k views" is a quantity, never an id.
+        self.assertIsNone(
+            bot.parse_cancel_order_request("cancel order 10k views")
+        )
+
+    async def test_cancel_last_order_shows_confirm_card(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg, _ = await self._turns([
+            ("cancel my last order", intent_of("cancel")),
+        ], paxyo=fake)
+        text = msg.text_sent[0]
+        self.assertIn("1827", text)
+        self.assertIn("42.00", text)
+        self.assertEqual(len(bot.PENDING_CANCEL), 1)
+        entry = next(iter(bot.PENDING_CANCEL.values()))
+        self.assertEqual(entry["order_id"], 1827)
+        self.assertEqual(entry["total"], 42.0)
+        markup = msg.markups[0]
+        callbacks = [
+            b.callback_data
+            for row in markup.inline_keyboard for b in row
+        ]
+        self.assertTrue(any(c.startswith("confirm:") for c in callbacks))
+        self.assertTrue(any(c.startswith("cancel:") for c in callbacks))
+
+    async def test_bare_yes_confirms_cancel_and_refunds(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg, _ = await self._turns([
+            ("cancel my last order", intent_of("cancel")),
+            ("yes", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertEqual(fake.cancel_order_calls, [(1827, 1)])
+        self.assertIn("42.00", msg.text_sent[1])
+        self.assertIn("back in your balance", msg.text_sent[1].lower())
+        self.assertEqual(bot.PENDING_CANCEL, {})
+
+    async def test_confirm_tap_cancels_and_refunds(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg, _ = await self._turns([
+            ("cancel my last order", intent_of("cancel")),
+        ], paxyo=fake)
+        confirm_id = next(iter(bot.PENDING_CANCEL))
+        query = await self._run_callback(f"confirm:{confirm_id}", paxyo=fake)
+        self.assertEqual(fake.cancel_order_calls, [(1827, 1)])
+        self.assertIn("42.00", query.edited[0])
+        self.assertIn("back in your balance", query.edited[0].lower())
+
+    async def test_cancel_tap_drops_card_without_calling(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        await self._turns([
+            ("cancel my last order", intent_of("cancel")),
+        ], paxyo=fake)
+        confirm_id = next(iter(bot.PENDING_CANCEL))
+        query = await self._run_callback(f"cancel:{confirm_id}", paxyo=fake)
+        self.assertEqual(fake.cancel_order_calls, [])
+        self.assertIn("cancelled", query.edited[0].lower())
+
+    async def test_cancel_completed_order_says_so_honestly(self):
+        record = dict(FakePaxyo.RECENT_ORDER)
+        record.update({"id": 1841, "status": "completed"})
+        fake = FakePaxyo(order_records={"1841": record})
+        msg, _ = await self._turns([
+            ("cancel order #1841", intent_of("cancel")),
+        ], paxyo=fake)
+        self.assertIn("completed", msg.text_sent[0].lower())
+        self.assertEqual(bot.PENDING_CANCEL, {})
+        self.assertEqual(fake.cancel_order_calls, [])
+
+    async def test_cancel_unknown_order_says_not_found(self):
+        fake = FakePaxyo(order_status_none=True)
+        msg, _ = await self._turns([
+            ("cancel order #9999", intent_of("cancel")),
+        ], paxyo=fake)
+        self.assertIn("couldn't find", msg.text_sent[0].lower())
+        self.assertEqual(bot.PENDING_CANCEL, {})
+
+    async def test_cancel_refused_by_provider_says_why(self):
+        fake = FakePaxyo(
+            recent=[FakePaxyo.RECENT_ORDER], cancel_order_error=409
+        )
+        msg, _ = await self._turns([
+            ("cancel my last order", intent_of("cancel")),
+            ("yes", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertIn("already started", msg.text_sent[1].lower())
+        self.assertNotIn("back in your balance", msg.text_sent[1].lower())
+
+    async def test_cancel_no_orders_says_so(self):
+        fake = FakePaxyo(recent=[])
+        msg, _ = await self._turns([
+            ("cancel my last order", intent_of("cancel")),
+        ], paxyo=fake)
+        self.assertIn("no orders", msg.text_sent[0].lower())
+
+    async def test_bare_cancel_drops_open_cancel_card(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg, _ = await self._turns([
+            ("cancel my last order", intent_of("cancel")),
+            ("cancel", intent_of("cancel")),
+        ], paxyo=fake)
+        self.assertEqual(bot.PENDING_CANCEL, {})
+        self.assertEqual(fake.cancel_order_calls, [])
+        self.assertIn("cancelled", msg.text_sent[1].lower())
+
+
+class TestPartialRefundApiClient(unittest.IsolatedAsyncioTestCase):
+    """The partial-refund client (13): seeded success, 404 (None),
+    and the 409 refusal passthrough."""
+
+    async def test_partial_refund_success(self):
+        fake = FakePaxyo()
+        result = await fake.partial_refund(1839, 1)
+        self.assertEqual(result["delivered"], 700)
+        self.assertEqual(result["remains"], 300)
+        self.assertEqual(result["refunded_etb"], 12.6)
+        self.assertEqual(fake.partial_refund_calls, [(1839, 1)])
+
+    async def test_partial_refund_none_on_404(self):
+        fake = FakePaxyo(partial_none=True)
+        self.assertIsNone(await fake.partial_refund(1839, 1))
+
+    async def test_partial_refund_409_passthrough(self):
+        fake = FakePaxyo(partial_error=409)
+        result = await fake.partial_refund(1839, 1)
+        self.assertFalse(result["ok"])
+        self.assertIn("not partial", result["error"])
+
+
+class TestPartialRefund(_SmartLoopBase):
+    """Partial order handling (13, 15 Nov 2026): a "partial"
+    status refunds the undelivered part to the Paxyo balance,
+    naming the exact refund — once, never twice."""
+
+    def _watch(self, order_id, quantity=1000):
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": 1,
+            "service": {
+                "service": 5535,
+                "name": "TikTok Video Views | Cheapest",
+                "average_time": "10 minutes",
+            },
+            "quantity": quantity,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time(),
+            "avg_minutes": 10,
+            "warned": False,
+        }
+
+    async def test_watch_cycle_refunds_partial_once(self):
+        self._watch("1839")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1839": "partial"},
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)  # second cycle: no repeat
+        self.assertEqual(fake.partial_refund_calls, [("1839", 1)])
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1839", text)
+        self.assertIn("700", text)   # delivered
+        self.assertIn("300", text)   # undelivered
+        self.assertIn("12.60", text)  # the exact refund
+        self.assertNotIn("1839", bot.WATCHED_ORDERS)  # popped, done
+
+    async def test_watch_cycle_partial_none_keeps_watching(self):
+        self._watch("1839")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1839": "partial"},
+            partial_none=True,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.partial_refund_calls, [("1839", 1)])
+        self.assertEqual(app.bot.sent, [])  # nothing told yet
+        self.assertIn("1839", bot.WATCHED_ORDERS)  # still watched
+
+    async def test_watch_cycle_partial_refusal_keeps_watching(self):
+        self._watch("1839")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1839": "partial"},
+            partial_error=409,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.partial_refund_calls, [("1839", 1)])
+        self.assertEqual(app.bot.sent, [])
+        self.assertIn("1839", bot.WATCHED_ORDERS)
+
+    async def test_where_is_my_order_refunds_partial(self):
+        record = dict(FakePaxyo.RECENT_ORDER)
+        record.update({"id": 1839, "quantity": 1000})
+        fake = FakePaxyo(
+            recent=[record], status_by_order={"1839": "partial"},
+        )
+        with mock.patch("bot.paxyo", fake):
+            text = await bot.last_order_status_text(1, "en")
+        self.assertEqual(fake.partial_refund_calls, [(1839, 1)])
+        self.assertIn("700", text)
+        self.assertIn("12.60", text)
+
+
+class TestAbandonedDeposit(_SmartLoopBase):
+    """Abandoned deposit nudge (14, 15 Nov 2026): one gentle
+    reminder after 3 quiet hours, with a one-tap resume; never
+    more than once per abandoned deposit; never to a user who
+    completed a deposit since."""
+
+    def _callback(self, data, paxyo=None, user=None):
+        query = FakeQuery(data, message_text="Please confirm:")
+        update = FakeCallbackUpdate(query, user=user or FakeUser())
+        return query, update
+
+    async def _run_callback(self, data, paxyo=None, user=None):
+        query, update = self._callback(data, paxyo=paxyo, user=user)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def _show_deposit_card(self, paxyo=None):
+        """A deposit whose Confirm card was shown (method + amount
+        + phone all given). Returns (msg, fake)."""
+        return await self._turns([
+            ("deposit 100 telebirr 25199387383",
+             intent_of("deposit", amount=100, method="telebirr",
+                       phone="25199387383")),
+        ], paxyo=paxyo or FakePaxyo())
+
+    async def test_card_shown_records_abandoned(self):
+        msg, _ = await self._show_deposit_card()
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+        self.assertIn(1, bot.DEPOSIT_ABANDONED)
+        entry = bot.DEPOSIT_ABANDONED[1]
+        self.assertEqual(entry["amount"], 100)
+        self.assertEqual(entry["method"], "telebirr")
+        self.assertIsNone(entry["nudged_at"])
+
+    async def test_nudge_after_three_quiet_hours(self):
+        import time
+
+        await self._show_deposit_card()
+        fake = FakePaxyo()
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_abandoned_deposit_cycle(
+                app, now=time.time() + 4 * 3600
+            )
+            await bot.run_abandoned_deposit_cycle(
+                app, now=time.time() + 5 * 3600
+            )  # second pass: no second nudge
+        self.assertEqual(len(app.bot.sent), 1)
+        chat_id, text = app.bot.sent[0]
+        self.assertEqual(chat_id, 1)
+        self.assertIn("100.00", text)
+        self.assertIn("Telebirr", text)
+        markup = app.bot.sent_markups[0]
+        callbacks = [
+            b.callback_data
+            for row in markup.inline_keyboard for b in row
+        ]
+        self.assertTrue(any(c.startswith("resumedep:") for c in callbacks))
+        self.assertIsNotNone(bot.DEPOSIT_ABANDONED[1]["nudged_at"])
+
+    async def test_no_nudge_before_three_hours(self):
+        import time
+
+        await self._show_deposit_card()
+        fake = FakePaxyo()
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_abandoned_deposit_cycle(
+                app, now=time.time() + 2 * 3600
+            )
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_no_nudge_after_completed_deposit(self):
+        import time
+        from datetime import datetime, timezone
+
+        await self._show_deposit_card()
+        completed = dict(FakePaxyo.DEPOSIT)
+        completed.update({
+            "id": "dep-2", "amount": 100, "status": "completed",
+            # A minute after the card: second-precision created_at
+            # must still be after started_at (a bare "now" can
+            # truncate to just before it).
+            "created_at": (
+                datetime.now(timezone.utc) + timedelta(minutes=1)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        fake = FakePaxyo(deposits=[completed])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_abandoned_deposit_cycle(
+                app, now=time.time() + 4 * 3600
+            )
+        self.assertEqual(app.bot.sent, [])
+        self.assertNotIn(1, bot.DEPOSIT_ABANDONED)  # pruned, never nagged
+
+    async def test_resume_tap_reshows_same_confirm_card(self):
+        await self._show_deposit_card()
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        query = await self._run_callback(f"resumedep:{confirm_id}")
+        self.assertIn("100.00", query.edited[0])
+        self.assertIn("Telebirr", query.edited[0])
+        markup = query.edited_markups[0]
+        callbacks = [
+            b.callback_data
+            for row in markup.inline_keyboard for b in row
+        ]
+        self.assertIn(f"confirm:{confirm_id}", callbacks)
+        self.assertNotIn(1, bot.DEPOSIT_ABANDONED)  # one nudge, ever
+
+    async def test_resume_gone_card_answers_honestly(self):
+        await self._show_deposit_card()
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        bot.PENDING_DEPOSIT.clear()  # confirmed/cancelled meanwhile
+        query = await self._run_callback(f"resumedep:{confirm_id}")
+        self.assertIn("no longer", query.edited[0].lower())
+
+
+class TestReorderNewQuantity(_SmartLoopBase):
+    """Reorder with a different quantity (22, 15 Nov 2026): the
+    last order's service + link with the new quantity, Confirm
+    card as usual."""
+
+    def test_parse_reorder_quantity(self):
+        self.assertEqual(
+            bot.parse_reorder_quantity("reorder my last order with 2000 views"),
+            2000,
+        )
+        self.assertEqual(
+            bot.parse_reorder_quantity("same order but 500"), 500
+        )
+        self.assertEqual(
+            bot.parse_reorder_quantity("repeat my last order 3000"), 3000
+        )
+        # Weak phrase + a platform of its own: a normal order, not
+        # a reorder.
+        self.assertIsNone(
+            bot.parse_reorder_quantity("order again 1000 tiktok views")
+        )
+        self.assertIsNone(bot.parse_reorder_quantity("order 1000 tiktok views"))
+        self.assertIsNone(bot.parse_reorder_quantity("hello"))
+
+    async def test_reorder_new_quantity_shows_confirm_card(self):
+        fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg, _ = await self._turns([
+            ("reorder my last order with 2000 views", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1001)
+        self.assertEqual(pending["link"], "https://instagram.com/p/x")
+        self.assertEqual(pending["quantity"], 2000)
+        self.assertIn("2000", msg.text_sent[0])
+
+    async def test_reorder_without_last_order_says_so(self):
+        fake = FakePaxyo(recent=[])
+        msg, _ = await self._turns([
+            ("reorder my last order with 2000 views", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertEqual(bot.PENDING, {})
+        self.assertIn("no previous order", msg.text_sent[0].lower())
+
+
+class TestRememberDepositMethod(_SmartLoopBase):
+    """Remember deposit method (23, 15 Nov 2026): the last
+    successful method is offered first ("Telebirr again?"), with
+    a "use a different method" option always shown."""
+
+    def _callback(self, data, paxyo=None, user=None):
+        query = FakeQuery(data, message_text="Please confirm:")
+        update = FakeCallbackUpdate(query, user=user or FakeUser())
+        return query, update
+
+    async def _run_callback(self, data, paxyo=None, user=None):
+        query, update = self._callback(data, paxyo=paxyo, user=user)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def _complete_deposit_with_method(self, method="telebirr"):
+        """Run the completed-deposit path (as deposit_status_text
+        does on a recheck) so the method trait is saved."""
+        dep = dict(FakePaxyo.DEPOSIT)
+        dep.update({"id": "dep-1", "amount": 100, "method": method,
+                    "status": "completed"})
+        fake = FakePaxyo(deposits=[dep])
+        bot.LAST_DEPOSIT[1] = "dep-1"
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake), mock.patch.object(
+            bot, "ADMIN_TELEGRAM_IDS", {1}
+        ):
+            await bot.deposit_status_text(1, "en", app=app, username="testuser")
+            await self._flush()
+        return fake
+
+    async def test_completed_deposit_saves_method_trait(self):
+        fake = await self._complete_deposit_with_method("telebirr")
+        self.assertEqual(
+            [t for _, t in fake.traits_saved if "last_deposit_method" in t],
+            [{"last_deposit_method": "telebirr"}],
+        )
+
+    async def test_deposit_offers_remembered_method_first(self):
+        await self._complete_deposit_with_method("telebirr")
+        msg, _ = await self._turns([
+            ("deposit 100", intent_of("deposit", amount=100)),
+        ], paxyo=FakePaxyo())
+        self.assertIn("Telebirr again", msg.text_sent[0])
+        markup = msg.markups[0]
+        callbacks = [
+            b.callback_data
+            for row in markup.inline_keyboard for b in row
+        ]
+        self.assertIn("depagain:telebirr", callbacks)
+        self.assertIn("depdiff", callbacks)
+
+    async def test_depagain_keeps_method_and_asks_phone(self):
+        await self._complete_deposit_with_method("telebirr")
+        msg, _ = await self._turns([
+            ("deposit 100", intent_of("deposit", amount=100)),
+        ], paxyo=FakePaxyo())
+        query = await self._run_callback("depagain:telebirr")
+        self.assertIn("phone", query.edited[0].lower())
+        self.assertEqual(
+            bot.DEPOSIT_DRAFT[1],
+            {"amount": 100, "method": "telebirr"},
+        )
+
+    async def test_depdiff_asks_method_and_does_not_reoffer(self):
+        await self._complete_deposit_with_method("telebirr")
+        msg, _ = await self._turns([
+            ("deposit 100", intent_of("deposit", amount=100)),
+        ], paxyo=FakePaxyo())
+        query = await self._run_callback("depdiff")
+        self.assertIn("Telebirr or CBE", query.edited[0])
+        # The same deposit flow now asks plainly — no second offer.
+        msg2, _ = await self._turns([
+            ("deposit 100", intent_of("deposit", amount=100)),
+        ], paxyo=FakePaxyo())
+        self.assertNotIn("again", msg2.text_sent[0].lower())
+
+    async def test_no_remembered_method_asks_plainly(self):
+        msg, _ = await self._turns([
+            ("deposit 100", intent_of("deposit", amount=100)),
+        ], paxyo=FakePaxyo())
+        self.assertIn("Telebirr or CBE", msg.text_sent[0])
+        self.assertIsNone(msg.markups[0])
+
+
+class TestChannelNudge(_SmartLoopBase):
+    """Join-channel nudge after the first order (30, 15 Nov 2026):
+    one short invitation to join t.me/paxyo251 after a user's
+    FIRST completed order — once ever, never again."""
+
+    def _watch(self, order_id):
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": 1,
+            "service": {
+                "service": 5535,
+                "name": "TikTok Video Views | Cheapest",
+                "average_time": "10 minutes",
+            },
+            "quantity": 100,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time(),
+            "avg_minutes": 10,
+            "warned": False,
+        }
+
+    def _completed(self, order_id, days_ago=1):
+        from datetime import datetime, timedelta, timezone
+
+        created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        return {
+            "id": order_id, "service_id": 5535,
+            "service_name": "TikTok Video Views | Cheapest",
+            "link": "https://tiktok.com/@x/video/1", "quantity": 100,
+            "charge": 1.89, "status": "completed",
+            "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    async def test_first_completed_order_nudges_once(self):
+        self._watch("1839")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1839": "completed"},
+            recent=[self._completed(1839)],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)  # no second delivery
+        self.assertEqual(len(app.bot.sent), 2)  # delivery + nudge
+        nudge = app.bot.sent[1][1]
+        self.assertIn("channel", nudge.lower())
+        markup = app.bot.sent_markups[1]
+        self.assertEqual(
+            markup.inline_keyboard[0][0].url, "https://t.me/paxyo251"
+        )
+        self.assertIn(1, bot.CHANNEL_NUDGE_SENT)
+
+    async def test_second_completed_order_never_nudges(self):
+        self._watch("1840")
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1840": "completed"},
+            recent=[self._completed(1840), self._completed(1839, days_ago=9)],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)  # delivery only
+        self.assertNotIn(1, bot.CHANNEL_NUDGE_SENT)
+
+    async def test_twenty_visible_orders_never_nudges(self):
+        # A heavy user's list is truncated at 20, so a "first"
+        # read off it could be fake — the guard refuses to nudge.
+        self._watch("1859")
+        recent = [self._completed(1800 + i, days_ago=i) for i in range(20)]
+        fake = FakePaxyo(
+            services=_views_fixture(),
+            status_by_order={"1859": "completed"},
+            recent=recent,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)  # delivery only
+
+
+class TestUptimeWatch(_SmartLoopBase):
+    """Uptime watch (19, 15 Nov 2026): the provider + the paxyo.et
+    API on the scheduler cycle — two consecutive failures alert
+    once per target (1/hour), a recovery message when it comes
+    back, and silence while the stats endpoint is not live yet."""
+
+    async def _cycle(self, fake, app, now):
+        with mock.patch("bot.paxyo", fake), mock.patch.object(
+            bot, "ADMIN_TELEGRAM_IDS", {1}
+        ):
+            await bot.run_uptime_watch_cycle(app, now=now)
+
+    async def test_provider_up_sends_nothing(self):
+        fake = FakePaxyo(admin_stats={"provider_balance_usd": 4.5})
+        app = FakeApp()
+        await self._cycle(fake, app, now=1000.0)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_provider_down_twice_alerts_once(self):
+        fake = FakePaxyo(admin_stats={"date": "2026-11-15", "orders": 0})
+        app = FakeApp()
+        await self._cycle(fake, app, now=1000.0)  # first failure: silent
+        self.assertEqual(app.bot.sent, [])
+        await self._cycle(fake, app, now=1301.0)  # second: alert
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("provider", app.bot.sent[0][1].lower())
+        self.assertIn("down", app.bot.sent[0][1].lower())
+        await self._cycle(fake, app, now=1602.0)  # third: no repeat
+        self.assertEqual(len(app.bot.sent), 1)
+
+    async def test_recovery_message_when_provider_back(self):
+        down = FakePaxyo(admin_stats={"date": "2026-11-15", "orders": 0})
+        app = FakeApp()
+        await self._cycle(down, app, now=1000.0)
+        await self._cycle(down, app, now=1301.0)
+        self.assertEqual(len(app.bot.sent), 1)
+        up = FakePaxyo(admin_stats={"provider_balance_usd": 4.5})
+        await self._cycle(up, app, now=1602.0)
+        self.assertEqual(len(app.bot.sent), 2)
+        self.assertIn("back up", app.bot.sent[1][1].lower())
+
+    async def test_stats_none_stays_off(self):
+        fake = FakePaxyo(admin_stats=None)
+        app = FakeApp()
+        await self._cycle(fake, app, now=1000.0)
+        await self._cycle(fake, app, now=1301.0)
+        self.assertEqual(app.bot.sent, [])
+
+
+class TestFraudWatch(_SmartLoopBase):
+    """Fraud watch (17, 15 Nov 2026): the server's flagged users
+    are relayed to William, once — never a block, only a flag."""
+
+    async def _cycle(self, fake, app, now):
+        with mock.patch("bot.paxyo", fake), mock.patch.object(
+            bot, "ADMIN_TELEGRAM_IDS", {1}
+        ):
+            await bot.run_fraud_watch_cycle(app, now=now)
+
+    async def test_flags_relayed_to_admin(self):
+        fake = FakePaxyo(fraud_flags=[{
+            "telegram_id": 5,
+            "reason": "5 orders in 10 minutes",
+            "count": 5,
+        }])
+        app = FakeApp()
+        await self._cycle(fake, app, now=1000.0)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("5 orders in 10 minutes", text)
+        self.assertIn("5", text)
+
+    async def test_no_flags_sends_nothing(self):
+        fake = FakePaxyo(fraud_flags=[])
+        app = FakeApp()
+        await self._cycle(fake, app, now=1000.0)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_endpoint_404_stays_silent(self):
+        fake = FakePaxyo(fraud_none=True)
+        app = FakeApp()
+        await self._cycle(fake, app, now=1000.0)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_cycle_throttled_to_fifteen_minutes(self):
+        fake = FakePaxyo(fraud_flags=[{
+            "telegram_id": 5, "reason": "rapid orders", "count": 5,
+        }])
+        app = FakeApp()
+        await self._cycle(fake, app, now=1000.0)
+        await self._cycle(fake, app, now=1100.0)  # 100s later: no refetch
+        self.assertEqual(fake.fraud_watch_calls, 1)
+        await self._cycle(fake, app, now=2000.0)  # 1000s later: refetch
+        self.assertEqual(fake.fraud_watch_calls, 2)
+
+
+class TestFeedbackRating(_SmartLoopBase):
+    """Satisfaction score (20, 15 Nov 2026): a feedback 👍/👎 tap
+    ALSO files a rating for the order, so the admin's score
+    counts it — best-effort, once per order, and the feedback
+    reply itself never changes."""
+
+    def _callback(self, data, paxyo=None, user=None):
+        query = FakeQuery(data, message_text="How was your first order?")
+        update = FakeCallbackUpdate(query, user=user or FakeUser())
+        return query, update
+
+    async def _run_callback(self, data, paxyo=None, user=None):
+        query, update = self._callback(data, paxyo=paxyo, user=user)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def test_good_tap_files_good_rating(self):
+        fake = FakePaxyo()
+        query = await self._run_callback("feedback:good:1827", paxyo=fake)
+        self.assertEqual(fake.ratings_filed, [{
+            "order_id": "1827", "telegram_id": 1, "rating": "good",
+        }])
+        self.assertIn("Thank", query.edited[0])
+
+    async def test_bad_tap_files_bad_rating_and_asks_why(self):
+        fake = FakePaxyo()
+        query = await self._run_callback("feedback:bad:1827", paxyo=fake)
+        self.assertEqual(fake.ratings_filed, [{
+            "order_id": "1827", "telegram_id": 1, "rating": "bad",
+        }])
+        self.assertIn("went wrong", query.edited[0].lower())
+
+    async def test_already_rated_tap_still_thanks(self):
+        fake = FakePaxyo(rate_already=True)
+        query = await self._run_callback("feedback:good:1827", paxyo=fake)
+        self.assertEqual(fake.ratings_filed, [])  # 409: filed nothing
+        self.assertIn("Thank", query.edited[0])
+
+
+class TestDisputesFiling(_SmartLoopBase):
+    """Disputes inbox (15, 15 Nov 2026): "I have a problem with
+    order #1841" files a dispute (order id, user, their words)
+    into the admin side, and the user gets a short filed reply.
+    The bot side reuses the existing support-report filing; the
+    admin-side listing is the new /disputes command."""
+
+    async def test_problem_with_order_files_dispute(self):
+        fake = FakePaxyo()
+        msg, _ = await self._turns([
+            ("I have a problem with order #1841", intent_of("unclear")),
+            ("the views never arrived", intent_of("support_issue")),
+        ], paxyo=fake)
+        self.assertEqual(len(fake.reports_filed), 1)
+        report = fake.reports_filed[0]
+        self.assertEqual(report["order_id"], 1841)
+        self.assertEqual(report["telegram_id"], 1)
+        self.assertIn("views never arrived", report["message"])
+        self.assertIn("sent this to our support team", msg.text_sent[1].lower())
+        self.assertIn("#1841", msg.text_sent[1])
 
 
 if __name__ == "__main__":

@@ -2479,6 +2479,72 @@ TEXT = {
         "am": "ችግር የለም — ምንም አልልክም።",
         "en": "No problem — I won't send anything.",
     },
+    # Round 3 (15 Nov 2026) — browse services (11), cancel order
+    # (12), partial orders (13), abandoned deposits (14), reorder
+    # with a new quantity (22), remember deposit method (23),
+    # join-channel nudge (30). English only here: t() falls back
+    # to English and the bridge translates prose at send time, so
+    # no unverified Amharic is written for these new lines.
+    "browse_empty": {
+        "en": "I couldn't find any {label} services.",
+    },
+    "browse_next_button": {
+        "en": "Next ›",
+    },
+    "cancel_order_ask": {
+        "en": "Cancel this order?\n\n{service} ×{quantity} — {total} ETB (order #{order_id})\nThe full {total} ETB goes back to your balance.",
+    },
+    "cancel_order_done": {
+        "en": "Cancelled order #{order_id} — {refunded} ETB is back in your balance.",
+    },
+    "cancel_order_not_found": {
+        "en": "I couldn't find order #{order_id}.",
+    },
+    "cancel_order_already_done": {
+        "en": "Order #{order_id} is already {status} — it can't be cancelled.",
+    },
+    "cancel_order_not_live": {
+        "en": "Cancelling orders isn't switched on yet — please message William at t.me/paxyo.",
+    },
+    "cancel_order_refused": {
+        "en": "That order can't be cancelled: {reason}",
+    },
+    "cancel_order_failed": {
+        "en": "I couldn't cancel order #{order_id} — please try again.",
+    },
+    "cancel_order_no_orders": {
+        "en": "You have no orders to cancel.",
+    },
+    "partial_refunded": {
+        "en": "Your order #{order_id} delivered {delivered} of {quantity} — {remains} didn't arrive, so {refunded} ETB is back in your balance.",
+    },
+    "abandoned_deposit_nudge": {
+        "en": "You started a deposit of {amount} ETB ({method}) but didn't finish it — tap below to pick up where you left off.",
+    },
+    "abandoned_deposit_resume_button": {
+        "en": "Resume my deposit",
+    },
+    "abandoned_deposit_gone": {
+        "en": "That deposit is no longer waiting — start a fresh one any time.",
+    },
+    "reorder_no_last": {
+        "en": "You have no previous order yet — tell me what you'd like to order.",
+    },
+    "deposit_method_again": {
+        "en": "Last time you paid with {method}. Use {method} again?",
+    },
+    "deposit_method_again_button": {
+        "en": "✅ {method} again",
+    },
+    "deposit_method_other_button": {
+        "en": "Use a different method",
+    },
+    "channel_nudge": {
+        "en": "Thanks for your first order with Paxyo! 🎉 Join our channel for offers and updates — tap below.",
+    },
+    "channel_nudge_button": {
+        "en": "Join our channel",
+    },
 }
 
 
@@ -4007,6 +4073,101 @@ class PaxyoClient:
                     "error": body.get("error") or body.get("message") or "",
                 }
             raise
+
+    async def cancel_order(self, order_id, telegram_id: int):
+        """POST /orders/{id}/cancel {telegram_id} -> the cancel +
+        full-refund reply {\"ok\": true, \"order_id\", \"refunded_etb\",
+        \"provider_status\", \"duplicate\": bool}. Returns None on 404
+        (endpoint not live yet, or the order is not this user's —
+        the server answers both the same way); a 409 or 502 returns
+        the server's {\"ok\": false, ...} body so the caller can
+        answer honestly with the provider's reason."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST",
+                    f"/orders/{order_id}/cancel",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 404:
+                log.warning(
+                    "POST /orders/%s/cancel returned 404 "
+                    "(endpoint not live yet)", order_id
+                )
+                return None
+            if status in (409, 502):
+                body = {}
+                try:
+                    body = exc.response.json()
+                except Exception:
+                    body = {}
+                if not isinstance(body, dict):
+                    body = {}
+                return {
+                    "ok": False,
+                    "error": body.get("error") or body.get("message") or "",
+                }
+            raise
+
+    async def partial_refund(self, order_id, telegram_id: int):
+        """POST /orders/{id}/partial-refund {telegram_id} -> the
+        partial-delivery refund {\"ok\": true, \"order_id\",
+        \"delivered\": N, \"remains\": N, \"refunded_etb\": X,
+        \"duplicate\": bool}. Returns None on 404 (endpoint not live
+        yet); a 409 or 502 returns the server's {\"ok\": false, ...}
+        body so the caller can keep watching instead of refunding
+        on a status that has already moved on."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST",
+                    f"/orders/{order_id}/partial-refund",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 404:
+                log.warning(
+                    "POST /orders/%s/partial-refund returned 404 "
+                    "(endpoint not live yet)", order_id
+                )
+                return None
+            if status in (409, 502):
+                body = {}
+                try:
+                    body = exc.response.json()
+                except Exception:
+                    body = {}
+                if not isinstance(body, dict):
+                    body = {}
+                return {
+                    "ok": False,
+                    "error": body.get("error") or body.get("message") or "",
+                }
+            raise
+
+    async def fraud_watch(self):
+        """GET /fraud-watch -> the server's flagged users
+        {\"flags\": [{\"telegram_id\", \"reason\", \"count\", ...}]}.
+        Returns None on 404 (endpoint not live yet). The server
+        claims one alert per user per day, so the bot only ever
+        relays what it is given."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/fraud-watch")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /fraud-watch returned 404 (endpoint not live yet)"
+                )
+                return None
+            raise
+        return data if isinstance(data, dict) else None
 
     async def recent_orders(self, telegram_id: int, limit: int = 5):
         """GET /orders?telegram_id=&limit= — the user's most recent
@@ -7223,6 +7384,63 @@ _PRICE_WATCH_OFF = False
 # once more — one honest repeat per restart, never a loop.
 _PROVIDER_BALANCE_LAST_CHECK = 0.0
 _PROVIDER_BALANCE_STATE = "ok"
+# Round 3 (15 Nov 2026) — cancel order (12): confirm_id -> the
+# placed order awaiting a cancel Confirm
+#   {user_id, order_id, total, service_name, quantity}.
+# A bare "yes" confirms it, like the other pending Confirm cards
+# (see the acceptance block in handle_order_text); a Confirm tap
+# runs _run_cancel_order_confirm. In-memory only, like PENDING:
+# a restart drops the card, and the user asks again.
+PENDING_CANCEL = {}
+# Browse services (11): telegram_id -> the list being paged
+#   {services: [catalogue dicts, fastest first], page: int,
+#    label: "TikTok Followers"}.
+# In-memory only: a restart drops the list, and the user asks
+# again. Tapping a service pins it one-shot (NUDGE_SERVICE) and
+# starts an order for it.
+BROWSE_LISTS = {}
+BROWSE_PAGE_SIZE = 10
+# Abandoned deposits (14): telegram_id -> the deposit whose
+# Confirm card was shown but never tapped
+#   {confirm_id, amount, method, phone, started_at, nudged_at}.
+# The scheduler nudges once, after ABANDONED_DEPOSIT_HOURS of
+# quiet, with a Resume button — unless a deposit completed since
+# (checked against GET /deposits). In-memory only, like
+# PARTIAL_ACTIVITY: a restart drops the record, so a deposit
+# abandoned across a restart is never nudged.
+DEPOSIT_ABANDONED = {}
+ABANDONED_DEPOSIT_HOURS = 3
+# Remember deposit method (23): users who tapped "Use a different
+# method" in the current deposit flow, so the remembered method is
+# not re-offered until their next deposit. Cleared when the
+# deposit's Confirm card is shown. In-memory only.
+DEPOSIT_METHOD_DECLINED = set()
+# Join-channel nudge (30): telegram_ids already nudged once, so a
+# first completed order invites the user to t.me/paxyo251 exactly
+# once, ever. The delivery watch pops the watch entry after the
+# delivery message, so the nudge can only fire with it — the set
+# is the belt and braces for a re-sent delivery.
+CHANNEL_NUDGE_SENT = set()
+# Uptime watch (19): per target ("api", "provider") —
+#   {"fails": consecutive failures, "down": bool,
+#    "last_alert": monotonic time of the last alert}.
+# Two consecutive failures alert once (throttled to one per hour
+# per target); a success after "down" sends one recovery message.
+# In-memory only: a restart resets the counters, so a target
+# that is still down after a restart alerts once more.
+UPTIME_STATE = {
+    "api": {"fails": 0, "down": False, "last_alert": 0.0},
+    "provider": {"fails": 0, "down": False, "last_alert": 0.0},
+}
+UPTIME_ALERT_THROTTLE_SECONDS = 3600
+UPTIME_CHECK_SECONDS = 300
+_UPTIME_LAST_CHECK = 0.0
+# Fraud watch (17): monotonic time of the last /fraud-watch call
+# (throttled — the endpoint is only asked every
+# FRAUD_WATCH_CHECK_SECONDS, and the server claims one alert per
+# user per day, so the bot never spams William). In-memory only.
+FRAUD_WATCH_CHECK_SECONDS = 900
+_FRAUD_WATCH_LAST_CHECK = 0.0
 # First-order nudge (owner, 15 Nov 2026): users already offered the
 # cheapest test order, so it is offered once and never repeated —
 # including after a decline. In-memory only, like the other
@@ -10884,6 +11102,54 @@ async def _loyalty_bonus_line(app, user_id: int) -> str:
     )
 
 
+def channel_nudge_keyboard():
+    """The Join button for the channel nudge: a URL button to
+    t.me/paxyo251, so tapping it opens the channel (the banner on
+    the website works the same way — the link text is never shown
+    as text, only as the button)."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            t("channel_nudge_button", "en"),
+            url="https://t.me/paxyo251",
+        ),
+    ]])
+
+
+async def _maybe_channel_nudge(app, user_id: int):
+    """The join-channel nudge (30, 15 Nov 2026): after the user's
+    FIRST completed order, one short invite to join t.me/paxyo251.
+    The visible completed count must be exactly 1 AND fewer than
+    20 orders visible — with 20+ orders the list is truncated, so
+    a heavy user's older history could fake a "first". Once ever:
+    CHANNEL_NUDGE_SENT is the backstop (the watch entry is popped
+    with the delivery message, so the nudge can only fire with
+    it). The delivery message itself is already sent by the
+    caller; this is a second, separate message, so it never
+    collides with the rating buttons. Never raises."""
+    if user_id in CHANNEL_NUDGE_SENT:
+        return
+    try:
+        orders = await paxyo.recent_orders(user_id, limit=20) or []
+    except Exception as exc:
+        log.warning("channel nudge orders failed: %s", exc)
+        return
+    if len(orders) >= 20:
+        return
+    completed = [
+        o for o in orders
+        if isinstance(o, dict)
+        and str(o.get("status") or "").strip().lower()
+        in ("completed", "success", "paid")
+    ]
+    if len(completed) != 1:
+        return
+    CHANNEL_NUDGE_SENT.add(user_id)
+    await notify_user(
+        app, user_id, t("channel_nudge", "en"),
+        reply_markup=channel_nudge_keyboard(),
+    )
+
+
 async def run_delivery_watch_cycle(app, now=None):
     """One pass over the watched orders (ideas batch, 15 Nov 2026):
     a completed order gets its delivery message once (plus the
@@ -10949,6 +11215,32 @@ async def run_delivery_watch_cycle(app, now=None):
             else:
                 await notify_user(app, user_id, text)
             WATCHED_ORDERS.pop(order_id, None)
+            # Join-channel nudge (30, 15 Nov 2026): after the user's
+            # FIRST completed order, one short invite to join
+            # t.me/paxyo251 — once ever, never again. A separate
+            # message with a Join button, so it never collides with
+            # the delivery message's rating buttons.
+            await _maybe_channel_nudge(app, user_id)
+        elif status == "partial":
+            # Partial order (13, 15 Nov 2026): the provider
+            # delivered less than ordered — refund the undelivered
+            # part and say so honestly, naming the exact refund.
+            # The refund is attempted at most once per hour per
+            # order (partial_attempted_at on the watch entry): the
+            # endpoint may not be live yet, and a 409/502 means the
+            # status has already moved on — the next cycle then
+            # sees the new status instead of refunding twice.
+            last_try = watched.get("partial_attempted_at") or 0
+            if now - last_try >= 3600:
+                watched["partial_attempted_at"] = now
+                line = await _maybe_partial_refund(
+                    app, user_id, order_id, watched.get("quantity")
+                )
+                if line is not None:
+                    await notify_user(app, user_id, line)
+                    WATCHED_ORDERS.pop(order_id, None)
+            # No line: endpoint not live yet, or the status moved
+            # on — keep watching; the next cycle re-reads it.
         elif status in ("pending", "in_progress", "processing"):
             if not is_order_stuck(
                 watched.get("placed_at") or now,
@@ -11082,6 +11374,210 @@ async def run_abandoned_nudge_cycle(app, now=None):
     for user_id in list(PARTIAL_ACTIVITY):
         if user_id not in PARTIAL:
             PARTIAL_ACTIVITY.pop(user_id, None)
+
+
+def abandoned_deposit_keyboard(confirm_id):
+    """The Resume button for the abandoned-deposit nudge (14):
+    callback "resumedep:<confirm_id>" re-shows the same Confirm
+    card, so the existing Confirm/Cancel tail handles the tap."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            t("abandoned_deposit_resume_button", "en"),
+            callback_data=f"resumedep:{confirm_id}",
+        ),
+    ]])
+
+
+async def run_abandoned_deposit_cycle(app, now=None):
+    """One pass over deposits whose Confirm card was shown but
+    never tapped (14, 15 Nov 2026): after ABANDONED_DEPOSIT_HOURS
+    of quiet, ONE gentle reminder with a Resume button, in the
+    user's own language (LAST_LANG). Never more than once per
+    abandoned deposit (nudged_at); never after the card is gone
+    (confirmed or cancelled — the record is pruned); never to a
+    user who completed a deposit since the card was shown
+    (checked against GET /deposits — a completed deposit with a
+    created_at at or after the card, or an unparseable date, ends
+    the record instead of nagging a payer). Best-effort
+    throughout: a failed send or a failed deposits read is logged
+    by notify_user / the warning below and never raises into the
+    scheduler cycle. Called from the 60-second scheduler loop."""
+    import time
+
+    if now is None:
+        now = time.time()
+    if not DEPOSIT_ABANDONED:
+        return
+    for user_id, entry in list(DEPOSIT_ABANDONED.items()):
+        confirm_id = entry.get("confirm_id")
+        _cid, pending = pending_deposit_for_user(user_id)
+        if pending is None or _cid != confirm_id:
+            # Card gone (confirmed, cancelled, or replaced by a
+            # newer deposit): nothing to resume, drop the record.
+            DEPOSIT_ABANDONED.pop(user_id, None)
+            continue
+        if entry.get("nudged_at") is not None:
+            continue  # already nudged once for this deposit
+        started_at = entry.get("started_at") or now
+        if now - started_at < ABANDONED_DEPOSIT_HOURS * 3600:
+            continue
+        try:
+            deposits = await paxyo.list_deposits(user_id)
+        except Exception as exc:
+            log.warning(
+                "abandoned deposit check failed: %s", exc
+            )
+            deposits = None
+        if deposits:
+            completed_since = False
+            for dep in deposits:
+                if str(dep.get("status") or "").strip().lower() not in (
+                    "completed", "success", "paid"
+                ):
+                    continue
+                created = _parse_order_created_at(dep.get("created_at"))
+                if created is None:
+                    # Unparseable date on a completed deposit: do
+                    # not risk nagging someone who paid.
+                    completed_since = True
+                    break
+                if created.timestamp() >= started_at:
+                    completed_since = True
+                    break
+            if completed_since:
+                DEPOSIT_ABANDONED.pop(user_id, None)
+                continue
+        lang = LAST_LANG.get(user_id) or "en"
+        await notify_user(
+            app, user_id,
+            t(
+                "abandoned_deposit_nudge", lang,
+                amount=format_money(entry.get("amount") or 0),
+                method=METHOD_LABELS.get(
+                    entry.get("method"), entry.get("method")
+                ),
+            ),
+            reply_markup=abandoned_deposit_keyboard(confirm_id),
+        )
+        entry["nudged_at"] = now
+
+
+async def run_uptime_watch_cycle(app, now=None):
+    """One uptime-watch pass (19, 15 Nov 2026): the bot watches
+    its own provider + the paxyo.et API on the scheduler cycle.
+    The API is up when admin_stats() answers; the provider is up
+    when the provider balance is present in that same reply (the
+    server reads it live — a missing field means the provider
+    could not be reached, and a 404 means the stats endpoint is
+    not live yet, so the watch stays off instead of alerting on
+    a missing number). Two consecutive failures alert William
+    once per target (throttled to one alert per hour); a success
+    after "down" sends one recovery message. Checked at most
+    every UPTIME_CHECK_SECONDS (5 minutes) — the cycle itself
+    runs every 60 seconds. Never raises, never messages a
+    customer."""
+    import time
+
+    global _UPTIME_LAST_CHECK
+    if now is None:
+        now = time.monotonic()
+    if now - _UPTIME_LAST_CHECK < UPTIME_CHECK_SECONDS:
+        return
+    _UPTIME_LAST_CHECK = now
+    try:
+        stats = await paxyo.admin_stats()
+    except Exception as exc:
+        log.warning("uptime watch stats failed: %s", exc)
+        stats = None
+    if stats is None:
+        # 404 (endpoint not live yet) or a failed call: the watch
+        # stays off with a log warning — never an alert on a
+        # missing number.
+        log.warning(
+            "uptime watch off: /admin/stats did not answer "
+            "(endpoint not live yet)"
+        )
+        return
+    up = {
+        "api": True,
+        "provider": stats.get("provider_balance_usd") is not None,
+    }
+    for target in ("api", "provider"):
+        state = UPTIME_STATE[target]
+        if up[target]:
+            if state["down"]:
+                state["down"] = False
+                state["fails"] = 0
+                await notify_admins(
+                    app,
+                    f"✅ {target} is back up.",
+                )
+            else:
+                state["fails"] = 0
+            continue
+        state["fails"] += 1
+        if state["fails"] < 2 or state["down"]:
+            continue
+        # A last_alert of 0.0 means "never alerted" — the first
+        # alert is never throttled by the zero default.
+        if (
+            state["last_alert"]
+            and now - state["last_alert"] < UPTIME_ALERT_THROTTLE_SECONDS
+        ):
+            state["down"] = True
+            continue
+        state["down"] = True
+        state["last_alert"] = now
+        await notify_admins(
+            app,
+            f"⚠️ {target} is down (failed twice in a row).",
+        )
+
+
+async def run_fraud_watch_cycle(app, now=None):
+    """One fraud-watch pass (17, 15 Nov 2026): ask the server for
+    flagged users (rapid-fire orders, repeated failed payments, a
+    burst of new accounts) and relay each flag to William, once.
+    The server claims one alert per user per day, so the bot never
+    spams him — it only relays what the endpoint returns, and
+    throttles its own calls to every FRAUD_WATCH_CHECK_SECONDS
+    (15 minutes). Never blocks a user automatically, only flags.
+    A 404 (endpoint not live yet) stays silent with a log
+    warning. Never raises, never messages a customer."""
+    import time
+
+    global _FRAUD_WATCH_LAST_CHECK
+    if now is None:
+        now = time.monotonic()
+    if now - _FRAUD_WATCH_LAST_CHECK < FRAUD_WATCH_CHECK_SECONDS:
+        return
+    _FRAUD_WATCH_LAST_CHECK = now
+    try:
+        data = await paxyo.fraud_watch()
+    except Exception as exc:
+        log.warning("fraud watch failed: %s", exc)
+        return
+    if data is None:
+        log.warning(
+            "fraud watch off: GET /fraud-watch returned 404 "
+            "(endpoint not live yet)"
+        )
+        return
+    flags = data.get("flags") or []
+    if not flags:
+        return
+    lines = ["🚨 Fraud watch:"]
+    for flag in flags:
+        if not isinstance(flag, dict):
+            continue
+        who = flag.get("telegram_id")
+        reason = flag.get("reason") or "suspicious activity"
+        count = flag.get("count")
+        line = f"• user {who}: {reason}"
+        if count is not None:
+            line += f" ({count})"
+        lines.append(line)
+    await notify_admins(app, "\n".join(lines))
 
 
 # ------------------------------------------------- conversation (round 8) ---
@@ -12148,6 +12644,18 @@ async def last_order_status_text(user_id: int, lang: str) -> str:
         log.warning("order_status failed: %s", exc)
         return t("not_understood", lang)
     status = data.get("status") or data.get("order", {}).get("status", "?")
+    if str(status).strip().lower() == "partial":
+        # Partial order (13, 15 Nov 2026): the user asked where
+        # their order is — attempt the refund now and answer with
+        # what arrived and what was refunded, instead of a bare
+        # "partial" status. The quantity is left to the helper,
+        # which falls back to delivered + remains (the server's
+        # exact figures). A None reply (endpoint not live yet, or
+        # the status moved on) falls through to the plain status
+        # line below.
+        line = await _maybe_partial_refund(None, user_id, order_id, None)
+        if line is not None:
+            return line
     return t("order_ok", lang, order_id=order_id, status=status)
 
 
@@ -13977,6 +14485,19 @@ async def deposit_status_text(user_id: int, lang: str, app=None,
         await _maybe_big_deposit_alert(
             app, deposit, user_id, username, balance
         )
+        # Remember deposit method (23, 15 Nov 2026): a completed
+        # deposit teaches the bot the user's last successful method,
+        # so the next deposit offers it first. The method rides on
+        # the deposit record (api-deposits.php). Best-effort and
+        # throttled (schedule_traits_save): a failed save never
+        # changes the reply, and a repeated recheck of the same
+        # deposit re-saves the same value.
+        _method = str(deposit.get("method") or "").strip().lower()
+        if _method in ("telebirr", "cbe", "cbebirr", "mpesa"):
+            _traits_entry(user_id)["last_deposit_method"] = _method
+            schedule_traits_save(
+                user_id, {"last_deposit_method": _method}
+            )
         if promo_line:
             return base + "\n" + promo_line
         return base
@@ -14344,6 +14865,52 @@ async def handle_delayed_order_text(update, text, intent, lang, voice=False):
     )
 
 
+def deposit_method_again_keyboard(method, lang):
+    """"✅ Telebirr again" / "Use a different method" (23, 15 Nov
+    2026). Callback data "depagain:<method>" / "depdiff". The
+    method label comes from METHOD_LABELS ("cbe" is CBE Birr);
+    unknown methods (mpesa, cbebirr — not in chat yet) show their
+    slug capitalised, never a raw code."""
+    label = METHOD_LABELS.get(method, str(method).capitalize())
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            t("deposit_method_again_button", "en", method=label),
+            callback_data=f"depagain:{method}",
+        )],
+        [InlineKeyboardButton(
+            t("deposit_method_other_button", "en"),
+            callback_data="depdiff",
+        )],
+    ])
+
+
+async def _remembered_deposit_method(user_id: int):
+    """The user's last successful deposit method, or None. The
+    in-memory traits mirror first (loaded at session restore);
+    the server when the mirror is empty. Only the four methods
+    the deposit flow knows; anything else is not a method. Never
+    raises — a 404 (endpoint not live yet) is just "nothing
+    remembered"."""
+    entry = USER_TRAITS.get(int(user_id)) or {}
+    method = entry.get("last_deposit_method")
+    if method in ("telebirr", "cbe", "cbebirr", "mpesa"):
+        return method
+    try:
+        traits = await paxyo.load_traits(user_id)
+    except Exception as exc:
+        log.warning("deposit method traits load failed: %s", exc)
+        return None
+    if not isinstance(traits, dict):
+        return None
+    method = traits.get("last_deposit_method")
+    if method in ("telebirr", "cbe", "cbebirr", "mpesa"):
+        # Fill the mirror so the next deposit in this process does
+        # not re-fetch.
+        _traits_entry(user_id)["last_deposit_method"] = method
+        return method
+    return None
+
+
 async def handle_deposit_text(update, text, intent, lang, voice=False):
     """Build a deposit over several turns (amount -> method -> phone),
     then show a Confirm summary. Nothing is created on the server
@@ -14391,6 +14958,25 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
         return
     if method is None:
         DEPOSIT_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        # Remember deposit method (23, 15 Nov 2026): offer the last
+        # successful method first ("Telebirr again?"), with a "use
+        # a different method" option always shown. Never after the
+        # user tapped "different method" in this flow
+        # (DEPOSIT_METHOD_DECLINED) — a declined offer is not
+        # re-shown until the next deposit.
+        if user.id not in DEPOSIT_METHOD_DECLINED:
+            remembered = await _remembered_deposit_method(user.id)
+            if remembered is not None:
+                label = METHOD_LABELS.get(remembered, remembered)
+                await reply_message(
+                    update.message,
+                    t("deposit_method_again", lang, method=label),
+                    lang, voice=voice,
+                    reply_markup=deposit_method_again_keyboard(
+                        remembered, lang
+                    ),
+                )
+                return
         await reply_message(update.message, t("ask_deposit_method", lang), lang, voice=voice)
         return
     if phone is None:
@@ -14399,6 +14985,7 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
         return
     # Complete: Confirm card, always text — it carries the buttons.
     DEPOSIT_DRAFT.pop(user.id, None)
+    DEPOSIT_METHOD_DECLINED.discard(user.id)
     PARTIAL.pop(user.id, None)
     RECURRING_DRAFT.pop(user.id, None)
     confirm_id = uuid.uuid4().hex[:12]
@@ -14407,6 +14994,20 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
         "amount": amount,
         "method": method,
         "phone": phone,
+    }
+    # Abandoned deposits (14, 15 Nov 2026): the Confirm card was
+    # shown (method + amount + phone all given) — if the user never
+    # taps it, the scheduler nudges once after 3 quiet hours.
+    # Replaced when a newer deposit card is shown (one per user).
+    import time
+
+    DEPOSIT_ABANDONED[user.id] = {
+        "confirm_id": confirm_id,
+        "amount": amount,
+        "method": method,
+        "phone": phone,
+        "started_at": time.time(),
+        "nudged_at": None,
     }
     lines = [
         t("confirm_title", lang),
@@ -14791,6 +15392,471 @@ async def _usual_fallback(update, user_id: int, intent: dict, lang: str,
         lang, voice=voice,
     )
     return True
+
+
+# ------------------------------------------------------- round 3 (15 Nov 2026) ---
+# Features 11, 12, 13, 22, 23, 30. Each one is small, deterministic
+# and offline-tested; money steps stay in deterministic code and
+# every order/refund still needs a Confirm step.
+
+_PLATFORM_DISPLAY = {
+    "tiktok": "TikTok", "instagram": "Instagram",
+    "telegram": "Telegram", "youtube": "YouTube",
+    "facebook": "Facebook", "x": "X",
+}
+
+
+def is_browse_services_request(text: str) -> bool:
+    """True when the user asks to BROWSE services ("show me TikTok
+    followers services", "list telegram views services", "what
+    services do you have for Instagram followers"). Needs a
+    browse verb + the word "service(s)". An order ("order 1000
+    TikTok views") never matches — it has no browse verb — and a
+    price question ("how much is TikTok views") has no "service"
+    word, so it keeps its own fast path."""
+    s = " ".join((text or "").strip().lower().split())
+    if "service" not in s and "services" not in s:
+        return False
+    if re.search(r"\b(show|list|browse|see)\b", s):
+        return True
+    return s.startswith("what ") and "service" in s
+
+
+def _browse_label(platform, metric):
+    """Display label for a browse list ("TikTok Followers")."""
+    parts = []
+    if platform:
+        parts.append(_PLATFORM_DISPLAY.get(platform, platform.title()))
+    if metric:
+        parts.append(metric.title())
+    return " ".join(parts) or "Services"
+
+
+def _browse_page_text(entry, page: int) -> str:
+    """One page of the browse list: numbered services with the
+    price per 1000 in ETB, fastest first (the stored order)."""
+    services = entry["services"]
+    total = len(services)
+    start = page * BROWSE_PAGE_SIZE
+    page_items = services[start:start + BROWSE_PAGE_SIZE]
+    lines = [f"{entry['label']} services (fastest first):"]
+    for i, s in enumerate(page_items, start + 1):
+        lines.append(
+            f"{i}. {short_service_name(s.get('name'))} — "
+            f"{format_money(s.get('rate_etb_per_1000', 0))} ETB/1000"
+        )
+    if total > BROWSE_PAGE_SIZE:
+        pages = (total + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE
+        lines.append(f"Page {page + 1} of {pages}")
+    return "\n".join(lines)
+
+
+def _browse_keyboard(entry, page: int):
+    """One button per service on the page (tap to order it) plus
+    Next when more pages follow. Callback data is "browse:<id>"
+    / "browsepage:<n>"."""
+    services = entry["services"]
+    start = page * BROWSE_PAGE_SIZE
+    page_items = services[start:start + BROWSE_PAGE_SIZE]
+    buttons = []
+    for s in page_items:
+        try:
+            sid = int(s.get("service"))
+        except (TypeError, ValueError):
+            continue
+        name = short_service_name(s.get("name")) or f"service {sid}"
+        price = format_money(s.get("rate_etb_per_1000", 0))
+        buttons.append([InlineKeyboardButton(
+            f"{name[:28]} — {price}",
+            callback_data=f"browse:{sid}",
+        )])
+    total_pages = (len(services) + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE
+    if page + 1 < total_pages:
+        buttons.append([InlineKeyboardButton(
+            t("browse_next_button", "en"),
+            callback_data=f"browsepage:{page + 1}",
+        )])
+    return InlineKeyboardMarkup(buttons) if buttons else None
+
+
+async def handle_browse_services(update, text, lang, voice=False):
+    """List the matching services in chat, fastest first, 10 per
+    page. A platform with no metric lists every service of that
+    platform; no platform or metric at all asks which platform
+    instead of dumping the whole 7,000-service catalogue. Prices
+    come from the catalogue (rate x 420), never from the AI. A
+    "cheapest" hint ranks by price, like the cheapest questions
+    do — the list is otherwise fastest first."""
+    user = update.effective_user
+    platform, metric = detect_platform_metric(text)
+    if platform and metric:
+        hint = f"{platform} {metric}"
+    elif platform:
+        hint = platform
+    elif metric:
+        hint = metric
+    else:
+        await reply_message(
+            update.message, t("ask_platform", lang), lang, voice=voice,
+        )
+        return
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("browse services failed: %s", exc)
+        await reply_message(
+            update.message, t("not_understood", lang), lang, voice=voice,
+        )
+        return
+    picks = pick_services(
+        services or [], platform=platform, service_hint=hint, limit=1000,
+    )
+    label = _browse_label(platform, metric)
+    if not picks:
+        await reply_message(
+            update.message,
+            t("browse_empty", lang, label=label), lang, voice=voice,
+        )
+        return
+    entry = {"services": picks, "page": 0, "label": label}
+    BROWSE_LISTS[user.id] = entry
+    await reply_message(
+        update.message, _browse_page_text(entry, 0), lang, voice=voice,
+        reply_markup=_browse_keyboard(entry, 0),
+    )
+
+
+def parse_cancel_order_request(text):
+    """The placed order a cancel message names, or None. "cancel
+    order #1841" / "cancel 1841" -> 1841; "cancel my last order"
+    / "cancel the latest order" -> "last". A bare "cancel my
+    order" (no id, no "last") is None — the normal cancel flow
+    owns it. The order-id reading reuses extract_report_order_id,
+    so "cancel order 10k views" is a quantity, never an order id."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s.startswith("cancel"):
+        return None
+    if re.search(r"\b(?:last|latest)\s+order\b", s):
+        return "last"
+    order_id = extract_report_order_id(text)
+    if order_id is not None:
+        return order_id
+    match = re.search(r"cancel\s+#?\s*(\d+)", s)
+    if match:
+        rest = s[match.end():].strip()
+        if rest:
+            first = re.split(r"[\s,.!?]+", rest)[0]
+            if first in _REPORT_METRIC_WORDS:
+                return None
+        return int(match.group(1))
+    return None
+
+
+def pending_cancel_for_user(user_id: int):
+    """(confirm_id, entry) of the user's most recent order-cancel
+    awaiting Confirm, or (None, None)."""
+    for confirm_id, entry in reversed(list(PENDING_CANCEL.items())):
+        if entry["user_id"] == user_id:
+            return confirm_id, entry
+    return None, None
+
+
+async def handle_cancel_order_text(update, text, target, lang,
+                                   voice=False):
+    """"Cancel my last order" / "cancel order #1841": show the
+    placed order with a Confirm card. Only while the provider
+    still allows cancelling — an already completed / cancelled /
+    failed order gets an honest line, never a card. The card
+    carries the full stored total, which is what the refund pays
+    back. One cancel card at a time: an older one is dropped
+    first. Nothing is cancelled here — the Confirm tap (or a bare
+    "yes") runs _run_cancel_order_confirm."""
+    user = update.effective_user
+    _cid, _old = pending_cancel_for_user(user.id)
+    if _cid is not None:
+        PENDING_CANCEL.pop(_cid, None)
+    order = None
+    if target == "last":
+        order = await resolve_last_order(user.id)
+        if not order:
+            await reply_message(
+                update.message, t("cancel_order_no_orders", lang),
+                lang, voice=voice,
+            )
+            return
+        order_id = order.get("id") or order.get("order_id")
+        if not order_id:
+            await reply_message(
+                update.message, t("cancel_order_no_orders", lang),
+                lang, voice=voice,
+            )
+            return
+    else:
+        order_id = target
+        try:
+            data = await paxyo.order_status(order_id, user.id)
+        except Exception as exc:
+            log.warning("cancel order status failed: %s", exc)
+            await reply_message(
+                update.message, t("not_understood", lang),
+                lang, voice=voice,
+            )
+            return
+        if not data:
+            await reply_message(
+                update.message,
+                t("cancel_order_not_found", lang, order_id=order_id),
+                lang, voice=voice,
+            )
+            return
+        order = data.get("order", data) if isinstance(data, dict) else {}
+        if not isinstance(order, dict):
+            order = {}
+        order["id"] = order.get("id") or order.get("order_id") or order_id
+    status = str((order or {}).get("status") or "").strip().lower()
+    if status in ("completed", "complete", "success", "paid",
+                  "cancelled", "canceled", "refunded", "failed"):
+        await reply_message(
+            update.message,
+            t(
+                "cancel_order_already_done", lang,
+                order_id=order_id, status=status or "completed",
+            ),
+            lang, voice=voice,
+        )
+        return
+    total = (order or {}).get("total", (order or {}).get("charge"))
+    try:
+        total = round(float(total), 2) if total is not None else None
+    except (TypeError, ValueError):
+        total = None
+    try:
+        quantity = int((order or {}).get("quantity") or 0)
+    except (TypeError, ValueError):
+        quantity = 0
+    name = short_service_name((order or {}).get("service_name")) or (
+        f"service {(order or {}).get('service_id')}"
+        if (order or {}).get("service_id") else f"order #{order_id}"
+    )
+    confirm_id = uuid.uuid4().hex[:12]
+    PENDING_CANCEL[confirm_id] = {
+        "user_id": user.id,
+        "order_id": order_id,
+        "total": total,
+        "service_name": name,
+        "quantity": quantity,
+    }
+    lines = [
+        t("confirm_title", lang),
+        "",
+        t(
+            "cancel_order_ask", lang,
+            service=name, quantity=quantity,
+            total=format_money(total) if total is not None else "?",
+            order_id=order_id,
+        ),
+    ]
+    await reply_message(
+        update.message, "\n".join(lines), lang,
+        reply_markup=confirm_keyboard(confirm_id),
+    )
+
+
+async def _run_cancel_order_confirm(user_id, entry, lang, respond):
+    """Run a confirmed order cancel: POST /orders/{id}/cancel,
+    then report the refund. `respond` is the reply function
+    (query.edit_message_text for a tap, message.reply_text for a
+    bare "yes"). Never raises. A None reply (endpoint not live
+    yet) says so honestly; an ok:false reply carries the server's
+    reason (already completed, provider refused); a success names
+    the EXACT refunded figure from the server, falling back to
+    the stored total on the card, never an invented figure."""
+    order_id = entry["order_id"]
+    try:
+        result = await paxyo.cancel_order(order_id, user_id)
+    except Exception as exc:
+        log.warning("cancel order %s failed: %s", order_id, exc)
+        await respond(t("cancel_order_failed", lang, order_id=order_id))
+        return
+    if result is None:
+        await respond(t("cancel_order_not_live", lang))
+        return
+    if isinstance(result, dict) and result.get("ok") is False:
+        reason = (result.get("error") or "").strip()
+        if reason:
+            await respond(t("cancel_order_refused", lang, reason=reason))
+        else:
+            await respond(
+                t("cancel_order_failed", lang, order_id=order_id)
+            )
+        return
+    refunded = None
+    if isinstance(result, dict):
+        refunded = result.get("refunded_etb")
+    if refunded is None:
+        refunded = entry.get("total")
+    await respond(
+        t(
+            "cancel_order_done", lang, order_id=order_id,
+            refunded=(
+                format_money(refunded) if refunded is not None else "?"
+            ),
+        )
+    )
+
+
+async def _maybe_partial_refund(app, user_id, order_id, quantity):
+    """Attempt the partial-delivery refund for one partial order.
+    Returns the user-facing line, or None when nothing is owed
+    or nothing happened. Never raises. A 404 (endpoint not live
+    yet) or a 409/502 (the status moved on, or the provider did
+    not confirm) returns None — the caller keeps watching, so a
+    later cycle retries instead of refunding on stale data. The
+    refund figure is the server's exact figure, never computed
+    here; the quantity falls back to delivered + remains when the
+    caller does not know it."""
+    try:
+        result = await paxyo.partial_refund(order_id, user_id)
+    except Exception as exc:
+        log.warning("partial refund %s failed: %s", order_id, exc)
+        return None
+    if not isinstance(result, dict) or not result.get("ok"):
+        return None
+    try:
+        refunded = float(result.get("refunded_etb") or 0)
+        delivered = int(result.get("delivered") or 0)
+        remains = int(result.get("remains") or 0)
+    except (TypeError, ValueError):
+        return None
+    if refunded <= 0 and remains <= 0:
+        return None
+    try:
+        qty = int(quantity or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    if qty <= 0:
+        qty = delivered + remains
+    return t(
+        "partial_refunded", "en",
+        order_id=order_id, delivered=delivered, quantity=qty,
+        remains=remains, refunded=format_money(refunded),
+    )
+
+
+# "Reorder with a different quantity" (22): a reorder phrase plus
+# a number. The strong phrases name the last order outright
+# ("reorder my last order with 2000 views", "same order but 500",
+# "repeat my last order with 1000"); the weak one ("order again
+# with 500") only counts when the message names no platform of
+# its own — "order again 1000 tiktok views" names TikTok, so it
+# stays a normal order instead of silently reusing the last
+# order's (possibly different) service. "Same as last time but
+# 500" is NOT here: the usual handler already takes it (the
+# explicit quantity wins there).
+_REORDER_NEW_QTY_RES = (
+    (re.compile(
+        r"reorder(?:\s+my|\s+the)?\s+(?:last|latest)\s+order"
+        r"\s+(?:but\s+|with\s+)?(\d[\d,]*)"
+    ), True),
+    (re.compile(
+        r"same\s+order\s+(?:but\s+|with\s+)?(\d[\d,]*)"
+    ), True),
+    (re.compile(
+        r"repeat(?:\s+my)?\s+(?:last|latest)\s+order"
+        r"\s+(?:but\s+|with\s+)?(\d[\d,]*)"
+    ), True),
+    (re.compile(
+        r"order\s+again\s+(?:but\s+|with\s+)?(\d[\d,]*)"
+    ), False),
+)
+
+
+def parse_reorder_quantity(text):
+    """The new quantity of a "reorder with a different quantity"
+    message, or None. Digits only (normalize_text already expanded
+    "2k" to "2000" before this runs)."""
+    s = " ".join((text or "").strip().lower().split())
+    for rx, strong in _REORDER_NEW_QTY_RES:
+        match = rx.search(s)
+        if not match:
+            continue
+        if not strong and _explicit_platform_word(text) is not None:
+            continue
+        try:
+            qty = int(match.group(1).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        if qty > 0:
+            return qty
+    return None
+
+
+async def handle_reorder_new_quantity(update, text, lang, voice=False):
+    """"Same as last time but 500" with a reorder phrase: the last
+    order's service + link with the NEW quantity, as a Confirm
+    card. Mirrors handle_usual (same service pin, same max cap),
+    except the quantity is the one the user just named — never
+    the last order's. No last order -> an honest line, never a
+    guessed service."""
+    user = update.effective_user
+    wanted = parse_reorder_quantity(text)
+    last = await resolve_last_order(user.id)
+    if not last or not last.get("link"):
+        await reply_message(
+            update.message, t("reorder_no_last", lang),
+            lang, voice=voice,
+        )
+        return
+    service_id = last.get("service_id")
+    platform = None
+    hint = None
+    service = None
+    capped = False
+    if service_id is not None:
+        try:
+            services = await paxyo.services()
+        except Exception as exc:
+            log.warning("reorder services failed: %s", exc)
+            services = []
+        service = find_service_by_id(services or [], service_id)
+        if service is not None:
+            platform, _hint = _platform_hint_of_service(service)
+            metric = _primary_metric(
+                " ".join(_name_kinds(service.get("name")))
+            )
+            if metric:
+                hint = f"{platform} {metric}" if platform else metric
+            try:
+                max_qty = int(service.get("max", 0) or 0)
+            except (TypeError, ValueError):
+                max_qty = 0
+            if max_qty > 0 and wanted > max_qty:
+                wanted = (max_qty // 10) * 10
+                capped = True
+    if platform is None and service_id is None:
+        service_name = str(last.get("service_name") or "")
+        for p in ("instagram", "tiktok", "telegram", "youtube",
+                  "facebook", "x"):
+            if p in service_name.lower():
+                platform = p
+                break
+    note = t("change_note", lang, quantity=wanted)
+    if capped:
+        note = (
+            f"{note}\n"
+            f"{t('usual_capped', lang, max=max_qty)}"
+        )
+    merged = {
+        "platform": platform,
+        "service_hint": hint,
+        "link": last.get("link"),
+        "quantity": wanted,
+    }
+    await complete_order(
+        update.message, user.id, merged, lang, voice=voice,
+        named_service_id=service_id, last_service_id=service_id,
+        note=note,
+    )
 
 
 async def handle_usual(update, text, intent, lang, voice=False):
@@ -16751,6 +17817,17 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 send_new=update.message.reply_text,
             )
             return
+        # A "yes" can also confirm an order cancel awaiting Confirm
+        # (12, 15 Nov 2026): cancel it at the provider and refund
+        # the full total to the user's balance.
+        cancel_id, cancel_entry = pending_cancel_for_user(user.id)
+        if cancel_entry is not None:
+            PENDING_CANCEL.pop(cancel_id, None)
+            await _run_cancel_order_confirm(
+                user.id, cancel_entry, lang,
+                respond=update.message.reply_text,
+            )
+            return
         # A "yes" can also accept the offer to check a payment receipt
         # the user sent as a photo: recheck the most recent deposit
         # with Chapa and say what happened.
@@ -16799,6 +17876,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             return
 
+    # Browse services (11, 15 Nov 2026): "show me TikTok followers
+    # services" lists the matching services in chat, fastest first
+    # — deterministic, before the classifier, so it is never read
+    # as an order for the first service on the list.
+    if intent is None and is_browse_services_request(text):
+        await handle_browse_services(update, text, lang, voice=voice)
+        return
+
     # Asked where the services come from, or what Paxyo pays for
     # them: deflect at once, without calling Gemini. Skipped when the
     # intent was injected by the photo handler (already classified).
@@ -16837,6 +17922,16 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 else 3 if "triple" in _words else None
             ),
         )
+    # Reorder with a different quantity (22, 15 Nov 2026): "reorder
+    # my last order with 2000 views" / "same order but 500" reuses
+    # the last order's service + link with the new quantity.
+    # Deterministic, before the classifier — the classifier would
+    # otherwise read it as a fresh order and ask for the link.
+    # "Same as last time but 500" is not here: the usual handler
+    # above already takes it (the explicit quantity wins there).
+    if intent is None and parse_reorder_quantity(text) is not None:
+        await handle_reorder_new_quantity(update, text, lang, voice=voice)
+        return
     # A cancel command is deterministic (live bug, 14 Nov 2026
     # 19:10 and 19:29 EAT): a bare "Cancel" with nothing pending
     # came back from the AI as off_topic and got a free-chat
@@ -17067,6 +18162,27 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # --- conversational intents: answered before the order flow ---
     if intent_type == "cancel":
+        # Cancel a PLACED order (12, 15 Nov 2026): "cancel my last
+        # order" / "cancel order #1841" shows that order with a
+        # Confirm card. Only when no Confirm card is open — an open
+        # card owns the word "cancel" (dropping it is the existing
+        # behaviour below), and the user can ask again after.
+        cancel_target = parse_cancel_order_request(text)
+        if cancel_target is not None:
+            _cid, _pending = pending_for_user(user.id)
+            _rid, _rec = pending_recurring_for_user(user.id)
+            _did, _delay = pending_delayed_for_user(user.id)
+            _depid, _dep = pending_deposit_for_user(user.id)
+            _bid, _batch = pending_batch_for_user(user.id)
+            _rfid, _refill = pending_refill_for_user(user.id)
+            if (
+                _pending is None and _rec is None and _delay is None
+                and _dep is None and _batch is None and _refill is None
+            ):
+                await handle_cancel_order_text(
+                    update, text, cancel_target, lang, voice=voice
+                )
+                return
         # "I don't want to" / "cancel": drop any pending order and any
         # order being built, and say so. When BOTH a pending order and
         # repeating orders exist, "cancel" is ambiguous — ask which one
@@ -17097,6 +18213,16 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if delay_draft is not None and pending is None and rec_draft is None and dep_draft is None and batch is None:
             PENDING_DELAYED.pop(delay_id, None)
             DELAYED_DRAFT.pop(user.id, None)
+            await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
+            return
+        # A bare "cancel" while an order-cancel card is open drops
+        # that card (12, 15 Nov 2026) — same as every other pending
+        # Confirm card above. Only when no order/plan/deposit card
+        # is open, so the more specific drops above always win.
+        cancel_id, cancel_entry = pending_cancel_for_user(user.id)
+        if cancel_entry is not None and pending is None:
+            PENDING_CANCEL.pop(cancel_id, None)
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
             log_confusion(user.id, text, t("cancelled", lang), "abandoned")
             return
@@ -18746,6 +19872,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(t("ask_deposit_method", lang))
         return
 
+    if action == "depagain":
+        # Remember deposit method (23, 15 Nov 2026): "✅ Telebirr
+        # again" keeps the remembered method and asks for the phone
+        # next — the normal deposit flow then shows the Confirm
+        # card. No amount on file (a restart dropped the draft)
+        # asks for the amount instead.
+        if arg not in ("telebirr", "cbe", "cbebirr", "mpesa"):
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        draft = DEPOSIT_DRAFT.get(user.id) or {}
+        if draft.get("amount") is None:
+            await query.edit_message_text(t("ask_deposit_amount", lang))
+            return
+        DEPOSIT_DRAFT[user.id] = {"amount": draft["amount"], "method": arg}
+        await query.edit_message_text(t("ask_deposit_phone", lang))
+        return
+
+    if action == "depdiff":
+        # "Use a different method" (23): remember the decline for
+        # this flow, then ask for the method plainly. The decline
+        # is cleared when the deposit's Confirm card is shown, so
+        # the next deposit can offer the remembered method again.
+        DEPOSIT_METHOD_DECLINED.add(user.id)
+        await query.edit_message_text(t("ask_deposit_method", lang))
+        return
+
     if action == "start_order":
         # "Start an order" from the how-to guide: drop any half-built
         # order or plan and ask which platform, so the next message
@@ -18792,6 +19944,45 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text(
             _fallback_slot_question(user.id, {}, resume_lang)
+        )
+        return
+
+    if action == "resumedep":
+        # Abandoned-deposit nudge (14, 15 Nov 2026): "Resume my
+        # deposit" re-shows the SAME Confirm card, so the existing
+        # Confirm/Cancel tail handles the tap. A card that is gone
+        # by now (confirmed, cancelled, replaced) gets an honest
+        # answer, never a rebuilt deposit. The abandoned record is
+        # dropped: one nudge per abandoned deposit, ever.
+        dep_draft = PENDING_DEPOSIT.get(arg)
+        if dep_draft is None or dep_draft.get("user_id") != user.id:
+            await query.edit_message_text(
+                t("abandoned_deposit_gone", lang)
+            )
+            return
+        DEPOSIT_ABANDONED.pop(user.id, None)
+        lines = [
+            t("confirm_title", lang),
+            "",
+            f"💰 {format_money(dep_draft['amount'])} ETB",
+            f"📱 {METHOD_LABELS.get(dep_draft['method'], dep_draft['method'])}",
+            f"📞 {dep_draft['phone']}",
+        ]
+        _validated = VALIDATED_PROMO.get(user.id) or {}
+        if _validated.get("code"):
+            lines.append(
+                t(
+                    "deposit_confirm_promo", lang,
+                    code=_validated["code"],
+                    percent=(
+                        _validated["percent"]
+                        if _validated.get("percent") is not None
+                        else "?"
+                    ),
+                )
+            )
+        await query.edit_message_text(
+            "\n".join(lines), reply_markup=confirm_keyboard(arg)
         )
         return
 
@@ -18904,6 +20095,82 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == "browse":
+        # Browse services (11, 15 Nov 2026): tapping a service in
+        # the list starts an order for it — the service is pinned
+        # one-shot (NUDGE_SERVICE, like the first-order nudge) and
+        # the bot asks for the link; the normal flow then asks the
+        # quantity and shows the Confirm card for THAT service.
+        # The list may be gone after a restart: re-fetch the
+        # catalogue and find the service there instead. Any
+        # half-built draft is replaced — the tap is an explicit
+        # "order this service", like the "Start an order" button.
+        service = None
+        entry = BROWSE_LISTS.get(user.id)
+        if entry is not None:
+            for s in entry.get("services") or []:
+                try:
+                    if int(s.get("service")) == int(arg or 0):
+                        service = s
+                        break
+                except (TypeError, ValueError):
+                    continue
+        if service is None:
+            try:
+                services = await paxyo.services()
+            except Exception as exc:
+                log.warning("browse tap services failed: %s", exc)
+                services = []
+            service = find_service_by_id(services or [], arg)
+        if service is None:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        try:
+            sid = int(service.get("service"))
+        except (TypeError, ValueError):
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        platform, _hint = _platform_hint_of_service(service)
+        metric = _primary_metric(
+            " ".join(_name_kinds(service.get("name")))
+        )
+        hint = (
+            f"{platform} {metric}"
+            if platform and metric else (platform or metric)
+        )
+        NUDGE_SERVICE[user.id] = sid
+        PARTIAL[user.id] = {
+            "platform": platform,
+            "service_hint": hint,
+        }
+        await query.edit_message_text(
+            ask_link_text(platform, hint, lang)
+        )
+        return
+
+    if action == "browsepage":
+        # Next page of the browse list (11): re-render the same
+        # list at the requested page. A list that is gone (restart)
+        # gets an honest answer, never a rebuilt list.
+        entry = BROWSE_LISTS.get(user.id)
+        if entry is None:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        try:
+            page = int(arg or 0)
+        except (TypeError, ValueError):
+            page = 0
+        total_pages = (
+            len(entry["services"]) + BROWSE_PAGE_SIZE - 1
+        ) // BROWSE_PAGE_SIZE
+        page = max(0, min(page, max(0, total_pages - 1)))
+        entry["page"] = page
+        await query.edit_message_text(
+            _browse_page_text(entry, page),
+            reply_markup=_browse_keyboard(entry, page),
+        )
+        return
+
     if action == "report":
         # Report a problem (ideas batch 2, feature 2, 15 Nov 2026):
         # "⚠️ Report a problem" on an order in My orders, a tap on
@@ -19006,6 +20273,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if verdict not in ("good", "bad") or not fb_order_id:
             return
         fb_lang = LAST_LANG.get(user.id) or lang
+        # Satisfaction score (20, 15 Nov 2026): the feedback tap
+        # ALSO files a rating for the order (good/bad), so the
+        # admin's satisfaction score counts it. Best-effort and
+        # once per order — the server enforces once (409), and a
+        # 404 (endpoint not live yet) or any failure changes
+        # nothing about the feedback reply itself. A tap that was
+        # already rated on the delivery message 409s silently.
+        try:
+            await paxyo.rate_order(fb_order_id, user.id, verdict)
+        except Exception as exc:
+            log.warning("feedback rating failed: %s", exc)
         if verdict == "good":
             await query.edit_message_text(t("feedback_thanks", fb_lang))
             return
@@ -19396,6 +20674,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.id, refill, lang,
             respond=query.edit_message_text,
             send_new=query.message.reply_text,
+        )
+        return
+
+    cancel_entry = PENDING_CANCEL.pop(arg, None)
+    if cancel_entry is not None:
+        if cancel_entry["user_id"] != user.id:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        if action == "cancel":
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        # Confirm tap: cancel the placed order at the provider and
+        # refund the full total to the user's balance (12, 15 Nov
+        # 2026). The card is replaced in place with the outcome.
+        await _run_cancel_order_confirm(
+            user.id, cancel_entry, lang,
+            respond=query.edit_message_text,
         )
         return
 
@@ -19946,6 +21241,17 @@ async def run_scheduler_cycle(app):
     # nudge per half-built draft after ~30 quiet minutes. Same
     # 60-second cadence as the delivery watch above.
     await run_abandoned_nudge_cycle(app)
+    # Abandoned-deposit nudge (14, 15 Nov 2026): one Resume nudge
+    # per deposit whose Confirm card was shown but never tapped,
+    # after 3 quiet hours — never to a user who completed a deposit
+    # since. Uptime watch (19): the provider + the paxyo.et API,
+    # one alert per target after two consecutive failures, one
+    # recovery message when it comes back. Fraud watch (17): the
+    # server's flagged users, relayed to William once each. All
+    # three never raise and never message a customer.
+    await run_abandoned_deposit_cycle(app)
+    await run_uptime_watch_cycle(app)
+    await run_fraud_watch_cycle(app)
 
 
 async def scheduler_loop(app):
