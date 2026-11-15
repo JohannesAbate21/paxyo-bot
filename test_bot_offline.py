@@ -404,6 +404,7 @@ class FakePaxyo:
                  services=None, status_by_order=None, admin_stats=None,
                  my_referral=None, referral_error=None,
                  cancel_refund_result=None, cancel_refund_error=None,
+                 fail_refund_result=None, fail_refund_error=None,
                  next_order_ids=None, traits=None,
                  promo_codes=None, promo_none=False,
                  promo_redeem_result=None, promo_redeem_none=False,
@@ -433,6 +434,13 @@ class FakePaxyo:
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
         self.order_keys = []
+        # Second provider (15 Nov 2026): SMM orders go through
+        # create_order_smm (POST /orders/smm) and are recorded
+        # separately, so tests can tell which endpoint an order
+        # went to. order_status_calls records (order_id,
+        # telegram_id, provider) per status read.
+        self.smm_orders_created = []
+        self.order_status_calls = []
         # Stall rescue (15 Nov 2026): a seeded refund for
         # cancel_refund (None by default — the endpoint is not live
         # yet, so the real client returns None on its 404), a
@@ -443,6 +451,16 @@ class FakePaxyo:
         self._cancel_refund_error = cancel_refund_error
         self._next_order_ids = list(next_order_ids or [])
         self.cancel_refund_calls = []
+        # Failed-order rescue (second provider, 15 Nov 2026): a
+        # seeded refund for fail_refund (None by default — the
+        # endpoint is not live yet, so the real client returns
+        # None on its 404), a record of every fail-refund call,
+        # and fail_refund_error=<status> raising the HTTP error
+        # the real client raises (409 provider not failed, 502
+        # provider did not answer).
+        self._fail_refund_result = fail_refund_result
+        self._fail_refund_error = fail_refund_error
+        self.fail_refund_calls = []
         # Round 3 (15 Nov 2026): cancel order / partial refund /
         # fraud watch. cancel_order_none / partial_none mirror the
         # real client's 404 (endpoint not live yet); _error=409
@@ -621,6 +639,15 @@ class FakePaxyo:
         new_id = self._next_order_ids.pop(0) if self._next_order_ids else 1827
         return {"order": {"id": new_id, "status": "pending"}}
 
+    async def create_order_smm(self, telegram_id, service_id, link, quantity, idempotency_key):
+        """Mirror POST /orders/smm (second provider, 15 Nov 2026):
+        same shape as create_order, recorded separately so tests
+        can tell which endpoint an order went to."""
+        self.smm_orders_created.append((service_id, link, quantity))
+        self.order_keys.append(idempotency_key)
+        new_id = self._next_order_ids.pop(0) if self._next_order_ids else 1827
+        return {"order": {"id": new_id, "status": "pending"}}
+
     async def cancel_refund(self, order_id, telegram_id):
         """Mirror POST /orders/{id}/cancel-refund (stall rescue,
         15 Nov 2026). Returns the seeded result (a refund dict) or
@@ -649,6 +676,36 @@ class FakePaxyo:
                 "cancel-refund failed", request=req, response=resp
             )
         return self._cancel_refund_result
+
+    async def fail_refund(self, order_id, telegram_id):
+        """Mirror POST /orders/{id}/fail-refund (failed-order
+        rescue, 15 Nov 2026). Returns the seeded result (a refund
+        dict) or None by default — the endpoint is not live yet, so
+        the real client returns None on its 404.
+        fail_refund_error=<status> raises the HTTP error the real
+        client raises (409 provider not failed, 502 provider did
+        not answer)."""
+        self.fail_refund_calls.append((order_id, telegram_id))
+        if self._fail_refund_error is not None:
+            message = (
+                "Provider status is pending, not failed. "
+                "No refund was made."
+                if self._fail_refund_error == 409
+                else "Provider did not answer the status check. "
+                     "No refund was made."
+            )
+            req = bot.httpx.Request(
+                "POST",
+                f"https://paxyo.et/api/bot/orders/{order_id}/fail-refund",
+            )
+            resp = bot.httpx.Response(
+                self._fail_refund_error,
+                json={"error": message}, request=req,
+            )
+            raise bot.httpx.HTTPStatusError(
+                "fail-refund failed", request=req, response=resp
+            )
+        return self._fail_refund_result
 
     async def refill_order(self, order_id, telegram_id):
         """Mirror POST /orders/{id}/refill (refill in chat, 15 Nov
@@ -760,13 +817,16 @@ class FakePaxyo:
             return None
         return {"flags": list(self._fraud_flags or [])}
 
-    async def order_status(self, order_id, telegram_id):
+    async def order_status(self, order_id, telegram_id, provider=None):
         # Per-order statuses (ideas batch, 15 Nov 2026): the delivery
         # watch needs one order completed and another still pending
         # in the same cycle. Falls back to the single _status. A
         # seeded full record (round 3, cancel in chat) wins over
         # the bare status, and order_status_none returns None
         # (the real client's 404 for an unknown order id).
+        # provider (second provider, 15 Nov 2026) is recorded per
+        # call so tests can tell which endpoint a status read used.
+        self.order_status_calls.append((order_id, telegram_id, provider))
         if self._order_status_none:
             return None
         if str(order_id) in self._order_records:
@@ -1166,14 +1226,26 @@ class FakePaxyo:
     # One-time delayed orders (14 Nov 2026): mirror POST/GET
     # /delayed-orders, /cancel, /due, /claim, /finish.
     async def create_delayed_order(self, telegram_id, service_id, link,
-                                   quantity, total, run_at, idempotency_key):
+                                   quantity, total, run_at, idempotency_key,
+                                   provider=None):
         """delayed_none=True returns None (the real client does that
-        on a 404: endpoint not live yet)."""
+        on a 404: endpoint not live yet). provider (second provider,
+        15 Nov 2026) is stored on the record, like the server does,
+        and combined_id is derived from it."""
         if self._delayed_none:
             return None
+        # The provider arrives as the bot's short slug ("gop" /
+        # "smm", second provider, 15 Nov 2026); a long-form value
+        # reads by its prefix, like the bot does.
+        slug = provider or "gop"
+        if slug not in ("gop", "smm"):
+            slug = "smm" if str(slug).startswith("smm") else "gop"
         record = {
             "id": self._delayed_next_id, "telegram_id": telegram_id,
-            "service_id": service_id, "link": link,
+            "service_id": service_id,
+            "provider": slug,
+            "combined_id": f"{slug}:{service_id}",
+            "link": link,
             "quantity": quantity, "total": total, "run_at": run_at,
             "status": "scheduled", "idempotency_key": idempotency_key,
             "created_at": "2026-11-14T20:00:00Z",
@@ -5652,12 +5724,20 @@ class TestServicesNormalisation(unittest.IsolatedAsyncioTestCase):
                 new=mock.AsyncMock(return_value=api_services),
             ):
                 services = await client.services()
-            self.assertEqual(len(services), 2)
+            # The live API rows come first, tagged GOP — then the
+            # bundled combined catalogue's SMM entries join them
+            # (second provider, 15 Nov 2026): one merged list.
+            self.assertEqual(len(services), 2 + 3301)
             self.assertEqual(services[0]["service"], 7246)
             self.assertEqual(services[0]["rate_etb_per_1000"], 525)
+            self.assertEqual(services[0]["combined_id"], "gop:7246")
             self.assertEqual(services[1]["service"], 1665)
             self.assertEqual(services[1]["rate_etb_per_1000"], 18.9)
             self.assertEqual(services[1]["name"], "TikTok Video Views [ Max 100M ]")
+            self.assertEqual(services[1]["combined_id"], "gop:1665")
+            by_id = {s["combined_id"]: s for s in services}
+            self.assertEqual(by_id["smm:7013"]["rate_etb_per_1000"], 0.31)
+            self.assertEqual(len(by_id), 2 + 3301)
         finally:
             await client._client.aclose()
 
@@ -8828,7 +8908,7 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             msg.text_sent[1], "Please send your Instagram profile link."
         )
-        self.assertEqual(bot.PARTIAL[1].get("service_id"), 1001)
+        self.assertEqual(bot.PARTIAL[1].get("service_id"), "gop:1001")
 
     async def test_first_one_without_budget_options_is_not_an_order(self):
         msg = await self._send("First one", intent_of("unclear"))
@@ -20104,7 +20184,13 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("t.me/paxyo", text)
         self.assertTrue(bot.WATCHED_ORDERS["1841"]["warned"])
 
-    async def test_watch_cycle_drops_failed_order_silently(self):
+    async def test_watch_cycle_failed_order_tells_user_when_refund_not_live(self):
+        # Failed-order rescue (second provider, 15 Nov 2026): a
+        # failed order is NO LONGER dropped silently. With the
+        # fail-refund endpoint not live yet (FakePaxyo returns None,
+        # like the real client's 404), the user gets one honest
+        # message and the order stays watched — if the endpoint is
+        # installed later, the next hourly retry refunds + rescues.
         self._watch("1842")
         fake = FakePaxyo(
             services=_views_fixture(),
@@ -20113,8 +20199,11 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         app = FakeApp()
         with mock.patch("bot.paxyo", fake):
             await bot.run_delivery_watch_cycle(app)
-        self.assertEqual(app.bot.sent, [])
-        self.assertEqual(bot.WATCHED_ORDERS, {})
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("isn't switched on yet", app.bot.sent[0][1])
+        self.assertIn("#1842", app.bot.sent[0][1])
+        self.assertEqual(fake.fail_refund_calls, [("1842", 1)])
+        self.assertIn("1842", bot.WATCHED_ORDERS)
 
     async def test_watch_cycle_keeps_pending_order_without_warning(self):
         self._watch("1843", status_minutes_ago=5, avg_minutes=60)
@@ -20255,7 +20344,7 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(query.answered)
         self.assertEqual(len(query.edited), 1)
         self.assertIn("Send me your link", query.edited[0])
-        self.assertEqual(bot.NUDGE_SERVICE.get(1), 5535)
+        self.assertEqual(bot.NUDGE_SERVICE.get(1), "gop:5535")
         self.assertEqual(bot.PARTIAL[1]["quantity"], 1000)
         # The user sends the link: the Confirm card pins #5535
         # (1.26 ETB for 1000) instead of the fastest pick.
@@ -20786,7 +20875,7 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
         new_entry = bot.WATCHED_ORDERS["1842"]
         self.assertEqual(new_entry["service"]["service"], 7001)
         self.assertEqual(new_entry["rescue_count"], 1)
-        self.assertEqual(new_entry["failed_services"], [7000])
+        self.assertEqual(new_entry["failed_services"], ["gop:7000"])
         self.assertFalse(new_entry["rescue_attempted"])
         self.assertEqual(bot.LAST_ORDER.get(1), 1842)
 
@@ -21021,6 +21110,376 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.cancel_refund_calls, [])
         self.assertEqual(fake.orders_created, [])
         self.assertIn("1843", bot.WATCHED_ORDERS)
+
+
+class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
+    """Failed-order rescue (second provider, 15 Nov 2026): when
+    the provider ends an order FAILED, the bot refunds it via
+    POST /orders/{id}/fail-refund and re-places it on the
+    next-fastest service — across providers (GOP failed -> SMM
+    replacement and back). Only "failed" is rescued, never
+    "cancelled"/"canceled" (that may be the user's own cancel) or
+    "refunded" (already refunded). The refund is the full stored
+    total, recorded once ever server-side, so a retry after a
+    successful refund is safe; a 409 (provider disagrees) keeps
+    the order watched, and a 404 (endpoint not live) tells the
+    user honestly once and retries hourly."""
+
+    def setUp(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.LAST_ORDER.clear()
+
+    def tearDown(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.LAST_ORDER.clear()
+
+    def _gop_views(self, sid=7000, minutes="1 minute", price=10.0):
+        return {
+            "service": sid, "provider": "gop",
+            "combined_id": f"gop:{sid}", "provider_service_id": sid,
+            "name": "TikTok Video Views | Fastest",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": price, "min": 10, "max": 1000000,
+            "average_time": minutes, "active": True,
+        }
+
+    def _smm_views(self, sid=874, minutes="2 minutes", price=5.0):
+        return {
+            "service": sid, "provider": "smm",
+            "combined_id": f"smm:{sid}", "provider_service_id": sid,
+            "name": "TikTok Views [INSTANT]",
+            "category": "Tiktok Views", "type": "Default",
+            "rate_etb_per_1000": price, "min": 10, "max": 1000000,
+            "average_time": minutes, "active": True,
+        }
+
+    def _watch(self, order_id, service, status_minutes_ago=200,
+               quantity=1000, user_id=1, rescue_count=0):
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": user_id,
+            "service": service,
+            "quantity": quantity,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time() - status_minutes_ago * 60,
+            "avg_minutes": 1,
+            "warned": False,
+            "total": bot.estimated_total_etb(
+                float(service.get("rate_etb_per_1000") or 0), quantity),
+            "rescue_count": rescue_count,
+            "rescue_attempted": False,
+            "failed_services": [],
+        }
+
+    def _refund(self, order_id=1841, refunded=10.0):
+        return {
+            "success": True, "ok": True, "order_id": order_id,
+            "refunded_etb": refunded, "provider_status": "failed",
+            "duplicate": False,
+        }
+
+    def _http_error(self, status, url):
+        req = bot.httpx.Request("POST", url)
+        resp = bot.httpx.Response(
+            status, json={"error": "boom"}, request=req
+        )
+        return bot.httpx.HTTPStatusError("error", request=req, response=resp)
+
+    # --- fail_refund client --------------------------------------
+
+    async def test_fail_refund_posts_expected_body(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value=self._refund()),
+            ) as send:
+                result = await client.fail_refund(1841, 1)
+            self.assertEqual(result, self._refund())
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(
+                request.url.path.endswith("/orders/1841/fail-refund")
+            )
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(json.loads(request.content), {"telegram_id": 1})
+        finally:
+            await client._client.aclose()
+
+    async def test_fail_refund_404_returns_none(self):
+        # The endpoint is not live yet — the caller tells the user
+        # honestly and keeps watching, never an exception.
+        client = bot.PaxyoClient()
+        try:
+            err = self._http_error(
+                404, "https://paxyo.et/api/bot/orders/1841/fail-refund"
+            )
+            with mock.patch.object(client, "_send", side_effect=err):
+                self.assertIsNone(await client.fail_refund(1841, 1))
+        finally:
+            await client._client.aclose()
+
+    async def test_fail_refund_409_raises(self):
+        # The live provider word is NOT failed (the order may still
+        # complete): the caller must decide, so the error raises.
+        client = bot.PaxyoClient()
+        try:
+            err = self._http_error(
+                409, "https://paxyo.et/api/bot/orders/1841/fail-refund"
+            )
+            with mock.patch.object(client, "_send", side_effect=err):
+                with self.assertRaises(bot.httpx.HTTPStatusError):
+                    await client.fail_refund(1841, 1)
+        finally:
+            await client._client.aclose()
+
+    # --- watch: failed GOP order -> SMM replacement ---------------
+
+    async def test_failed_gop_order_rescued_on_smm(self):
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[
+                self._gop_views(),
+                self._smm_views(),
+                self._gop_views(7001, "3 minutes", 20.0),
+            ],
+            status_by_order={"1841": "failed"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        # One message: the failed-rescue message, not a silent drop.
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("#1842", text)
+        self.assertIn("failed", text)
+        self.assertIn("refunded", text)
+        self.assertIn("10.00", text)  # the refunded order
+        self.assertIn("5.00", text)  # the new order — a different price
+        self.assertIn("moved", text)
+        self.assertNotIn("cancelled", text)
+        # The refund was called once, for this order and user.
+        self.assertEqual(fake.fail_refund_calls, [("1841", 1)])
+        # The replacement went to the OTHER provider (SMM 874, the
+        # next-fastest TikTok views service) — no GOP order.
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(
+            fake.smm_orders_created,
+            [(874, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        # The old entry is gone; the replacement is watched with
+        # the failed service recorded by combined id.
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+        entry = bot.WATCHED_ORDERS["1842"]
+        self.assertEqual(entry["rescue_count"], 1)
+        self.assertEqual(entry["failed_services"], ["gop:7000"])
+        self.assertEqual(entry["service"]["combined_id"], "smm:874")
+
+    # --- watch: failed SMM order -> GOP replacement ---------------
+
+    async def test_failed_smm_order_rescued_on_gop(self):
+        self._watch("1841", self._smm_views())
+        fake = FakePaxyo(
+            services=[
+                self._smm_views(),
+                self._gop_views(7001, "3 minutes", 20.0),
+                self._gop_views(7002, "1 minute", 10.0),
+            ],
+            status_by_order={"1841": "failed"},
+            fail_refund_result=self._refund(refunded=5.0),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("failed", text)
+        self.assertIn("5.00", text)  # the refunded SMM order
+        self.assertEqual(fake.fail_refund_calls, [("1841", 1)])
+        # The replacement is the fastest remaining GOP service
+        # (7002 at 1 minute), not the SMM service that failed.
+        self.assertEqual(fake.smm_orders_created, [])
+        self.assertEqual(
+            fake.orders_created,
+            [(7002, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        entry = bot.WATCHED_ORDERS["1842"]
+        self.assertEqual(entry["failed_services"], ["smm:874"])
+
+    # --- watch: stalled GOP order -> SMM replacement (stall path) --
+
+    async def test_stall_rescue_cross_provider_gop_to_smm(self):
+        # The stall path itself must also cross providers: a stuck
+        # GOP order is cancelled + refunded and re-placed on the
+        # next-fastest service even when that one is SMM.
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[
+                self._gop_views(),
+                self._smm_views(),
+                self._gop_views(7001, "3 minutes", 20.0),
+            ],
+            status_by_order={"1841": "pending"},
+            cancel_refund_result={
+                "success": True, "ok": True, "order_id": 1841,
+                "refunded_etb": 10.0, "provider_status": "canceled",
+                "duplicate": False,
+            },
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("cancelled", app.bot.sent[0][1])
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(
+            fake.smm_orders_created,
+            [(874, "https://tiktok.com/@x/video/1", 1000)],
+        )
+
+    # --- watch: endpoint not live yet ------------------------------
+
+    async def test_failed_order_endpoint_not_live_tells_user_once(self):
+        import time
+
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[self._gop_views(), self._smm_views()],
+            status_by_order={"1841": "failed"},
+            # fail_refund_result=None (default): the endpoint is
+            # not live yet, so the real client returns None.
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        t0 = time.time()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app, now=t0)
+            # Same cycle again inside the hour: throttled, no
+            # second call and no second message.
+            await bot.run_delivery_watch_cycle(app, now=t0 + 60)
+            # An hour later the retry runs — still not live, but
+            # the user is NOT told twice.
+            await bot.run_delivery_watch_cycle(app, now=t0 + 3601)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("isn't switched on yet", app.bot.sent[0][1])
+        self.assertIn("#1841", app.bot.sent[0][1])
+        self.assertEqual(len(fake.fail_refund_calls), 2)
+        # The order stays watched (a later install can still
+        # refund + rescue it) and nothing was placed.
+        self.assertIn("1841", bot.WATCHED_ORDERS)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.smm_orders_created, [])
+
+    # --- watch: provider disagrees (409) ---------------------------
+
+    async def test_failed_order_provider_disagrees_keeps_watching(self):
+        import time
+
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[self._gop_views(), self._smm_views()],
+            status_by_order={"1841": "failed"},
+            fail_refund_error=409,
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        t0 = time.time()
+        with mock.patch("bot.paxyo", fake):
+            # First attempt: 409, no message, keep watching.
+            await bot.run_delivery_watch_cycle(app, now=t0)
+            self.assertEqual(app.bot.sent, [])
+            self.assertEqual(len(fake.fail_refund_calls), 1)
+            self.assertIn("1841", bot.WATCHED_ORDERS)
+            # Inside the hour: throttled, no second call.
+            await bot.run_delivery_watch_cycle(app, now=t0 + 60)
+            self.assertEqual(len(fake.fail_refund_calls), 1)
+            # An hour later: retried, second 409 -> the user is
+            # told once that the refund could not be confirmed.
+            await bot.run_delivery_watch_cycle(app, now=t0 + 3601)
+            self.assertEqual(len(app.bot.sent), 1)
+            self.assertIn("could not confirm", app.bot.sent[0][1])
+            self.assertEqual(len(fake.fail_refund_calls), 2)
+            # Another hour later: retried again, but the user is
+            # NOT told twice — and the order stays watched, so a
+            # late completion still gets its delivery message.
+            await bot.run_delivery_watch_cycle(app, now=t0 + 7202)
+            self.assertEqual(len(app.bot.sent), 1)
+            self.assertEqual(len(fake.fail_refund_calls), 3)
+            self.assertIn("1841", bot.WATCHED_ORDERS)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.smm_orders_created, [])
+
+    # --- watch: refunded, no replacement ---------------------------
+
+    async def test_failed_order_no_next_service_refunds_only(self):
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[self._gop_views()],
+            status_by_order={"1841": "failed"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("failed", text)
+        self.assertIn("10.00", text)
+        self.assertIn("No replacement order was placed", text)
+        self.assertEqual(fake.fail_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.smm_orders_created, [])
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+
+    async def test_failed_order_at_rescue_cap_refunds_only(self):
+        # The cap limits RE-PLACEMENT attempts, never the refund:
+        # a chain that already rescued twice still gets its money
+        # back when the third order fails.
+        self._watch("1841", self._gop_views(), rescue_count=2)
+        fake = FakePaxyo(
+            services=[
+                self._gop_views(),
+                self._smm_views(),
+                self._gop_views(7001, "3 minutes", 20.0),
+            ],
+            status_by_order={"1841": "failed"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("No replacement order was placed", app.bot.sent[0][1])
+        self.assertEqual(fake.fail_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.smm_orders_created, [])
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+
+    # --- watch: cancelled / refunded still drop silently -----------
+
+    async def test_cancelled_and_refunded_still_drop_silently(self):
+        self._watch("1841", self._gop_views())
+        self._watch("1842", self._gop_views())
+        fake = FakePaxyo(
+            services=[self._gop_views(), self._smm_views()],
+            status_by_order={"1841": "cancelled", "1842": "refunded"},
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.fail_refund_calls, [])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertEqual(bot.WATCHED_ORDERS, {})
 
 
 class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
@@ -22283,7 +22742,7 @@ class TestPerUserPersonality(_SmartLoopBase):
             "usual_platform": "tiktok",
             "usual_metric": "views",
             "usual_quantity": 1000,
-            "usual_service_id": 2001,
+            "usual_service_id": "gop:2001",
         })
         # ...but one placement is a one-off, not a pattern yet.
         self.assertFalse(bot._usual_is_established(1))
@@ -22306,7 +22765,7 @@ class TestPerUserPersonality(_SmartLoopBase):
             "usual_platform": "tiktok",
             "usual_metric": "views",
             "usual_quantity": 1000,
-            "usual_service_id": 2001,
+            "usual_service_id": "gop:2001",
         })
         self.assertIn("Order placed!", query.edited[0])
 
@@ -22324,7 +22783,7 @@ class TestPerUserPersonality(_SmartLoopBase):
         # one placement of it is not a usual yet.
         self.assertEqual(bot.USER_TRAITS[1]["usual_platform"], "instagram")
         self.assertEqual(bot.USER_TRAITS[1]["usual_metric"], "followers")
-        self.assertEqual(bot.USER_TRAITS[1]["usual_service_id"], 1001)
+        self.assertEqual(bot.USER_TRAITS[1]["usual_service_id"], "gop:1001")
         self.assertFalse(bot._usual_is_established(1))
         self.assertEqual(views_fake.traits_saved, [])
         self.assertEqual(ig_fake.traits_saved, [])
@@ -23240,7 +23699,7 @@ class TestFridayPatterns(_SmartLoopBase):
         ]
         patterns = bot.detect_weekly_patterns(orders)
         self.assertEqual(len(patterns), 1)
-        self.assertEqual(patterns[0]["service_id"], 1001)
+        self.assertEqual(patterns[0]["service_id"], "gop:1001")
         self.assertEqual(patterns[0]["quantity"], 1000)
         self.assertEqual(patterns[0]["weekday"], 4)  # Friday
         # The newest matching order's link is the one offered.
@@ -23323,8 +23782,8 @@ class TestFridayPatterns(_SmartLoopBase):
         self.assertIn(f"on {self._today_name()}s", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
         buttons = msg.markups[0].inline_keyboard[0]
-        self.assertEqual(buttons[0].callback_data, "friday:1001:1000")
-        self.assertEqual(buttons[1].callback_data, "fridayno:1001:1000")
+        self.assertEqual(buttons[0].callback_data, "friday:gop:1001:1000")
+        self.assertEqual(buttons[1].callback_data, "fridayno:gop:1001:1000")
 
     async def test_offer_once_per_week(self):
         msg, _ = await self._turns(
@@ -23437,7 +23896,7 @@ class TestFridayPatterns(_SmartLoopBase):
                 "quantity": 1000,
             },
         )
-        self.assertEqual(bot.USUAL_SERVICE[1], 1001)
+        self.assertEqual(bot.USUAL_SERVICE[1], "gop:1001")
         # Nothing placed, no Confirm card yet: the link comes first.
         self.assertEqual(fake.orders_created, [])
         self.assertEqual(bot.PENDING, {})
@@ -23474,7 +23933,7 @@ class TestFridayPatterns(_SmartLoopBase):
             [("Hello", intent_of("greeting"))], paxyo=fake
         )
         self.assertIn("usually order", msg.text_sent[0])
-        query = FakeQuery("friday:1001:1000")
+        query = FakeQuery("friday:gop:1001:1000")
         update = FakeCallbackUpdate(query)
         with mock.patch("bot.paxyo", fake):
             await bot.on_callback(update, None)
@@ -23482,9 +23941,9 @@ class TestFridayPatterns(_SmartLoopBase):
         self.assertIn("Send me your link", query.edited[0])
         self.assertEqual(
             query.edited_markups[0].inline_keyboard[0][0].callback_data,
-            "fridaylink:1001:1000",
+            "fridaylink:gop:1001:1000",
         )
-        query2 = FakeQuery("fridaylink:1001:1000")
+        query2 = FakeQuery("fridaylink:gop:1001:1000")
         update2 = FakeCallbackUpdate(query2)
         with mock.patch("bot.paxyo", fake):
             await bot.on_callback(update2, None)
@@ -25027,7 +25486,8 @@ class TestPriceWatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake.price_snapshot_saved), 1)
         self.assertEqual(
             fake.price_snapshot_saved[0],
-            {"5535": 1.85, "7675": 1.68, "5379": 5.88, "9999": 10.00},
+            {"gop:5535": 1.85, "gop:7675": 1.68, "gop:5379": 5.88,
+             "gop:9999": 10.00},
         )
         self.assertEqual(bot._PRICE_WATCH_LAST_REFRESH, 1)
 
@@ -25045,7 +25505,7 @@ class TestPriceWatch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("$0.0044 → $0.0050", text)
         self.assertIn("1.85 → 2.10 ETB", text)
         self.assertIn("margin +0.13 ETB/1000", text)
-        self.assertEqual(fake.price_snapshot_saved[0]["5535"], 2.10)
+        self.assertEqual(fake.price_snapshot_saved[0]["gop:5535"], 2.10)
 
     async def test_price_fall_alerts_with_negative_margin(self):
         fake = self._fake(
@@ -25129,13 +25589,13 @@ class TestPriceWatch(unittest.IsolatedAsyncioTestCase):
         )
         app = await self._run(fake)
         self.assertEqual(app.bot.sent, [])
-        self.assertEqual(fake.price_snapshot_saved[0]["5379"], 9.99)
+        self.assertEqual(fake.price_snapshot_saved[0]["gop:5379"], 9.99)
 
     async def test_new_service_joins_silently(self):
         fake = self._fake(snapshot={"5535": 1.85, "7675": 1.68})
         app = await self._run(fake)
         self.assertEqual(app.bot.sent, [])
-        self.assertIn("9999", fake.price_snapshot_saved[0])
+        self.assertIn("gop:9999", fake.price_snapshot_saved[0])
 
     async def test_wired_into_scheduler_cycle(self):
         fake = self._fake(snapshot={})
@@ -26021,7 +26481,7 @@ class TestBrowseServices(_SmartLoopBase):
             b.callback_data
             for row in markup.inline_keyboard for b in row
         ]
-        self.assertIn("browse:1100", callbacks)
+        self.assertIn("browse:gop:1100", callbacks)
         self.assertIn("browsepage:1", callbacks)
         self.assertEqual(len(bot.BROWSE_LISTS[1]["services"]), 12)
 
@@ -26037,7 +26497,7 @@ class TestBrowseServices(_SmartLoopBase):
             b.callback_data
             for row in query.edited_markups[0].inline_keyboard for b in row
         ]
-        self.assertIn("browse:1110", callbacks)
+        self.assertIn("browse:gop:1110", callbacks)
         self.assertNotIn("browsepage:2", callbacks)
 
     async def test_browse_without_platform_asks_which(self):
@@ -26060,7 +26520,9 @@ class TestBrowseServices(_SmartLoopBase):
             ("show me TikTok followers services", intent_of("unclear")),
         ], paxyo=fake)
         query = await self._run_callback("browse:1100", paxyo=fake)
-        self.assertEqual(bot.NUDGE_SERVICE[1], 1100)
+        # A bare-id tap (an older button) still works — the pin is
+        # the combined id, GodOfPanel first, exactly like before.
+        self.assertEqual(bot.NUDGE_SERVICE[1], "gop:1100")
         self.assertIn("link", query.edited[0].lower())
         # Link + quantity in one message: the Confirm card is for
         # the tapped service (1100), not a fresh fastest pick.
@@ -26832,6 +27294,526 @@ class TestDisputesFiling(_SmartLoopBase):
         self.assertIn("views never arrived", report["message"])
         self.assertIn("sent this to our support team", msg.text_sent[1].lower())
         self.assertIn("#1841", msg.text_sent[1])
+
+
+class TestSecondProvider(_SmartLoopBase):
+    """Second provider — SMM Social Media (15 Nov 2026, William
+    confirmed SMM x400, GodOfPanel stays x420): the bot picks from
+    the merged catalogue (fastest across BOTH providers), prices
+    SMM at x400 and GOP at x420, routes orders/status/cancel/
+    rescue/delayed placement to the right provider by combined id
+    ("gop:<id>" / "smm:<id>"), and never shows a provider name or
+    a buy price to users. A bare id alone never identifies a
+    service — 2,790 bare ids collide between the providers."""
+
+    def _gop(self, sid=1665, minutes="1 minute", price=18.90,
+             name="TikTok Video Views | Fast"):
+        return {
+            "service": sid, "provider": "gop",
+            "combined_id": f"gop:{sid}", "provider_service_id": sid,
+            "name": name, "category": "TikTok Video Views",
+            "type": "Default", "rate_etb_per_1000": price,
+            "min": 10, "max": 1000000, "average_time": minutes,
+            "active": True,
+        }
+
+    def _smm(self, sid=874, minutes="2 minutes", price=40.00,
+             name="TikTok Views [INSTANT]"):
+        return {
+            "service": sid, "provider": "smm",
+            "combined_id": f"smm:{sid}", "provider_service_id": sid,
+            "name": name, "category": "Tiktok Views",
+            "type": "Default", "rate_etb_per_1000": price,
+            "min": 10, "max": 1000000, "average_time": minutes,
+            "active": True,
+        }
+
+    def test_provider_identity_helpers(self):
+        self.assertEqual(bot.service_provider({}), "gop")
+        self.assertEqual(bot.service_provider(None), "gop")
+        self.assertEqual(
+            bot.service_provider({"provider": "smm"}), "smm"
+        )
+        # The bundled catalogue's long-form spelling reads the same.
+        self.assertEqual(
+            bot.service_provider({"provider": "smmsocialmedia"}), "smm"
+        )
+        self.assertEqual(
+            bot.service_provider({"combined_id": "smm:7501"}), "smm"
+        )
+        self.assertEqual(
+            bot.service_provider({"combined_id": "gop:1665"}), "gop"
+        )
+        self.assertEqual(
+            bot.service_combined_id({"service": 1665}), "gop:1665"
+        )
+        self.assertEqual(
+            bot.service_combined_id({
+                "service": 7501, "provider": "smm",
+            }),
+            "smm:7501",
+        )
+        self.assertEqual(
+            bot.service_combined_id({"combined_id": "smm:7501"}),
+            "smm:7501",
+        )
+
+    def test_normalise_combined_entry_prices(self):
+        # Precomputed price wins (the bundled file's shape).
+        entry = bot.normalise_combined_entry({
+            "combined_id": "smm:7013", "provider": "smmsocialmedia",
+            "provider_service_id": 7013, "service": 7013,
+            "rate_usd": 0.000785, "sell_multiplier_etb": 400,
+            "price_etb_per_1000": 0.31, "average_time": "14 minutes",
+        })
+        self.assertEqual(entry["rate_etb_per_1000"], 0.31)
+        self.assertEqual(entry["provider"], "smm")
+        # No precomputed price: rate_usd x the provider multiplier.
+        entry = bot.normalise_combined_entry({
+            "provider": "smmsocialmedia", "service": 7013,
+            "rate_usd": 0.000785,
+        })
+        self.assertEqual(entry["rate_etb_per_1000"], 0.31)
+        entry = bot.normalise_combined_entry({
+            "provider": "godofpanel", "service": 1665,
+            "rate_usd": 0.045,
+        })
+        self.assertEqual(entry["rate_etb_per_1000"], 18.90)
+        # Malformed rows are dropped, never crash the load.
+        self.assertIsNone(bot.normalise_combined_entry({}))
+        self.assertIsNone(bot.normalise_combined_entry({"service": 0}))
+        self.assertIsNone(bot.normalise_combined_entry({"service": "abc"}))
+        self.assertIsNone(bot.normalise_combined_entry("smm:7013"))
+
+    def test_load_combined_catalogue_real_file(self):
+        entries = bot.load_combined_catalogue()
+        self.assertEqual(len(entries), 10476)
+        smm = [e for e in entries if e["provider"] == "smm"]
+        gop = [e for e in entries if e["provider"] == "gop"]
+        self.assertEqual(len(smm), 3301)
+        self.assertEqual(len(gop), 7175)
+        by_id = {e["combined_id"]: e for e in entries}
+        self.assertEqual(by_id["smm:7013"]["rate_etb_per_1000"], 0.31)
+        self.assertEqual(by_id["smm:7013"]["average_time"], "14 minutes")
+        self.assertEqual(by_id["smm:7013"]["provider"], "smm")
+        self.assertEqual(by_id["gop:1665"]["provider"], "gop")
+        self.assertEqual(len(by_id), 10476)  # no duplicate combined ids
+
+    def test_load_combined_catalogue_missing_file(self):
+        self.assertEqual(
+            bot.load_combined_catalogue("/nonexistent/no-such-file.json"),
+            [],
+        )
+
+    def test_merge_service_catalogues(self):
+        api = [self._gop(sid=1665, price=18.90)]
+        combined = [
+            # Stale snapshot GOP row: the live API wins.
+            {"combined_id": "gop:1665", "provider": "godofpanel",
+             "provider_service_id": 1665, "service": 1665,
+             "name": "TikTok Video Views | Old", "rate_usd": 0.002,
+             "sell_multiplier_etb": 420, "price_etb_per_1000": 1.00,
+             "average_time": "1 minute"},
+            self._smm(sid=7013, price=0.31),
+            # A duplicate SMM row is dropped.
+            self._smm(sid=7013, price=0.31),
+        ]
+        merged = bot.merge_service_catalogues(api, combined)
+        self.assertEqual(len(merged), 2)
+        by_id = {s["combined_id"]: s for s in merged}
+        self.assertEqual(by_id["gop:1665"]["rate_etb_per_1000"], 18.90)
+        self.assertEqual(by_id["smm:7013"]["rate_etb_per_1000"], 0.31)
+        self.assertEqual(by_id["smm:7013"]["provider"], "smm")
+
+    def test_pick_fastest_across_providers(self):
+        services = [
+            self._gop(sid=1665, minutes="5 minutes"),
+            self._smm(sid=874, minutes="1 minute"),
+        ]
+        picks = bot.pick_services(
+            services, platform="tiktok", service_hint="tiktok views",
+        )
+        self.assertEqual(picks[0]["combined_id"], "smm:874")
+        # And the other way round: the faster GOP service wins.
+        services = [
+            self._gop(sid=1665, minutes="1 minute"),
+            self._smm(sid=874, minutes="5 minutes"),
+        ]
+        picks = bot.pick_services(
+            services, platform="tiktok", service_hint="tiktok views",
+        )
+        self.assertEqual(picks[0]["combined_id"], "gop:1665")
+
+    def test_cheapest_can_be_smm(self):
+        services = [
+            self._gop(sid=1665, minutes="1 minute", price=18.90),
+            self._smm(sid=874, minutes="30 minutes", price=1.05),
+        ]
+        cheapest = bot.cheapest_service(
+            services, platform="tiktok", service_hint="tiktok views",
+        )
+        self.assertEqual(cheapest["combined_id"], "smm:874")
+        self.assertEqual(cheapest["rate_etb_per_1000"], 1.05)
+
+    async def test_create_order_for_service_routes_by_provider(self):
+        fake = FakePaxyo()
+        gop = self._gop()
+        smm = self._smm()
+        await bot.create_order_for_service(
+            fake, 1, gop, "https://tiktok.com/@x/video/1", 100, "k1",
+        )
+        self.assertEqual(len(fake.orders_created), 1)
+        self.assertEqual(fake.smm_orders_created, [])
+        await bot.create_order_for_service(
+            fake, 1, smm, "https://tiktok.com/@x/video/1", 100, "k2",
+        )
+        self.assertEqual(len(fake.orders_created), 1)
+        self.assertEqual(len(fake.smm_orders_created), 1)
+        self.assertEqual(fake.smm_orders_created[0][0], 874)
+
+    async def test_client_create_order_smm_request_shape(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"order": {"id": 1901, "status": "pending"}}
+                ),
+            ) as send:
+                result = await client.create_order_smm(
+                    1, 7013, "https://instagram.com/p/x", 100, "key-1",
+                )
+            self.assertEqual(result["order"]["id"], 1901)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(request.url.path.endswith("/orders/smm"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            body = json.loads(request.content)
+            self.assertEqual(body, {
+                "telegram_id": 1, "service_id": 7013,
+                "link": "https://instagram.com/p/x", "quantity": 100,
+                "idempotency_key": "key-1",
+            })
+            # The bot never sends a total — the server computes it
+            # from the live SMM rate (x400) and never trusts a
+            # client total.
+            self.assertNotIn("total", body)
+        finally:
+            await client._client.aclose()
+
+    async def test_client_order_status_smm_endpoint_and_404(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"order": {"id": 1901, "status": "pending"}}
+                ),
+            ) as send:
+                result = await client.order_status(
+                    1901, 1, provider="smm",
+                )
+            self.assertEqual(result["order"]["id"], 1901)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "GET")
+            self.assertTrue(
+                request.url.path.endswith("/orders/1901/smm-status")
+            )
+            self.assertIn("telegram_id=1", str(request.url))
+            req = bot.httpx.Request(
+                "GET", "https://paxyo.et/api/bot/orders/1901/smm-status"
+            )
+            resp = bot.httpx.Response(404, request=req)
+            err = bot.httpx.HTTPStatusError(
+                "not found", request=req, response=resp
+            )
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertIsNone(
+                    await client.order_status(
+                        1901, 1, provider="smm",
+                    )
+                )
+        finally:
+            await client._client.aclose()
+
+    async def test_client_order_status_generic_unchanged(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"order": {"id": 1841, "status": "pending"}}
+                ),
+            ) as send:
+                await client.order_status(1841, 1)
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "GET")
+            self.assertTrue(request.url.path.endswith("/orders/1841"))
+            self.assertNotIn("smm-status", str(request.url))
+            self.assertIn("telegram_id=1", str(request.url))
+        finally:
+            await client._client.aclose()
+
+    async def test_client_create_delayed_order_sends_provider(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={"ok": True, "id": 101}),
+            ) as send:
+                await client.create_delayed_order(
+                    1, 7013, "https://instagram.com/p/x", 100, 0.31,
+                    "2026-11-15 20:00:00", "delay-1",
+                    provider="smm",
+                )
+            body = json.loads(send.call_args.args[0].content)
+            self.assertEqual(body["provider"], "smm")
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(return_value={"ok": True, "id": 102}),
+            ) as send:
+                await client.create_delayed_order(
+                    1, 1665, "https://tiktok.com/@x/video/1", 100, 1.89,
+                    "2026-11-15 20:00:00", "delay-2",
+                )
+            body = json.loads(send.call_args.args[0].content)
+            self.assertNotIn("provider", body)
+        finally:
+            await client._client.aclose()
+
+    async def test_client_services_merges_smm_from_bundle(self):
+        client = bot.PaxyoClient()
+        try:
+            api_row = {
+                "service": 1665, "name": "TikTok Video Views | Fast",
+                "rate_etb_per_1000": 18.90, "average_time": "1 minute",
+            }
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"services": [api_row]}
+                ),
+            ):
+                services = await client.services()
+            self.assertEqual(client.services_refresh_count, 1)
+            by_id = {s["combined_id"]: s for s in services}
+            # The live API row, tagged GodOfPanel.
+            self.assertEqual(by_id["gop:1665"]["rate_etb_per_1000"], 18.90)
+            # SMM entries from the bundled combined catalogue.
+            self.assertEqual(len(by_id), 1 + 3301)
+            self.assertEqual(by_id["smm:7013"]["rate_etb_per_1000"], 0.31)
+            self.assertEqual(by_id["smm:7013"]["average_time"], "14 minutes")
+            # The bundled file's GodOfPanel rows are never used —
+            # the API is the live GOP source.
+            self.assertNotIn("gop:1861", by_id)
+        finally:
+            await client._client.aclose()
+
+    def test_find_service_by_combined_id(self):
+        gop = self._gop(sid=5379, name="TikTok Likes | Cheap")
+        smm = self._smm(sid=5379, name="TikTok Likes [SMM]")
+        services = [gop, smm]
+        self.assertIs(bot.find_service_by_id(services, "smm:5379"), smm)
+        self.assertIs(bot.find_service_by_id(services, "gop:5379"), gop)
+        # A bare id matches the first service of that number —
+        # GodOfPanel first, exactly like before the wiring.
+        self.assertIs(bot.find_service_by_id(services, 5379), gop)
+        self.assertIsNone(bot.find_service_by_id(services, "smm:9999"))
+        self.assertIsNone(bot.find_service_by_id(services, "gop:9999"))
+
+    def test_resolve_named_service_blacklist_is_gop_only(self):
+        gop = self._gop(sid=5379, name="TikTok Likes | Cheap")
+        smm = self._smm(sid=5379, name="TikTok Likes [SMM]")
+        services = [gop, smm]
+        service, error = bot.resolve_named_service(services, "smm:5379")
+        self.assertIs(service, smm)
+        self.assertIsNone(error)
+        service, error = bot.resolve_named_service(services, "gop:5379")
+        self.assertIsNone(service)
+        self.assertEqual(error, "blacklisted")
+        service, error = bot.resolve_named_service(services, 5379)
+        self.assertIsNone(service)
+        self.assertEqual(error, "blacklisted")
+        service, error = bot.resolve_named_service(services, "smm:9999")
+        self.assertIsNone(service)
+        self.assertEqual(error, "not_found")
+
+    def test_pick_skips_blacklisted_gop_keeps_smm(self):
+        gop = self._gop(
+            sid=5379, minutes="1 minute", name="TikTok Likes | Cheap",
+        )
+        gop["category"] = "TikTok Likes"
+        smm = self._smm(
+            sid=5379, minutes="2 minutes", name="TikTok Likes [SMM]",
+        )
+        smm["category"] = "TikTok Likes"
+        picks = bot.pick_services(
+            [gop, smm], platform="tiktok", service_hint="tiktok likes",
+        )
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(picks[0]["combined_id"], "smm:5379")
+
+    def test_price_watch_combined_keys_and_smm_math(self):
+        services = [
+            self._gop(sid=5535, minutes="1 minute", price=1.85,
+                      name="TikTok Video Views | Cheapest"),
+            self._smm(sid=7501, minutes="1 minute", price=0.60,
+                      name="Youtube Views [SMM]"),
+        ]
+        snapshot = {"gop:5535": 1.85, "smm:7501": 0.50}
+        changes = bot._price_watch_changes(snapshot, services)
+        self.assertEqual(len(changes), 1)
+        change = changes[0]
+        self.assertEqual(change["combined_id"], "smm:7501")
+        self.assertEqual(change["provider"], "smm")
+        self.assertEqual(change["old_price"], 0.50)
+        self.assertEqual(change["new_price"], 0.60)
+        text = bot._price_watch_alert_text(changes)
+        self.assertIn("#smm:7501", text)
+        # SMM provider rate is price/400, margin is price x 200/400.
+        self.assertIn("$0.0013 → $0.0015", text)
+        self.assertIn("0.50 → 0.60 ETB", text)
+        self.assertIn("margin +0.05 ETB/1000", text)
+
+    def test_price_watch_old_bare_snapshot_still_compares_gop(self):
+        services = [self._gop(sid=5535, price=2.10)]
+        # An old snapshot with bare-int keys reads as GodOfPanel.
+        changes = bot._price_watch_changes({"5535": 1.85}, services)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["combined_id"], "gop:5535")
+        # A new SMM service joins silently, never as a change.
+        services = [self._smm(sid=7501, price=0.60)]
+        changes = bot._price_watch_changes({"gop:5535": 1.85}, services)
+        self.assertEqual(changes, [])
+
+    def test_delayed_record_fields_provider(self):
+        record = bot._delayed_record_fields({
+            "id": 5, "service_id": 7501, "provider": "smmsocialmedia",
+            "link": "https://youtube.com/watch?v=x", "quantity": 100,
+        })
+        self.assertEqual(record["provider"], "smm")
+        self.assertEqual(record["combined_id"], "smm:7501")
+        record = bot._delayed_record_fields({
+            "id": 6, "service_id": 1665,
+            "link": "https://tiktok.com/@x/video/1", "quantity": 100,
+        })
+        self.assertEqual(record["provider"], "gop")
+        self.assertEqual(record["combined_id"], "gop:1665")
+
+    async def test_delayed_store_create_sends_provider(self):
+        fake = FakePaxyo()
+        draft = {
+            "service": self._smm(sid=7501, price=0.31),
+            "link": "https://youtube.com/watch?v=x", "quantity": 100,
+            "total": 0.31, "run_at": "2026-11-15 20:00:00",
+            "idempotency_key": "delay-test-1",
+        }
+        with mock.patch("bot.paxyo", fake):
+            record, error = await bot.delayed_store_create(draft, 1)
+        self.assertIsNone(error)
+        self.assertEqual(fake.delayed_created[0]["provider"], "smm")
+        self.assertEqual(record["combined_id"], "smm:7501")
+        self.assertEqual(record["provider"], "smm")
+
+    async def test_run_one_delayed_places_smm_service(self):
+        fake = FakePaxyo(balance=1000.0)
+        smm = self._smm(
+            sid=7501, minutes="30 minutes", price=0.31,
+            name="Youtube Views [SMM]",
+        )
+        smm["category"] = "Youtube Views"
+        gop = self._gop(
+            sid=7501, minutes="60 minutes", price=5.00,
+            name="YouTube Views | GOP",
+        )
+        gop["category"] = "YouTube Views"
+        by_id = {"smm:7501": smm, "gop:7501": gop, 7501: gop}
+        item = {
+            "id": 101, "telegram_id": 1, "service_id": 7501,
+            "provider": "smmsocialmedia", "combined_id": "smm:7501",
+            "link": "https://youtube.com/watch?v=x", "quantity": 100,
+            "total": 0.31, "run_at": "2026-11-15 19:00:00",
+            "status": "scheduled", "idempotency_key": "delay-1",
+        }
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_one_delayed(app, item, by_id)
+        self.assertEqual(len(fake.smm_orders_created), 1)
+        self.assertEqual(fake.smm_orders_created[0][0], 7501)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(len(app.bot.sent), 1)
+
+    def test_next_rescue_service_cross_provider(self):
+        stalled = self._gop(sid=1665, minutes="1 minute")
+        services = [
+            stalled,
+            self._smm(sid=874, minutes="2 minutes"),
+            self._gop(sid=1861, minutes="3 minutes", price=1.51),
+        ]
+        nxt = bot._next_rescue_service(services, stalled, ["gop:1665"])
+        self.assertIsNotNone(nxt)
+        self.assertEqual(nxt["combined_id"], "smm:874")
+        nxt = bot._next_rescue_service(
+            services, stalled, ["gop:1665", "smm:874"],
+        )
+        self.assertIsNotNone(nxt)
+        self.assertEqual(nxt["combined_id"], "gop:1861")
+        # An old bare-id failure entry only excludes the GodOfPanel
+        # service — never the other provider's same number.
+        nxt = bot._next_rescue_service(services, stalled, ["1665"])
+        self.assertIsNotNone(nxt)
+        self.assertEqual(nxt["combined_id"], "smm:874")
+
+    def test_browse_keyboard_uses_combined_callback(self):
+        entry = {
+            "services": [self._smm(sid=874), self._gop(sid=1665)],
+            "page": 0, "label": "TikTok Views",
+        }
+        markup = bot._browse_keyboard(entry, 0)
+        callbacks = [
+            b.callback_data
+            for row in markup.inline_keyboard for b in row
+        ]
+        self.assertIn("browse:smm:874", callbacks)
+        self.assertIn("browse:gop:1665", callbacks)
+
+    def _callback(self, data, paxyo=None, user=None):
+        query = FakeQuery(data, message_text="Please confirm:")
+        update = FakeCallbackUpdate(query, user=user or FakeUser())
+        return query, update
+
+    async def _run_callback(self, data, paxyo=None, user=None):
+        query, update = self._callback(data, paxyo=paxyo, user=user)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def test_reorder_prefers_combined_id(self):
+        gop = self._gop(
+            sid=7501, minutes="60 minutes", price=5.00,
+            name="YouTube Views | GOP",
+        )
+        gop["category"] = "YouTube Views"
+        smm = self._smm(
+            sid=7501, minutes="30 minutes", price=0.31,
+            name="Youtube Views [SMM]",
+        )
+        smm["category"] = "Youtube Views"
+        order = {
+            "id": 1841, "service_id": 7501, "combined_id": "smm:7501",
+            "service_name": "Youtube Views [SMM]",
+            "link": "https://youtube.com/watch?v=x", "quantity": 100,
+            "charge": 0.31, "status": "pending",
+            "created_at": "2026-11-15T10:00:00Z",
+        }
+        fake = FakePaxyo(recent=[order], services=[gop, smm])
+        await self._run_callback("reorder:1841", paxyo=fake)
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["combined_id"], "smm:7501")
+        self.assertEqual(pending["service"]["service"], 7501)
 
 
 if __name__ == "__main__":

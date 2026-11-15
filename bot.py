@@ -2103,6 +2103,70 @@ TEXT = {
             "t.me/paxyo"
         ),
     },
+    # Failed-order rescue (second provider, 15 Nov 2026): the
+    # provider ended the order failed, so the bot refunds it and
+    # re-places it on the next-fastest service, across providers.
+    # Four messages, one per outcome — each states exactly what
+    # happened to the money, never promises a refund that did not
+    # happen. en + first-pass am, unreviewed.
+    "order_failed_rescued": {
+        "am": (
+            "⏳ Order #{old_order_id} ({old_service} ×{quantity}) "
+            "ስለተበላሸ {refunded} ETB ወደ balanceዎ መልሻለሁ። ወደ "
+            "ቀጣዩ service — {new_service} — አዛውሬዋለሁ፣ አዲስ order "
+            "#{new_order_id} ነው። አዲሱ order {new_total} ETB "
+            "ያስከፍላል (የተመለሰው order {refunded} ETB ነበር)።"
+        ),
+        "en": (
+            "⏳ Your order #{old_order_id} ({old_service} "
+            "×{quantity}) failed, so I refunded "
+            "{refunded} ETB to your balance. I've moved your order "
+            "to the next service — {new_service} — as order "
+            "#{new_order_id}. The new order costs {new_total} ETB "
+            "(the refunded order was {refunded} ETB)."
+        ),
+    },
+    "order_failed_refunded": {
+        "am": (
+            "Order #{order_id} ({service} ×{quantity}) ስለተበላሸ "
+            "{refunded} ETB ወደ balanceዎ መልሻለሁ። ምትክ order "
+            "አልተቀመጠም — በማንኛውም ጊዜ እንደገና ማዘዝ ይችላሉ።"
+        ),
+        "en": (
+            "Your order #{order_id} ({service} ×{quantity}) failed, "
+            "so I refunded {refunded} ETB to your "
+            "balance. No replacement order was placed — you can "
+            "order again any time."
+        ),
+    },
+    "order_failed_no_refund": {
+        "am": (
+            "Order #{order_id} ({service} ×{quantity}) ተበልሿል። "
+            "ራስ-ሰር refund ገና አልተቀመጠም፣ ስለዚህ ምንም አልተመለሰም — "
+            "እባክዎ support ያነጋግሩ: t.me/paxyo እና order #{order_id} "
+            "ይጥቀሱ።"
+        ),
+        "en": (
+            "Your order #{order_id} ({service} ×{quantity}) failed. "
+            "The automatic refund isn't switched "
+            "on yet, so nothing was refunded — please talk to "
+            "support: t.me/paxyo and mention order #{order_id}."
+        ),
+    },
+    "order_failed_unclear": {
+        "am": (
+            "Order #{order_id} ({service} ×{quantity}) የተበላሸ "
+            "ይመስላል፣ ግን refund ማረጋገጥ አልቻልኩም። እባክዎ support "
+            "ያነጋግሩ: t.me/paxyo እና order #{order_id} ይጥቀሱ — "
+            "አዲስ order አልተቀመጠም።"
+        ),
+        "en": (
+            "Your order #{order_id} ({service} ×{quantity}) shows "
+            "as failed, but I could not confirm the refund yet. "
+            "Please talk to support: t.me/paxyo and mention order "
+            "#{order_id} — no new order was placed."
+        ),
+    },
     # Abandoned-order nudge (feature 4, 15 Nov 2026): one nudge
     # with a Resume button for a half-built normal order draft
     # whose owner went quiet for ~30 minutes. The nudge only
@@ -3211,7 +3275,12 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
             sid = int(s.get("service", 0))
         except (TypeError, ValueError):
             continue
-        if sid in BLACKLISTED_SERVICES:
+        # The blacklist is a GOP list (second provider,
+        # 15 Nov 2026): a bare id only ever excludes a GOP
+        # service, never an SMM service that happens to share the
+        # number (no SMM service carries a blacklisted bare id
+        # today, and this keeps it true if one ever appears).
+        if sid in BLACKLISTED_SERVICES and service_provider(s) == "gop":
             continue
         category = str(s.get("category") or "").lower()
         name = str(s.get("name") or "").lower()
@@ -3708,7 +3777,18 @@ def _reactions_pool(candidates, emoji):
 
 def find_service_by_id(services, service_id):
     """The service with this ID, or None. No active/blacklist check —
-    the caller decides what a found-but-unusable service means."""
+    the caller decides what a found-but-unusable service means. A
+    combined id ("smm:7501" / "gop:1336", second provider, 15 Nov
+    2026) matches exactly; a bare id matches the first service with
+    that bare id, GOP first (the merged catalogue lists the
+    live API services before the SMM entries), exactly like before
+    the wiring — a bare id alone cannot tell the providers apart."""
+    if isinstance(service_id, str) and ":" in service_id:
+        wanted = service_id.strip()
+        for s in services or []:
+            if isinstance(s, dict) and service_combined_id(s) == wanted:
+                return s
+        return None
     try:
         wanted = int(service_id)
     except (TypeError, ValueError):
@@ -3728,8 +3808,25 @@ def resolve_named_service(services, service_id):
     Returns (service, error): error is None on success, otherwise one
     of "blacklisted", "not_found", "disabled". The blacklist is
     checked first, so a blacklisted ID is refused even if the service
-    exists and is active — a blacklisted service is never used.
+    exists and is active — a blacklisted service is never used. A
+    combined id ("smm:7501", second provider, 15 Nov 2026) names
+    its provider exactly; the blacklist is a GOP list, so it
+    only ever refuses a GOP service.
     """
+    if isinstance(service_id, str) and ":" in str(service_id):
+        combined = str(service_id).strip()
+        service = find_service_by_id(services, combined)
+        if service is None:
+            return None, "not_found"
+        if service_provider(service) == "gop":
+            try:
+                if int(service.get("service", 0)) in BLACKLISTED_SERVICES:
+                    return None, "blacklisted"
+            except (TypeError, ValueError):
+                pass
+        if not service.get("active", True):
+            return None, "disabled"
+        return service, None
     try:
         wanted = int(service_id)
     except (TypeError, ValueError):
@@ -3802,6 +3899,178 @@ def format_money(value) -> str:
     return f"{float(value):,.2f}"
 
 
+# ------------------------------------------------- second provider ----
+# SMM is the second provider, wired 15 Nov 2026 (William confirmed
+# SMM x400, GOP stays x420). The bot's catalogue is the MERGED list:
+# GOP services come live from the Paxyo API (GET /services) and SMM
+# services come from the bundled combined catalogue file (below). A
+# service's identity is its combined_id ("gop:<id>" / "smm:<id>") —
+# 2,790 bare ids collide between the two providers, so a bare id
+# alone never identifies a service. Provider names and buy prices
+# are NEVER shown to users; only the Paxyo selling price
+# (rate_etb_per_1000) ever reaches a message. The provider slugs
+# in this module are deliberately short ("gop" / "smm"): the full
+# provider names must never appear here (secrecy — TestSecrecy
+# asserts the first provider's name is absent from this file).
+
+GOP_SELL_MULTIPLIER_ETB = 420
+SMM_SELL_MULTIPLIER_ETB = 400
+SMM_INR_PER_USD = 94.263
+COMBINED_CATALOGUE_FILENAME = "combined-services-2026-11-15.with-times.json"
+
+
+def service_provider(service) -> str:
+    """The provider of a catalogue service dict: "gop" or "smm".
+    Missing/unknown reads as GOP, so every service built before
+    the second provider keeps its old meaning. The slugs are short
+    on purpose — the full provider names must never appear in this
+    module (secrecy: TestSecrecy asserts the first provider's name
+    is absent from this file) — and the combined id ("gop:<id>" /
+    "smm:<id>") already carries the same slugs. A provider field
+    starting with "smm" (the bundled catalogue's spelling) reads
+    as "smm"; anything else reads as "gop"."""
+    if not isinstance(service, dict):
+        return "gop"
+    provider = str(service.get("provider") or "").strip().lower()
+    if provider.startswith("smm"):
+        return "smm"
+    combined = str(service.get("combined_id") or "")
+    if combined.startswith("smm:"):
+        return "smm"
+    return "gop"
+
+
+def service_combined_id(service) -> str:
+    """The combined id of a catalogue service dict ("gop:<id>" /
+    "smm:<id>"). Built from the provider + bare id when the dict
+    carries no combined_id of its own."""
+    if not isinstance(service, dict):
+        return ""
+    combined = str(service.get("combined_id") or "").strip()
+    if combined:
+        return combined
+    try:
+        bare = int(service.get("provider_service_id", service.get("service")) or 0)
+    except (TypeError, ValueError):
+        bare = 0
+    provider = service_provider(service)
+    return f"{'smm' if provider == 'smm' else 'gop'}:{bare}"
+
+
+def normalise_combined_entry(entry):
+    """One row of the bundled combined catalogue -> the bot's service
+    shape. The file already carries price_etb_per_1000 (provider
+    rate x the provider's multiplier); when it is missing the price
+    is recomputed from rate_usd and the provider's multiplier, so a
+    future catalogue without precomputed prices still prices right.
+    Never raises on a malformed row — returns None instead."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        bare = int(entry.get("provider_service_id", entry.get("service")) or 0)
+    except (TypeError, ValueError):
+        return None
+    if bare <= 0:
+        return None
+    provider = service_provider(entry)
+    multiplier = entry.get("sell_multiplier_etb")
+    try:
+        multiplier = int(multiplier) if multiplier is not None else None
+    except (TypeError, ValueError):
+        multiplier = None
+    if multiplier is None or multiplier <= 0:
+        multiplier = (
+            SMM_SELL_MULTIPLIER_ETB
+            if provider == "smm"
+            else GOP_SELL_MULTIPLIER_ETB
+        )
+    price = entry.get("price_etb_per_1000", entry.get("rate_etb_per_1000"))
+    try:
+        price = float(price) if price is not None else None
+    except (TypeError, ValueError):
+        price = None
+    if price is None:
+        try:
+            price = round(float(entry.get("rate_usd") or 0) * multiplier, 2)
+        except (TypeError, ValueError):
+            price = 0.0
+    out = dict(entry)
+    out.update({
+        "service": bare,
+        "provider": provider,
+        "provider_service_id": bare,
+        "combined_id": entry.get("combined_id") or (
+            f"{'smm' if provider == 'smm' else 'gop'}:{bare}"
+        ),
+        "rate_etb_per_1000": price,
+        "sell_multiplier_etb": multiplier,
+    })
+    return out
+
+
+def load_combined_catalogue(path=None):
+    """The bundled combined catalogue (GOP + SMM, with
+    average times) as normalised service dicts, or [] when the file
+    is missing or unreadable. Never raises — a missing file means
+    the bot simply has no SMM services to offer, like before."""
+    if path is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            COMBINED_CATALOGUE_FILENAME,
+        )
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for entry in data:
+        normalised = normalise_combined_entry(entry)
+        if normalised is not None:
+            out.append(normalised)
+    return out
+
+
+def merge_service_catalogues(api_services, combined_entries):
+    """Merge the live API catalogue (GOP) with the bundled
+    combined catalogue's SMM entries into the one list the bot
+    picks from. Pure — no network, no files. The API is the live
+    GOP source, so its rows win on any combined_id clash
+    and the bundled file's GOP rows are never used (they
+    are a snapshot; the API is live). SMM rows come only from the
+    bundled file. Every row leaves with provider, combined_id,
+    provider_service_id and rate_etb_per_1000 set."""
+    merged = []
+    seen = set()
+    for s in api_services or []:
+        if not isinstance(s, dict):
+            continue
+        row = dict(s)
+        try:
+            bare = int(row.get("service", row.get("id")) or 0)
+        except (TypeError, ValueError):
+            continue
+        row["service"] = bare
+        row["provider"] = "gop"
+        row["provider_service_id"] = bare
+        row["combined_id"] = f"gop:{bare}"
+        merged.append(row)
+        seen.add(row["combined_id"])
+    for entry in combined_entries or []:
+        normalised = normalise_combined_entry(entry)
+        if normalised is None:
+            continue
+        if normalised.get("provider") != "smm":
+            continue
+        if normalised["combined_id"] in seen:
+            continue
+        seen.add(normalised["combined_id"])
+        merged.append(normalised)
+    return merged
+
+
 # ------------------------------------------------------- API clients ------
 
 def build_api_request(method: str, path: str, json_body=None) -> httpx.Request:
@@ -3872,6 +4141,14 @@ class PaxyoClient:
                     "rate_etb_per_1000", s.get("price", 0)
                 ),
             })
+        # Second provider (15 Nov 2026): the live API list is
+        # GOP only, so the bundled combined catalogue's SMM
+        # entries join it here — one merged list, fastest first
+        # across BOTH providers. A missing/unreadable bundle just
+        # means no SMM services, like before the wiring.
+        services = merge_service_catalogues(
+            services, load_combined_catalogue()
+        )
         self._services_cache = services
         self._services_cached_at = now
         self._services_refresh_count += 1
@@ -3972,9 +4249,63 @@ class PaxyoClient:
             )
         )
 
-    async def order_status(self, order_id, telegram_id: int):
+    # --------------------------------------------- second provider ------
+    # Contract (server side, server/api-order-smm.php — NOT installed
+    # live yet, 15 Nov 2026): POST /orders/smm places an order on
+    # SMM Social Media, the second provider. Same request shape as
+    # POST /orders (telegram_id, service_id = the SMM bare id, link,
+    # quantity, idempotency_key) and the same reply shape
+    # ({"order": {"id", "status", "total"}}). The server computes
+    # the total from the LIVE SMM rate (INR / 94.263 -> USD x400
+    # ETB), debits the balance atomically and stores the provider
+    # order id — the bot never sends a total and never names the
+    # provider to the user. Like create_order, errors raise (the
+    # callers answer order_failed); a 404 means the endpoint is
+    # not installed yet and is logged, not hidden.
+
+    async def create_order_smm(
+        self, telegram_id: int, service_id: int, link: str, quantity: int, idempotency_key: str
+    ):
+        """POST /orders/smm -> the placed SMM order, same shape as
+        create_order. Raises on any failure (incl. 404)."""
+        return await self._send(
+            build_api_request(
+                "POST",
+                "/orders/smm",
+                {
+                    "telegram_id": telegram_id,
+                    "service_id": service_id,
+                    "link": link,
+                    "quantity": quantity,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+
+    async def order_status(self, order_id, telegram_id: int, provider=None):
         """GET /orders/{id}?telegram_id= — used by /orders and by a future
-        stall monitor (see TODO in main())."""
+        stall monitor (see TODO in main()). When provider is "smm"
+        the status is read from the SMM endpoint instead (GET
+        /orders/{id}/smm-status, server/api-order-smm.php): the
+        generic handler cannot ask the first provider about an SMM
+        provider order id. Returns None on 404 (endpoint not live
+        yet); any other failure raises, like the generic path."""
+        if provider is not None and str(provider).strip().lower().startswith("smm"):
+            try:
+                return await self._send(
+                    build_api_request(
+                        "GET",
+                        f"/orders/{order_id}/smm-status?telegram_id={telegram_id}",
+                    )
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    log.warning(
+                        "GET /orders/%s/smm-status returned 404 "
+                        "(endpoint not live yet)", order_id
+                    )
+                    return None
+                raise
         return await self._send(
             build_api_request("GET", f"/orders/{order_id}?telegram_id={telegram_id}")
         )
@@ -4012,6 +4343,44 @@ class PaxyoClient:
             if exc.response.status_code == 404:
                 log.warning(
                     "POST /orders/%s/cancel-refund returned 404 "
+                    "(endpoint not live yet)", order_id
+                )
+                return None
+            raise
+
+    # --------------------------------------- fail-refund in chat -----
+    # Contract (server side, server/api-order-fail-refund.php — NOT
+    # installed live yet, 15 Nov 2026): POST
+    # /orders/{id}/fail-refund {telegram_id} refunds the caller's
+    # own order ONLY when the provider's LIVE status says it ended
+    # failed / canceled / cancelled — the provider already ended
+    # it, so no provider cancel call is made. Records it in
+    # bot_order_fail_refunds. Success -> {"ok": true, "order_id",
+    # "refunded_etb", "provider_status", "duplicate": false}. A 404
+    # for another user's order is the same as a missing order (no
+    # leaking). A 409 means the live provider word is NOT failed
+    # (the order may still complete — the bot keeps watching);
+    # a 502 means the provider did not answer (the bot retries).
+    # 404-tolerant like cancel_refund: until the endpoint exists it
+    # returns None; any other failure raises.
+
+    async def fail_refund(self, order_id, telegram_id: int):
+        """POST /orders/{id}/fail-refund {telegram_id} ->
+        {"ok": true, "order_id", "refunded_etb",
+        "provider_status", "duplicate": false}. Returns None on 404
+        (endpoint not live yet); any other failure raises."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST",
+                    f"/orders/{order_id}/fail-refund",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /orders/%s/fail-refund returned 404 "
                     "(endpoint not live yet)", order_id
                 )
                 return None
@@ -4872,23 +5241,30 @@ class PaxyoClient:
     # in-memory store. Only HTTP 500 and connection errors raise.
     async def create_delayed_order(self, telegram_id: int, service_id: int,
                                    link: str, quantity: int, total: float,
-                                   run_at: str, idempotency_key: str):
+                                   run_at: str, idempotency_key: str,
+                                   provider=None):
         """POST /delayed-orders {telegram_id, service_id, link,
         quantity, total, run_at, idempotency_key} -> {"ok": true,
-        "id": N, "delayed_order": {...}}. Returns None on 404."""
+        "id": N, "delayed_order": {...}}. Returns None on 404.
+        `provider` ("gop" / "smm", second provider, 15 Nov 2026)
+        is sent when given so the due-time placement can route to
+        the right provider; the server defaults it to GOP and
+        ignores it on old installs."""
+        body = {
+            "telegram_id": telegram_id,
+            "service_id": service_id,
+            "link": link,
+            "quantity": quantity,
+            "total": total,
+            "run_at": run_at,
+            "idempotency_key": idempotency_key,
+        }
+        if provider is not None:
+            body["provider"] = provider
         try:
             return await self._send(
                 build_api_request(
-                    "POST", "/delayed-orders",
-                    {
-                        "telegram_id": telegram_id,
-                        "service_id": service_id,
-                        "link": link,
-                        "quantity": quantity,
-                        "total": total,
-                        "run_at": run_at,
-                        "idempotency_key": idempotency_key,
-                    },
+                    "POST", "/delayed-orders", body,
                 )
             )
         except httpx.HTTPStatusError as exc:
@@ -7974,11 +8350,17 @@ def learn_from_placed_order(user_id: int, service: dict, quantity) -> None:
     if not metric:
         return
     try:
-        service_id = int(service.get("service") or 0) or None
+        bare = int(service.get("service") or 0) or None
     except (TypeError, ValueError):
-        service_id = None
-    if not service_id:
+        bare = None
+    if not bare:
         return
+    # Learn the COMBINED id ("gop:<id>" / "smm:<id>", second
+    # provider, 15 Nov 2026): a bare id alone could make "same as
+    # usual" re-pin the other provider's service of the same
+    # number. The server accepts the combined id string (see
+    # api-user-traits.php); old bare-int traits still resolve.
+    service_id = service_combined_id(service)
     try:
         quantity = int(quantity) if quantity is not None else None
     except (TypeError, ValueError):
@@ -10882,27 +11264,27 @@ def _next_rescue_service(services, service, failed_services):
     + metric, fastest first (reuse pick_services), excluding every
     service that already stalled in this chain — not just the latest
     one, or the second rescue would go back to the first failure.
-    Returns None when no service is left."""
+    Returns None when no service is left. `failed_services` holds
+    COMBINED ids ("gop:<id>" / "smm:<id>", second provider, 15 Nov
+    2026) — a bare id in there is treated as a GOP id, so it
+    can never wrongly exclude the other provider's service of the
+    same number; the caller records combined ids."""
     platform, hint = _platform_hint_of_service(service or {})
     picks = pick_services(
         services or [], platform=platform, service_hint=hint, limit=3,
     )
     failed = set()
     for sid in failed_services or []:
+        if isinstance(sid, str) and ":" in sid:
+            failed.add(sid)
+            continue
         try:
-            failed.add(int(sid))
+            failed.add(service_combined_id({"service": int(sid)}))
         except (TypeError, ValueError):
             continue
-    try:
-        failed.add(int((service or {}).get("service") or 0))
-    except (TypeError, ValueError):
-        pass
+    failed.add(service_combined_id(service or {}))
     for pick in picks:
-        try:
-            pid = int(pick.get("service") or 0)
-        except (TypeError, ValueError):
-            continue
-        if pid not in failed:
+        if service_combined_id(pick) not in failed:
             return pick
     return None
 
@@ -10984,8 +11366,8 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
         )
         return False
     try:
-        result = await paxyo.create_order(
-            user_id, int(nxt["service"]), link, quantity, uuid.uuid4().hex,
+        result = await create_order_for_service(
+            paxyo, user_id, nxt, link, quantity, uuid.uuid4().hex,
         )
     except Exception as exc:
         log.warning(
@@ -11006,10 +11388,11 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
     # delivery message, and if it stalls too it can be rescued once
     # more — up to MAX_STALL_RESCUES for the whole chain.
     failed = list(watched.get("failed_services") or [])
-    try:
-        failed.append(int(service.get("service") or 0))
-    except (TypeError, ValueError):
-        pass
+    # Record the stalled service by COMBINED id ("gop:<id>" /
+    # "smm:<id>", second provider, 15 Nov 2026): a bare id could
+    # never tell the providers apart, and the next rescue must not
+    # exclude the other provider's service of the same number.
+    failed.append(service_combined_id(service))
     WATCHED_ORDERS.pop(order_id, None)
     LAST_ORDER[user_id] = new_id
     watch_order(
@@ -11022,6 +11405,224 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
         app, user_id,
         t(
             "order_rescued", "en",
+            old_order_id=order_id,
+            old_service=short_service_name(service.get("name"))
+            or f"service {service.get('service')}",
+            quantity=int(quantity or 0),
+            refunded=format_money(refunded),
+            new_service=short_service_name(nxt.get("name"))
+            or f"service {nxt.get('service')}",
+            new_order_id=new_id,
+            new_total=format_money(new_total),
+        ),
+    )
+    return True
+
+
+# How long the failed-rescue waits between fail-refund attempts for
+# one order (seconds). The server's fail-refund is idempotent, so a
+# retry is safe — but the provider status is re-read on every try,
+# so attempts are throttled like the partial-refund path's.
+FAIL_REFUND_RETRY_SECONDS = 3600
+
+
+async def _attempt_failed_rescue(app, order_id, watched, services=None,
+                                 now=None):
+    """Try to rescue one provider-FAILED order: refund it via POST
+    /orders/{id}/fail-refund, then place the same order on the
+    next-best service. Returns True when the entry is resolved
+    (rescued, refunded with no replacement, or the user was told
+    honestly and the entry dropped); False when the caller should
+    keep watching (throttled, or a transient failure — the next
+    cycle retries). Never raises.
+
+    Only "failed" is ever rescued here — never "cancelled" /
+    "canceled" (that may be the user's own cancel, refunded by the
+    cancel endpoint instead) or "refunded" (already refunded). The
+    server re-reads the LIVE provider status itself and refunds
+    only when the provider word is failed / canceled / cancelled,
+    so a stale "failed" from the watch cannot refund an order the
+    provider later completed: on a 409 the entry stays watched and
+    the next cycle re-reads the status. A 404 (endpoint not live
+    yet) tells the user honestly once and keeps watching — if the
+    endpoint is installed later, the next hourly retry refunds and
+    rescues. The refund is the FULL stored total, and the server
+    records it once ever (duplicate calls return the recorded
+    refund), so retrying after a successful refund is safe.
+
+    No Confirm card: the user already confirmed this order, and the
+    rescue only carries it out on the next service — the same
+    fulfilment design as the stall rescue. The replacement is placed
+    with a FRESH idempotency key, never the original order's key.
+    Prices always come from the catalogue — never from the AI, and
+    nothing about the provider is ever named to the user."""
+    user_id = watched.get("user_id")
+    service = watched.get("service") or {}
+    quantity = watched.get("quantity") or 0
+    link = watched.get("link")
+    if now is None:
+        now = time.time()
+    # Throttle: one fail-refund attempt per hour per order — unless
+    # a refund is already recorded (fail_refund_done), in which
+    # case the retry returns the recorded refund at once and the
+    # rescue can proceed to the replacement immediately.
+    last_try = watched.get("fail_refund_attempted_at") or 0
+    if last_try and not watched.get("fail_refund_done"):
+        if now - last_try < FAIL_REFUND_RETRY_SECONDS:
+            return False
+    watched["fail_refund_attempted_at"] = now
+    try:
+        refund = await paxyo.fail_refund(order_id, user_id)
+    except Exception as exc:
+        log.warning(
+            "failed rescue %s: fail-refund failed: %s", order_id, exc
+        )
+        conflicts = (watched.get("fail_refund_conflicts") or 0) + 1
+        watched["fail_refund_conflicts"] = conflicts
+        if conflicts >= 2 and not watched.get("fail_refund_unclear_sent"):
+            watched["fail_refund_unclear_sent"] = True
+            await notify_user(
+                app, user_id,
+                t(
+                    "order_failed_unclear", "en",
+                    order_id=order_id,
+                    service=short_service_name(service.get("name"))
+                    or f"service {service.get('service')}",
+                    quantity=int(quantity or 0),
+                ),
+            )
+        # Keep watching: the next cycle re-reads the status — a
+        # provider word of "completed" still gets its delivery
+        # message, and the hourly retry re-attempts the refund.
+        return False
+    if not refund:
+        # None: the endpoint is not live yet (404) — nothing was
+        # refunded. Tell the user once, honestly, and keep
+        # watching: if the endpoint is installed later, the next
+        # hourly retry refunds and rescues.
+        if not watched.get("fail_refund_not_live_sent"):
+            watched["fail_refund_not_live_sent"] = True
+            await notify_user(
+                app, user_id,
+                t(
+                    "order_failed_no_refund", "en",
+                    order_id=order_id,
+                    service=short_service_name(service.get("name"))
+                    or f"service {service.get('service')}",
+                    quantity=int(quantity or 0),
+                ),
+            )
+        return False
+    watched["fail_refund_done"] = True
+    refunded = refund.get("refunded_etb")
+    if refunded is None:
+        # The server refunds the full stored total; the watch entry
+        # keeps it, so the message still states the real figure.
+        refunded = watched.get("total")
+    if refunded is None:
+        refunded = estimated_total_etb(
+            float(service.get("rate_etb_per_1000") or 0), quantity
+        )
+
+    async def _refunded_no_replacement():
+        await notify_user(
+            app, user_id,
+            t(
+                "order_failed_refunded", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                quantity=int(quantity or 0),
+                refunded=format_money(refunded),
+            ),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
+
+    # The refund is done even when no replacement follows — the cap
+    # limits RE-PLACEMENT attempts, never the refund itself.
+    if (watched.get("rescue_count") or 0) >= MAX_STALL_RESCUES:
+        log.warning(
+            "failed rescue %s: rescue cap reached, refund only",
+            order_id,
+        )
+        return await _refunded_no_replacement()
+    if services is None:
+        try:
+            services = await paxyo.services()
+        except Exception as exc:
+            log.warning(
+                "failed rescue %s: services fetch failed: %s",
+                order_id, exc,
+            )
+            return await _refunded_no_replacement()
+    nxt = _next_rescue_service(services, service, watched.get("failed_services"))
+    if nxt is None:
+        log.warning("failed rescue %s: no next service", order_id)
+        return await _refunded_no_replacement()
+    new_total = estimated_total_etb(
+        float(nxt.get("rate_etb_per_1000") or 0), quantity
+    )
+    # The refund was just credited, so the balance check below runs
+    # against the refunded balance — a pricier replacement can
+    # still be too much for it, and then no order is placed.
+    try:
+        bal = await paxyo.balance(user_id)
+    except Exception as exc:
+        log.warning(
+            "failed rescue %s: balance check failed: %s", order_id, exc
+        )
+        return await _refunded_no_replacement()
+    if not bal.get("found") or float(bal.get("balance", 0)) < new_total:
+        log.warning(
+            "failed rescue %s: balance too low for replacement (%s < %s)",
+            order_id, bal.get("balance", 0), new_total,
+        )
+        return await _refunded_no_replacement()
+    try:
+        result = await create_order_for_service(
+            paxyo, user_id, nxt, link, quantity, uuid.uuid4().hex,
+        )
+    except Exception as exc:
+        log.warning(
+            "failed rescue %s: replacement failed: %s", order_id, exc
+        )
+        # The refund is recorded server-side (duplicate-safe), so
+        # the next cycle retries the replacement on the same next
+        # service instead of losing the order.
+        return False
+    order = result.get("order", result) if isinstance(result, dict) else {}
+    new_id = order.get("id") or order.get("order_id") or "?"
+    # The server computes the real total; use it when the reply
+    # carries it, else the catalogue estimate above.
+    server_total = order.get("total", order.get("charge"))
+    if server_total is not None:
+        try:
+            new_total = round(float(server_total), 2)
+        except (TypeError, ValueError):
+            pass
+    # Watch the replacement like any placed order: it gets its own
+    # delivery message, and if it stalls or fails too it can be
+    # rescued once more — up to MAX_STALL_RESCUES for the whole
+    # chain.
+    failed = list(watched.get("failed_services") or [])
+    # Record the failed service by COMBINED id ("gop:<id>" /
+    # "smm:<id>", second provider, 15 Nov 2026): a bare id could
+    # never tell the providers apart, and the next rescue must not
+    # exclude the other provider's service of the same number.
+    failed.append(service_combined_id(service))
+    WATCHED_ORDERS.pop(order_id, None)
+    LAST_ORDER[user_id] = new_id
+    watch_order(
+        user_id, new_id, nxt, quantity, link,
+        total=new_total,
+        rescue_count=(watched.get("rescue_count") or 0) + 1,
+        failed_services=failed,
+    )
+    await notify_user(
+        app, user_id,
+        t(
+            "order_failed_rescued", "en",
             old_order_id=order_id,
             old_service=short_service_name(service.get("name"))
             or f"service {service.get('service')}",
@@ -11157,7 +11758,9 @@ async def run_delivery_watch_cycle(app, now=None):
     claimed average time is rescued once when it can be (stall
     rescue, 15 Nov 2026: cancel + refund, re-place on the next
     service) or gets one honest stuck warning with the support
-    link; a failed/cancelled/refunded order is dropped silently.
+    link; a FAILED order is refunded and re-placed on the next
+    service (failed-order rescue, 15 Nov 2026); a
+    cancelled/refunded order is dropped silently.
     Never raises — one bad order must not stop the rest. Called
     from the 60-second scheduler loop."""
     import time
@@ -11170,7 +11773,14 @@ async def run_delivery_watch_cycle(app, now=None):
     for order_id, watched in list(WATCHED_ORDERS.items()):
         user_id = watched.get("user_id")
         try:
-            data = await paxyo.order_status(order_id, user_id)
+            # Provider-aware status (second provider, 15 Nov 2026):
+            # an SMM order's status is read from the SMM endpoint,
+            # not from GOP — the watch entry carries the
+            # service, so no extra call is needed.
+            data = await paxyo.order_status(
+                order_id, user_id,
+                provider=service_provider(watched.get("service") or {}),
+            )
         except Exception as exc:
             log.warning("delivery watch %s failed: %s", order_id, exc)
             continue
@@ -11303,7 +11913,22 @@ async def run_delivery_watch_cycle(app, now=None):
                     ),
                 )
                 watched["warned"] = True
-        elif status in ("cancelled", "canceled", "failed", "refunded"):
+        elif status == "failed":
+            # Failed-order rescue (second provider, 15 Nov 2026):
+            # refund via POST /orders/{id}/fail-refund and re-place
+            # on the next-fastest service, across providers. Only
+            # "failed" is rescued — never "cancelled"/"canceled"
+            # (that may be the user's own cancel) or "refunded"
+            # (already refunded). False keeps the entry watched;
+            # the next cycle retries (throttled inside the rescue).
+            # services passes through as-is: None means "fetch the
+            # catalogue inside", like the stall branch below.
+            handled = await _attempt_failed_rescue(
+                app, order_id, watched, services, now
+            )
+            if handled:
+                continue
+        elif status in ("cancelled", "canceled", "refunded"):
             WATCHED_ORDERS.pop(order_id, None)
         # Any other status: keep watching; the next cycle retries.
 
@@ -12127,11 +12752,15 @@ def detect_weekly_patterns(orders):
             continue
         if not service_id or not quantity:
             continue
+        # Group by COMBINED id ("gop:<id>" / "smm:<id>", second
+        # provider, 15 Nov 2026): a bare id would merge the two
+        # providers' same-number services into one pattern.
+        combined = order.get("combined_id") or f"gop:{service_id}"
         created = _parse_order_created_at(order.get("created_at"))
         if created is None:
             continue
         weekday = created.astimezone(EAT_TZ).weekday()
-        groups.setdefault((service_id, quantity, weekday), []).append(
+        groups.setdefault((combined, quantity, weekday), []).append(
             (created, order)
         )
     patterns = []
@@ -12195,11 +12824,22 @@ def _friday_ordered_this_week(orders, pattern, iso_year, iso_week):
         if not isinstance(order, dict):
             continue
         try:
-            if int(order.get("service_id") or 0) != pattern["service_id"]:
-                continue
             if int(order.get("quantity") or 0) != pattern["quantity"]:
                 continue
         except (TypeError, ValueError):
+            continue
+        # Compare by COMBINED id ("gop:<id>" / "smm:<id>", second
+        # provider, 15 Nov 2026): the pattern stores the combined
+        # id, and an old order row without one reads as GOP — a
+        # bare id alone could match the other provider's service
+        # of the same number.
+        combined = order.get("combined_id")
+        if combined is None:
+            try:
+                combined = f"gop:{int(order.get('service_id') or 0)}"
+            except (TypeError, ValueError):
+                continue
+        if combined != pattern["service_id"]:
             continue
         created = _parse_order_created_at(order.get("created_at"))
         if created is None:
@@ -12505,7 +13145,7 @@ async def _friday_accept_text(user_id: int, pattern, lang: str):
             "quantity": pattern["quantity"],
         }.items() if v is not None
     }
-    USUAL_SERVICE[user_id] = int(service.get("service"))
+    USUAL_SERVICE[user_id] = service_combined_id(service)
     if pattern.get("link"):
         FRIDAY_LINK[user_id] = pattern["link"]
     touch_partial_activity(user_id)
@@ -12630,6 +13270,7 @@ async def last_order_status_text(user_id: int, lang: str) -> str:
     it is empty (e.g. after a bot restart) the last order is resolved
     from the Paxyo API instead, so "where is my order" still works."""
     order_id = LAST_ORDER.get(user_id)
+    provider = None
     if not order_id:
         last = await resolve_last_order(user_id)
         if not last:
@@ -12637,9 +13278,14 @@ async def last_order_status_text(user_id: int, lang: str) -> str:
         order_id = last.get("id") or last.get("order_id")
         if not order_id:
             return t("no_orders", lang)
+        # Provider-aware status (second provider, 15 Nov 2026):
+        # the order row carries provider/combined_id after the
+        # server patch; without it this reads as GOP and
+        # the generic path runs, exactly like before.
+        provider = service_provider(last)
         LAST_ORDER[user_id] = order_id
     try:
-        data = await paxyo.order_status(order_id, user_id)
+        data = await paxyo.order_status(order_id, user_id, provider=provider)
     except Exception as exc:
         log.warning("order_status failed: %s", exc)
         return t("not_understood", lang)
@@ -12755,13 +13401,23 @@ async def delayed_orders_text(user_id: int, lang: str) -> str:
         services = []
     by_id = {}
     for s in services or []:
+        if not isinstance(s, dict):
+            continue
+        # Keyed by COMBINED id ("gop:<id>" / "smm:<id>", second
+        # provider, 15 Nov 2026) and — for old rows without one —
+        # by bare id, first entry wins (GOP first, exactly
+        # like before).
+        by_id[service_combined_id(s)] = s
         try:
-            by_id[int(s.get("service"))] = s
+            by_id.setdefault(int(s.get("service")), s)
         except (TypeError, ValueError):
             continue
     lines = [t("delayed_list_title", lang)]
     for i, order in enumerate(orders, 1):
-        service = by_id.get(order.get("service_id") or 0)
+        service = (
+            by_id.get(order.get("combined_id") or 0)
+            or by_id.get(order.get("service_id") or 0)
+        )
         name = (
             short_service_name(service.get("name"))
             if service
@@ -12818,13 +13474,20 @@ async def handle_cancel_delayed(update, lang, voice=False):
         except Exception:
             services = []
         service = None
-        for s in services or []:
-            try:
-                if int(s.get("service")) == int(order.get("service_id") or 0):
-                    service = s
-                    break
-            except (TypeError, ValueError):
-                continue
+        # Prefer the combined id (second provider, 15 Nov 2026):
+        # the bare id alone could re-pin the other provider's
+        # service of the same number.
+        combined = order.get("combined_id")
+        if combined:
+            service = find_service_by_id(services or [], combined)
+        if service is None:
+            for s in services or []:
+                try:
+                    if int(s.get("service")) == int(order.get("service_id") or 0):
+                        service = s
+                        break
+                except (TypeError, ValueError):
+                    continue
         name = (
             short_service_name(service.get("name"))
             if service
@@ -12876,6 +13539,24 @@ def pending_for_user(user_id: int):
     return None, None
 
 
+async def create_order_for_service(client, user_id: int, service, link: str,
+                                   quantity: int, idempotency_key: str):
+    """Place an order on the service's own provider (second provider,
+    15 Nov 2026): a GOP service goes through POST /orders,
+    an SMM Social Media service through POST /orders/smm. The
+    service dict decides — its provider/combined_id, never the bare
+    id (2,790 bare ids collide between the providers). Same reply
+    shape either way; errors raise exactly like create_order does,
+    so every caller keeps its own failure handling."""
+    if service_provider(service) == "smm":
+        return await client.create_order_smm(
+            user_id, int(service["service"]), link, quantity, idempotency_key,
+        )
+    return await client.create_order(
+        user_id, int(service["service"]), link, quantity, idempotency_key,
+    )
+
+
 async def place_pending_order(pending, user_id: int):
     """Balance check + create order for a pending order.
 
@@ -12895,11 +13576,8 @@ async def place_pending_order(pending, user_id: int):
     if not bal.get("found") or float(bal.get("balance", 0)) < total:
         return None, ("insufficient", bal.get("balance", 0), total)
     try:
-        result = await paxyo.create_order(
-            user_id,
-            int(service["service"]),
-            pending["link"],
-            quantity,
+        result = await create_order_for_service(
+            paxyo, user_id, service, pending["link"], quantity,
             uuid.uuid4().hex,
         )
     except httpx.HTTPStatusError as exc:
@@ -13041,11 +13719,32 @@ def pending_delayed_for_user(user_id: int):
 def _delayed_record_fields(record):
     """A server or memory delayed-order row -> the common dict the
     scheduler and the list use. Server rows carry the same keys;
-    memory rows already do. Coerces the numeric fields."""
+    memory rows already do. Coerces the numeric fields. `provider`
+    is "gop" / "smm" (second provider, 15 Nov 2026); old rows
+    without one read as GOP, and `combined_id` is derived from it
+    so the due-time placement can find the exact service — a bare
+    id alone could place the wrong provider's service after a
+    restart. A stored long-form provider value reads by its prefix
+    ("smm..." -> "smm", anything else -> "gop")."""
+    raw_provider = str(record.get("provider") or "").strip().lower()
+    provider = "smm" if raw_provider.startswith("smm") else "gop"
+    try:
+        service_id = (
+            int(record["service_id"])
+            if record.get("service_id") is not None else None
+        )
+    except (TypeError, ValueError):
+        service_id = None
+    combined_id = record.get("combined_id") or (
+        f"{provider}:{service_id}"
+        if service_id is not None else None
+    )
     return {
         "id": record.get("id"),
         "telegram_id": record.get("telegram_id"),
-        "service_id": int(record["service_id"]) if record.get("service_id") is not None else None,
+        "service_id": service_id,
+        "provider": provider,
+        "combined_id": combined_id,
         "link": record.get("link"),
         "quantity": int(record["quantity"]) if record.get("quantity") is not None else None,
         "total": record.get("total"),
@@ -13077,6 +13776,9 @@ async def delayed_store_create(draft, user_id: int):
             draft["total"],
             draft["run_at"],
             draft["idempotency_key"],
+            # Second provider (15 Nov 2026): the due-time placement
+            # must route to the same provider the user picked.
+            provider=service_provider(draft["service"]),
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
@@ -13092,6 +13794,7 @@ async def delayed_store_create(draft, user_id: int):
             "id": "mem-" + uuid.uuid4().hex[:8],
             "telegram_id": user_id,
             "service_id": draft["service"]["service"],
+            "provider": service_provider(draft["service"]),
             "link": draft["link"],
             "quantity": draft["quantity"],
             "total": draft["total"],
@@ -13111,6 +13814,7 @@ async def delayed_store_create(draft, user_id: int):
             "id": "mem-" + uuid.uuid4().hex[:8],
             "telegram_id": user_id,
             "service_id": draft["service"]["service"],
+            "provider": service_provider(draft["service"]),
             "link": draft["link"],
             "quantity": draft["quantity"],
             "total": draft["total"],
@@ -14598,7 +15302,7 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         last = await resolve_last_order(user.id)
         if last and last.get("link"):
             merged["link"] = last.get("link")
-            last_service_id = last.get("service_id")
+            last_service_id = last.get("combined_id") or last.get("service_id")
     if not merged.get("platform") and not merged.get("service_hint") and last_service_id is None:
         RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
@@ -14757,7 +15461,7 @@ async def handle_delayed_order_text(update, text, intent, lang, voice=False):
         last = await resolve_last_order(user.id)
         if last and last.get("link"):
             merged["link"] = last.get("link")
-            last_service_id = last.get("service_id")
+            last_service_id = last.get("combined_id") or last.get("service_id")
     if not merged.get("platform") and not merged.get("service_hint") and last_service_id is None:
         DELAYED_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
@@ -15137,7 +15841,13 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         pin = find_service_by_id(services, pinned)
         if pin is not None and pin.get("active", True):
             try:
-                usable = int(pin.get("service", 0)) not in BLACKLISTED_SERVICES
+                # The blacklist is a GOP list (second
+                # provider, 15 Nov 2026): it never excludes an SMM
+                # service that happens to share the number.
+                usable = (
+                    int(pin.get("service", 0)) not in BLACKLISTED_SERVICES
+                    or service_provider(pin) == "smm"
+                )
             except (TypeError, ValueError):
                 usable = False
             if usable:
@@ -15331,10 +16041,16 @@ async def _usual_fallback(update, user_id: int, intent: dict, lang: str,
     if not _usual_is_established(user_id):
         return False
     traits = USER_TRAITS.get(user_id) or {}
-    try:
-        service_id = int(traits.get("usual_service_id") or 0) or None
-    except (TypeError, ValueError):
-        service_id = None
+    # The stored usual may be a combined id ("smm:7501", second
+    # provider, 15 Nov 2026) or an old bare int (GOP).
+    raw_usual = traits.get("usual_service_id")
+    if isinstance(raw_usual, str) and ":" in raw_usual:
+        service_id = raw_usual
+    else:
+        try:
+            service_id = int(raw_usual or 0) or None
+        except (TypeError, ValueError):
+            service_id = None
     platform = traits.get("usual_platform")
     metric = traits.get("usual_metric")
     if not service_id or not platform or not metric:
@@ -15453,7 +16169,9 @@ def _browse_page_text(entry, page: int) -> str:
 
 def _browse_keyboard(entry, page: int):
     """One button per service on the page (tap to order it) plus
-    Next when more pages follow. Callback data is "browse:<id>"
+    Next when more pages follow. Callback data is
+    "browse:<combined id>" ("browse:smm:7501", second provider,
+    15 Nov 2026 — a bare id could not tell the providers apart)
     / "browsepage:<n>"."""
     services = entry["services"]
     start = page * BROWSE_PAGE_SIZE
@@ -15468,7 +16186,7 @@ def _browse_keyboard(entry, page: int):
         price = format_money(s.get("rate_etb_per_1000", 0))
         buttons.append([InlineKeyboardButton(
             f"{name[:28]} — {price}",
-            callback_data=f"browse:{sid}",
+            callback_data=f"browse:{service_combined_id(s)}",
         )])
     total_pages = (len(services) + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE
     if page + 1 < total_pages:
@@ -15807,7 +16525,11 @@ async def handle_reorder_new_quantity(update, text, lang, voice=False):
             lang, voice=voice,
         )
         return
-    service_id = last.get("service_id")
+    # The server's order list carries the combined id (second
+    # provider, 15 Nov 2026) — prefer it, so a reorder of an SMM
+    # order re-pins the SMM service, not the GOP service
+    # that happens to share the bare number.
+    service_id = last.get("combined_id") or last.get("service_id")
     platform = None
     hint = None
     service = None
@@ -15902,7 +16624,11 @@ async def handle_usual(update, text, intent, lang, voice=False):
         except (TypeError, ValueError):
             multiplier = 1
         wanted = int(quantity * multiplier)
-    service_id = last.get("service_id")
+    # The server's order list carries the combined id (second
+    # provider, 15 Nov 2026) — prefer it, so "same as usual"
+    # re-pins the SMM service, not the GOP service that
+    # happens to share the bare number.
+    service_id = last.get("combined_id") or last.get("service_id")
     service_name = str(last.get("service_name") or "")
     platform = None
     if service_id is None:
@@ -16227,12 +16953,9 @@ async def place_batch(batch, user_id):
     results = []
     for draft in orders:
         try:
-            result = await paxyo.create_order(
-                user_id,
-                int(draft["service"]["service"]),
-                draft["link"],
-                draft["quantity"],
-                uuid.uuid4().hex,
+            result = await create_order_for_service(
+                paxyo, user_id, draft["service"], draft["link"],
+                draft["quantity"], uuid.uuid4().hex,
             )
         except httpx.HTTPStatusError as exc:
             log.warning("batch create_order rejected: %s", exc.response.status_code)
@@ -16862,10 +17585,15 @@ async def handle_refill_request(update, text, lang, voice=False):
         )
         return
     order_id = order.get("id") or order.get("order_id")
-    try:
-        service_id = int(order.get("service_id") or 0) or None
-    except (TypeError, ValueError):
-        service_id = None
+    # Prefer the combined id (second provider, 15 Nov 2026): the
+    # refill's re-order resolves the exact service, not the other
+    # provider's service of the same bare number.
+    service_id = order.get("combined_id")
+    if service_id is None:
+        try:
+            service_id = int(order.get("service_id") or 0) or None
+        except (TypeError, ValueError):
+            service_id = None
     try:
         quantity = int(order.get("quantity") or 0) or None
     except (TypeError, ValueError):
@@ -17090,7 +17818,9 @@ async def handle_order_wait(update, text, lang, voice=False):
     status = str(
         data.get("status") or data.get("order", {}).get("status", "?")
     ).strip()
-    service_id = (last or {}).get("service_id")
+    # Prefer the combined id (second provider, 15 Nov 2026): the
+    # bare id alone could read the other provider's average time.
+    service_id = (last or {}).get("combined_id") or (last or {}).get("service_id")
     service_name = (last or {}).get("service_name")
     avg = None
     if service_id is not None:
@@ -17145,7 +17875,7 @@ async def handle_max_for_balance(update, text, intent, lang, voice=False):
     if not platform and not hint:
         last = await resolve_last_order(user.id)
         if last and last.get("service_id"):
-            last_service_id = last.get("service_id")
+            last_service_id = last.get("combined_id") or last.get("service_id")
     try:
         services = await paxyo.services()
     except Exception as exc:
@@ -18150,7 +18880,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     "service_hint": stored_options.get("service_hint"),
                     "link": None,
                     "quantity": stored_options.get("quantity"),
-                    "service_id": service.get("service"),
+                    # By combined id (second provider, 15 Nov
+                    # 2026): the cheapest option may be an SMM
+                    # service, and a bare id would re-pin the
+                    # GOP service of the same number.
+                    "service_id": service_combined_id(service),
                 }
                 PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
                 await reply_message(
@@ -19567,7 +20301,10 @@ async def media_order_context(user_id: int) -> dict:
         last = None
     if last:
         status = str(last.get("status") or "").strip().lower()
-        service_id = last.get("service_id")
+        # Prefer the combined id (second provider, 15 Nov 2026):
+        # the bare id alone could read the other provider's
+        # service of the same number.
+        service_id = last.get("combined_id") or last.get("service_id")
         service_name = last.get("service_name")
         avg = None
         if service_id is not None:
@@ -20064,13 +20801,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             services = []
         service = None
-        for s in services or []:
-            try:
-                if int(s.get("service")) == int(order.get("service_id") or 0):
-                    service = s
-                    break
-            except (TypeError, ValueError):
-                continue
+        # Prefer the combined id (second provider, 15 Nov 2026):
+        # the bare id alone could re-pin the other provider's
+        # service of the same number.
+        combined = order.get("combined_id")
+        if combined:
+            service = find_service_by_id(services or [], combined)
+        if service is None:
+            for s in services or []:
+                try:
+                    if int(s.get("service")) == int(order.get("service_id") or 0):
+                        service = s
+                        break
+                except (TypeError, ValueError):
+                    continue
         platform = None
         hint = None
         if service is not None:
@@ -20084,11 +20828,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "link": order.get("link"),
             "quantity": order.get("quantity"),
         }
-        named = None
-        try:
-            named = int(order.get("service_id") or 0) or None
-        except (TypeError, ValueError):
-            named = None
+        named = order.get("combined_id") or None
+        if named is None:
+            try:
+                named = int(order.get("service_id") or 0) or None
+            except (TypeError, ValueError):
+                named = None
         await complete_order(
             query.message, user.id, merged, lang,
             named_service_id=named, ask_metric=False,
@@ -20108,13 +20853,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         service = None
         entry = BROWSE_LISTS.get(user.id)
         if entry is not None:
-            for s in entry.get("services") or []:
-                try:
-                    if int(s.get("service")) == int(arg or 0):
-                        service = s
-                        break
-                except (TypeError, ValueError):
-                    continue
+            # A combined-id tap ("browse:smm:7501", second provider,
+            # 15 Nov 2026) matches exactly; a bare-id tap (an older
+            # button) matches the first service of that number,
+            # GOP first — exactly like before.
+            if ":" in (arg or ""):
+                service = find_service_by_id(entry.get("services") or [], arg)
+            else:
+                for s in entry.get("services") or []:
+                    try:
+                        if int(s.get("service")) == int(arg or 0):
+                            service = s
+                            break
+                    except (TypeError, ValueError):
+                        continue
         if service is None:
             try:
                 services = await paxyo.services()
@@ -20138,7 +20890,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{platform} {metric}"
             if platform and metric else (platform or metric)
         )
-        NUDGE_SERVICE[user.id] = sid
+        # Pin by COMBINED id (second provider, 15 Nov 2026): a
+        # bare id would re-pin the other provider's service of
+        # the same number when the draft completes.
+        NUDGE_SERVICE[user.id] = service_combined_id(service)
         PARTIAL[user.id] = {
             "platform": platform,
             "service_hint": hint,
@@ -20311,9 +21066,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(t("friday_gone", lang))
             return
         try:
-            _sid, _qty = arg.split(":")
+            # The service id is a COMBINED id ("gop:<id>" /
+            # "smm:<id>", second provider, 15 Nov 2026), so it
+            # contains a colon itself — split from the right.
+            _sid, _qty = arg.rsplit(":", 1)
             if (
-                int(_sid) != int(pattern["service_id"])
+                _sid != str(pattern["service_id"])
                 or int(_qty) != int(pattern["quantity"])
             ):
                 raise ValueError
@@ -20347,7 +21105,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(t("friday_gone", lang))
             return
         try:
-            _sid, _qty = (int(p) for p in arg.split(":"))
+            # The service id is a COMBINED id ("gop:<id>" /
+            # "smm:<id>", second provider, 15 Nov 2026), so it
+            # contains a colon itself — split from the right. The
+            # id stays a string: find_service_by_id resolves a
+            # combined id exactly, and an unknown one answers
+            # honestly downstream instead of crashing here.
+            _sid, _qty = arg.rsplit(":", 1)
+            _qty = int(_qty)
         except (TypeError, ValueError):
             await query.edit_message_text(t("friday_gone", lang))
             return
@@ -20410,7 +21175,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "quantity": quantity,
         }
         # Pin the cheapest service for the order this nudge builds.
-        NUDGE_SERVICE[user.id] = int(service.get("service"))
+        # By COMBINED id (second provider, 15 Nov 2026): the
+        # cheapest service may be an SMM one, and a bare id would
+        # re-pin the GOP service of the same number.
+        NUDGE_SERVICE[user.id] = service_combined_id(service)
         # The tap starts the draft's quiet clock (abandoned-order
         # nudge, feature 4): if the user never sends the link,
         # the nudge fires ~30 minutes from here.
@@ -20473,13 +21241,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             services = []
         service = None
-        for s in services or []:
-            try:
-                if int(s.get("service")) == int(order.get("service_id") or 0):
-                    service = s
-                    break
-            except (TypeError, ValueError):
-                continue
+        # Prefer the combined id (second provider, 15 Nov 2026):
+        # the bare id alone could name the other provider's
+        # service of the same number in the confirmation.
+        combined = order.get("combined_id")
+        if combined:
+            service = find_service_by_id(services or [], combined)
+        if service is None:
+            for s in services or []:
+                try:
+                    if int(s.get("service")) == int(order.get("service_id") or 0):
+                        service = s
+                        break
+                except (TypeError, ValueError):
+                    continue
         name = (
             short_service_name(service.get("name"))
             if service
@@ -20740,11 +21515,23 @@ async def run_one_schedule(app, sched, services_by_id):
     short. One due schedule = at most one order per cycle."""
     schedule_id = sched.get("id")
     user_id = sched.get("user_id")
-    try:
-        service_id = int(sched.get("service_id"))
-    except (TypeError, ValueError):
-        service_id = None
-    service = services_by_id.get(service_id) if service_id is not None else None
+    # Resolve by COMBINED id first ("smm:<id>" / "gop:<id>",
+    # second provider, 15 Nov 2026); the recurring table stores
+    # only a bare service id today, so old rows still resolve the
+    # GOP service — exactly like before. (A recurring order
+    # on an SMM service needs the server's recurring row to carry
+    # the provider; see HANDOVER.md — until then, recurring
+    # orders are effectively GOP.)
+    service = None
+    combined = sched.get("combined_id")
+    if combined:
+        service = services_by_id.get(combined)
+    if service is None:
+        try:
+            service_id = int(sched.get("service_id"))
+        except (TypeError, ValueError):
+            service_id = None
+        service = services_by_id.get(service_id) if service_id is not None else None
     if service is None:
         log.warning(
             "recurring %s: service %s not found, skipping",
@@ -20784,8 +21571,10 @@ async def run_one_schedule(app, sched, services_by_id):
     slot = sched.get("next_run_at") or ""
     key = f"rec-{schedule_id}-{slot}"
     try:
-        result = await paxyo.create_order(
-            user_id, int(service["service"]), sched.get("link"), quantity, key
+        # Provider-aware placement (second provider, 15 Nov 2026):
+        # the resolved service dict decides the endpoint.
+        result = await create_order_for_service(
+            paxyo, user_id, service, sched.get("link"), quantity, key
         )
     except Exception as exc:
         log.warning("recurring %s: order failed: %s", schedule_id, exc)
@@ -20843,11 +21632,21 @@ async def run_one_delayed(app, item, services_by_id):
     reason — never invented."""
     delayed_id = item.get("id")
     user_id = item.get("telegram_id")
-    try:
-        service_id = int(item.get("service_id"))
-    except (TypeError, ValueError):
-        service_id = None
-    service = services_by_id.get(service_id) if service_id is not None else None
+    # Resolve by COMBINED id first ("smm:<id>" / "gop:<id>",
+    # second provider, 15 Nov 2026): the bare id alone could pick
+    # the other provider's service of the same number. Old rows
+    # without a combined id fall back to the bare id, which still
+    # finds the GOP service — exactly like before.
+    service = None
+    combined = item.get("combined_id")
+    if combined:
+        service = services_by_id.get(combined)
+    if service is None:
+        try:
+            service_id = int(item.get("service_id"))
+        except (TypeError, ValueError):
+            service_id = None
+        service = services_by_id.get(service_id) if service_id is not None else None
     if service is None:
         log.warning(
             "delayed %s: service %s not found, marking failed",
@@ -20912,8 +21711,8 @@ async def run_one_delayed(app, item, services_by_id):
         # claimed it: exactly-once means this caller does nothing.
         return
     try:
-        result = await paxyo.create_order(
-            user_id, int(service["service"]), item.get("link"), quantity,
+        result = await create_order_for_service(
+            paxyo, user_id, service, item.get("link"), quantity,
             item.get("idempotency_key") or f"delay-{delayed_id}",
         )
     except Exception as exc:
@@ -20962,8 +21761,16 @@ async def run_delayed_cycle(app):
         return
     by_id = {}
     for s in services or []:
+        if not isinstance(s, dict):
+            continue
+        # Keyed by COMBINED id ("gop:<id>" / "smm:<id>", second
+        # provider, 15 Nov 2026) and — for old rows without one —
+        # by bare id, first entry wins (the merged catalogue lists
+        # the live GOP services first, so a bare id still
+        # finds the GOP service, exactly like before).
+        by_id[service_combined_id(s)] = s
         try:
-            by_id[int(s.get("service"))] = s
+            by_id.setdefault(int(s.get("service")), s)
         except (TypeError, ValueError):
             continue
     for item in due:
@@ -20974,37 +21781,56 @@ async def run_delayed_cycle(app):
 
 def _price_watch_changes(snapshot, services):
     """Services whose catalogue price moved since the snapshot:
-    [{service_id, name, old_price, new_price}] (ETB per 1000).
-    Prices compare rounded to 4 decimals — the server stores
-    DECIMAL(12,4), so anything finer is storage noise, not a
-    change. Blacklisted services (never sold) are skipped, and a
-    service that is new since the snapshot is not a change — it
-    joins the snapshot silently on the next save."""
+    [{service_id, combined_id, provider, name, old_price,
+    new_price}] (ETB per 1000). Prices compare rounded to 4
+    decimals — the server stores DECIMAL(12,4), so anything finer
+    is storage noise, not a change. Blacklisted services (never
+    sold) are skipped, and a service that is new since the snapshot
+    is not a change — it joins the snapshot silently on the next
+    save. Snapshot keys are COMBINED ids ("gop:<id>" /
+    "smm:<id>", second provider, 15 Nov 2026); a bare-int key from
+    an old snapshot reads as a GOP id, so the first cycle
+    after the wiring compares the GOP services as before
+    and treats every SMM service as new."""
     old = {}
     for sid, price in (snapshot or {}).items():
         try:
-            old[int(sid)] = round(float(price), 4)
+            value = round(float(price), 4)
         except (TypeError, ValueError):
             continue
+        key = str(sid)
+        if ":" not in key:
+            try:
+                key = f"gop:{int(key)}"
+            except (TypeError, ValueError):
+                continue
+        old[key] = value
     changes = []
     for s in services or []:
         if not isinstance(s, dict):
             continue
         try:
-            sid = int(s.get("service") or 0)
+            bare = int(s.get("service") or 0)
             new_price = round(float(s.get("rate_etb_per_1000") or 0), 4)
         except (TypeError, ValueError):
             continue
-        if sid <= 0 or sid in BLACKLISTED_SERVICES:
+        if bare <= 0:
             continue
-        if sid not in old:
+        # The blacklist is a GOP list — it never excludes an
+        # SMM service that happens to share the number.
+        if bare in BLACKLISTED_SERVICES and service_provider(s) == "gop":
             continue
-        if old[sid] == new_price:
+        combined = service_combined_id(s)
+        if combined not in old:
+            continue
+        if old[combined] == new_price:
             continue
         changes.append({
-            "service_id": sid,
-            "name": s.get("name") or f"service {sid}",
-            "old_price": old[sid],
+            "service_id": bare,
+            "combined_id": combined,
+            "provider": service_provider(s),
+            "name": s.get("name") or f"service {bare}",
+            "old_price": old[combined],
             "new_price": new_price,
         })
     return changes
@@ -21012,18 +21838,32 @@ def _price_watch_changes(snapshot, services):
 
 def _price_watch_alert_text(changes) -> str:
     """One compact admin alert for the changed services: id, name,
-    old -> new provider rate (USD, price/420, 4 decimals), old ->
-    new Paxyo selling price (ETB), and the margin effect (margin
-    per 1000 = price x 220/420; effect = new margin - old
-    margin)."""
+    old -> new provider rate (USD, price/multiplier, 4 decimals),
+    old -> new Paxyo selling price (ETB), and the margin effect
+    (margin per 1000 = price x (multiplier-200)/multiplier — the
+    owner buys 1 USD for 200 ETB and sells at the provider's
+    multiplier: 420 for GOP, 400 for SMM)."""
     lines = [f"⚠️ Provider prices changed ({len(changes)} service"
              f"{'s' if len(changes) != 1 else ''}):"]
     for c in changes:
-        old_rate = c["old_price"] / 420
-        new_rate = c["new_price"] / 420
-        effect = (c["new_price"] - c["old_price"]) * 220 / 420
+        multiplier = (
+            SMM_SELL_MULTIPLIER_ETB
+            if c.get("provider") == "smm"
+            else GOP_SELL_MULTIPLIER_ETB
+        )
+        old_rate = c["old_price"] / multiplier
+        new_rate = c["new_price"] / multiplier
+        effect = (
+            (c["new_price"] - c["old_price"]) * (multiplier - 200) / multiplier
+        )
+        # GOP keeps its bare "#1665" label; an SMM service
+        # shows its combined id so the two providers' same numbers
+        # never look alike in the alert.
+        label = c.get("combined_id") or str(c["service_id"])
+        if label.startswith("gop:"):
+            label = label[4:]
         lines.append(
-            f"#{c['service_id']} "
+            f"#{label} "
             f"{short_service_name(c['name']) or c['name']}: "
             f"${old_rate:.4f} → ${new_rate:.4f} "
             f"({format_money(c['old_price'])} → "
@@ -21092,8 +21932,12 @@ async def run_price_watch_cycle(app):
                 price = round(float(s.get("rate_etb_per_1000") or 0), 4)
             except (TypeError, ValueError):
                 continue
+            # Snapshot keys are COMBINED ids ("gop:<id>" /
+            # "smm:<id>", second provider, 15 Nov 2026) — a bare
+            # id would let one provider's price overwrite the
+            # other's in the snapshot.
             if sid > 0:
-                new_map[str(sid)] = price
+                new_map[service_combined_id(s)] = price
         if not snapshot:
             # Bootstrap: store the first snapshot silently — every
             # price would otherwise "change" at once.
@@ -21217,8 +22061,15 @@ async def run_scheduler_cycle(app):
             services = []
         by_id = {}
         for s in services or []:
+            if not isinstance(s, dict):
+                continue
+            # Keyed by COMBINED id ("gop:<id>" / "smm:<id>", second
+            # provider, 15 Nov 2026) and — for rows without one —
+            # by bare id, first entry wins (GOP first,
+            # exactly like before).
+            by_id[service_combined_id(s)] = s
             try:
-                by_id[int(s.get("service"))] = s
+                by_id.setdefault(int(s.get("service")), s)
             except (TypeError, ValueError):
                 continue
         for sched in due:
