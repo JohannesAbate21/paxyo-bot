@@ -424,7 +424,8 @@ class FakePaxyo:
                  partial_none=False, partial_error=None,
                  fraud_flags=None, fraud_none=False,
                  order_records=None, order_status_none=False,
-                 split_cover_live=False):
+                 split_cover_live=False, dripfeed_live=False,
+                 prefs=None):
         self._balance = balance
         self._status = status
         self._status_by_order = dict(status_by_order or {})
@@ -499,9 +500,18 @@ class FakePaxyo:
         # record the split kwargs of every order created (one dict
         # per order, only the kwargs actually passed, in creation
         # order), so tests can assert the markers and the cover.
+        # Drip-feed (customizations #15, 15 Nov 2026): the same
+        # shape for GET /orders/dripfeed-status.
         self._split_cover_live = split_cover_live
+        self._dripfeed_live = dripfeed_live
         self.order_split_kwargs = []
         self.smm_order_split_kwargs = []
+        # Per-customer prefs (customizations, 15 Nov 2026): the
+        # seeded stored prefs (load_prefs returns them) and a
+        # record of every save_prefs call, so tests can assert the
+        # bot persists what the customer set.
+        self._prefs = dict(prefs) if prefs is not None else None
+        self.prefs_saved = []
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
         self.order_keys = []
@@ -652,7 +662,8 @@ class FakePaxyo:
 
     async def create_order(self, telegram_id, service_id, link, quantity, idempotency_key,
                          split_group_id=None, split_part=None,
-                         confirmed_total_etb=None, paxyo_cover_etb=None):
+                         confirmed_total_etb=None, paxyo_cover_etb=None,
+                         runs=None, interval=None):
         self.orders_created.append((service_id, link, quantity))
         self.order_keys.append(idempotency_key)
         self.order_split_kwargs.append({
@@ -661,6 +672,8 @@ class FakePaxyo:
                 "split_part": split_part,
                 "confirmed_total_etb": confirmed_total_etb,
                 "paxyo_cover_etb": paxyo_cover_etb,
+                "runs": runs,
+                "interval": interval,
             }.items() if v is not None
         })
         new_id = self._next_order_ids.pop(0) if self._next_order_ids else 1827
@@ -668,7 +681,8 @@ class FakePaxyo:
 
     async def create_order_smm(self, telegram_id, service_id, link, quantity, idempotency_key,
                              split_group_id=None, split_part=None,
-                             confirmed_total_etb=None, paxyo_cover_etb=None):
+                             confirmed_total_etb=None, paxyo_cover_etb=None,
+                             runs=None, interval=None):
         """Mirror POST /orders/smm (second provider, 15 Nov 2026):
         same shape as create_order, recorded separately so tests
         can tell which endpoint an order went to."""
@@ -680,6 +694,8 @@ class FakePaxyo:
                 "split_part": split_part,
                 "confirmed_total_etb": confirmed_total_etb,
                 "paxyo_cover_etb": paxyo_cover_etb,
+                "runs": runs,
+                "interval": interval,
             }.items() if v is not None
         })
         new_id = self._next_order_ids.pop(0) if self._next_order_ids else 1827
@@ -690,6 +706,13 @@ class FakePaxyo:
         2026): True only when the test seeds split_cover_live=True
         — the server endpoint is not live by default."""
         return self._split_cover_live
+
+    async def dripfeed_live(self):
+        """Mirror GET /orders/dripfeed-status (customizations #15,
+        15 Nov 2026): True only when the test seeds
+        dripfeed_live=True — the server endpoint is not live by
+        default."""
+        return self._dripfeed_live
 
     async def cancel_refund(self, order_id, telegram_id):
         """Mirror POST /orders/{id}/cancel-refund (stall rescue,
@@ -1268,6 +1291,23 @@ class FakePaxyo:
         self.traits_cleared.append(telegram_id)
         self._traits = None
         return {"ok": True}
+
+    # Per-customer prefs (customizations, 15 Nov 2026): mirror
+    # POST/GET /user-prefs with the same merge shape as traits
+    # (null clears, unmentioned fields stay).
+    async def save_prefs(self, telegram_id, prefs):
+        self.prefs_saved.append((telegram_id, dict(prefs)))
+        if self._prefs is None:
+            self._prefs = {}
+        for key, value in (prefs or {}).items():
+            if value is None:
+                self._prefs.pop(key, None)
+            else:
+                self._prefs[key] = value
+        return {"ok": True, "prefs": dict(self._prefs)}
+
+    async def load_prefs(self, telegram_id):
+        return dict(self._prefs) if self._prefs else None
 
     # One-time delayed orders (14 Nov 2026): mirror POST/GET
     # /delayed-orders, /cancel, /due, /claim, /finish.
@@ -19519,7 +19559,7 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
             "goal", "free_sample", "source_question", "reseller",
             "paused_services", "change_order", "off_topic", "how_to",
             "usual", "discount", "safety", "deposit", "cancel",
-            "orders", "delayed_order",
+            "orders", "delayed_order", "settings",
         ):
             with self.subTest(intent=intent):
                 self.assertIn(intent, bot.FEW_SHOT_EXAMPLES)
@@ -19527,15 +19567,18 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
         self.assertIn("10 🙏", bot.FEW_SHOT_EXAMPLES)
 
     def test_few_shot_block_stays_compact(self):
-        # 1 header + 27 examples, each one short line: the whole
+        # 1 header + 30 examples, each one short line: the whole
         # dataset does NOT go in the prompt (that would be ~1,000
         # lines and every chat would get slow and costly).
         # Service types (15 Nov 2026) added 6 examples for the new
         # platforms and multi-word kinds (spotify plays, twitch
         # live viewers, whatsapp poll votes, twitter retweets,
         # instagram story views, cheapest telegram post views).
+        # Customizations (15 Nov 2026) added 3 "settings"
+        # examples (cheapest first, what are my settings, don't
+        # message me at night).
         lines = bot.FEW_SHOT_EXAMPLES.splitlines()
-        self.assertEqual(len(lines), 28)
+        self.assertEqual(len(lines), 31)
         self.assertLess(len(bot.FEW_SHOT_EXAMPLES), 1700)
         for line in lines[1:]:
             with self.subTest(line=line):
@@ -22267,7 +22310,7 @@ class TestSplitTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(delivered), 1)
         self.assertIn("10000", delivered[0])
-        self.assertNotIn("saved", delivered[0].lower())
+        self.assertNotIn("better deal", delivered[0].lower())
         self.assertEqual(bot.WATCHED_ORDERS, {})
 
     async def test_stalled_test_moves_to_next_cheaper(self):
@@ -22358,9 +22401,12 @@ class TestSplitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("10000", delivered[0])
         # Confirmed 500.00, actually spent 30.00 + 270.00 = 300.00:
         # the 200.00 difference was never charged, and the message
-        # says so with the exact figure.
+        # says so in William's wording (15 Nov 2026 20:30 EAT):
+        # "we got a better deal and the rest of the money returned
+        # to your balance" — with the exact figure.
         self.assertIn("200.00", delivered[0])
-        self.assertIn("saved", delivered[0].lower())
+        self.assertIn("better deal", delivered[0].lower())
+        self.assertIn("returned to your balance", delivered[0].lower())
         self.assertEqual(bot.WATCHED_ORDERS, {})
 
     async def test_no_cheaper_uses_pricier_within_ten_percent(self):
@@ -22416,8 +22462,8 @@ class TestSplitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("10000", delivered[0])
         # No saving line: the order cost more than confirmed, and
         # Paxyo covered the extra — the user is never told they
-        # saved money they did not save.
-        self.assertNotIn("saved", delivered[0].lower())
+        # got a better deal they did not get.
+        self.assertNotIn("better deal", delivered[0].lower())
 
     async def test_pricier_beyond_ten_percent_refunds_no_placement(self):
         # The only remaining service is 20% above the confirmed
@@ -29135,6 +29181,1209 @@ class TestSecondProvider(_SmartLoopBase):
         pending = next(iter(bot.PENDING.values()))
         self.assertEqual(pending["service"]["combined_id"], "smm:7501")
         self.assertEqual(pending["service"]["service"], 7501)
+
+
+class _CallbackContext:
+    """Stand-in for telegram.ext.CallbackContext carrying an app:
+    on_callback reads getattr(context, "application", None), and
+    a plain None context has no app for the rescue proposal to
+    send its messages through."""
+
+
+    def __init__(self, application):
+        self.application = application
+
+
+class TestOrderCustomizations(_SmartLoopBase):
+    """The 13 approved per-customer customizations (15 Nov 2026):
+    fastest/cheapest pick (#4), ask-first rescue (#6), max
+    slowness (#8), default link (#11) and quantity (#12), price
+    ceiling (#13), refill-only (#14), drip-feed (#15),
+    auto-repeat (#16), top-up the missing part (#17), no-confirm
+    small orders (#18), quiet hours (#19), delivery deadline
+    (#20) — plus the saving-message wording (owner, 20:30 EAT)
+    and the small-order rescue order (fast first, same decision).
+    The NORMAL way stays the default for everyone who sets
+    nothing."""
+
+    def setUp(self):
+        super().setUp()
+        bot.QUIET_HELD.clear()
+        bot._PREFS_FROM_SERVER.clear()
+        bot._LAST_PREFS_SAVE.clear()
+        self._admin_ids = set(bot.ADMIN_TELEGRAM_IDS)
+
+    def tearDown(self):
+        bot.ADMIN_TELEGRAM_IDS.clear()
+        bot.ADMIN_TELEGRAM_IDS.update(self._admin_ids)
+        bot.QUIET_HELD.clear()
+        bot._PREFS_FROM_SERVER.clear()
+        bot._LAST_PREFS_SAVE.clear()
+        super().tearDown()
+
+    # -- helpers ---------------------------------------------------
+
+    def _seed(self, key, value, user_id=1):
+        # Seed the mirror directly: set_pref would queue a server
+        # save (a background task), which these tests do not need.
+        bot.USER_TRAITS.setdefault(user_id, {})[key] = value
+
+    def _svc(self, sid, minutes, price, provider="gop"):
+        return {
+            "service": sid, "provider": provider,
+            "combined_id": f"{provider}:{sid}",
+            "provider_service_id": sid,
+            "name": f"TikTok Video Views | {sid}",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": price, "min": 10, "max": 1000000,
+            "average_time": minutes, "active": True,
+        }
+
+    def _watch_test(self, order_id, service, minutes_ago=200,
+                    quantity=1000, total_qty=10000, confirmed=500.0,
+                    rescue_count=0, failed_services=None):
+        # Seed a watched 10% test leg (same shape as
+        # TestSplitTest._watch_test).
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": 1,
+            "service": service,
+            "quantity": quantity,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time() - minutes_ago * 60,
+            "avg_minutes": 1,
+            "warned": False,
+            "total": bot.estimated_total_etb(
+                float(service.get("rate_etb_per_1000") or 0), quantity),
+            "rescue_count": rescue_count,
+            "rescue_attempted": False,
+            "failed_services": list(failed_services or []),
+            "split": {
+                "group_id": "group-test-1",
+                "leg": "test",
+                "total_qty": total_qty,
+                "test_qty": quantity,
+                "rest_qty": total_qty - quantity,
+                "confirmed_total": confirmed,
+                "spent": 0.0,
+            },
+        }
+
+    def _watch_small(self, order_id, service, total=10.0):
+        # Seed a watched WHOLE small order (no split context).
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": 1,
+            "service": service,
+            "quantity": 1000,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time() - 200 * 60,
+            "avg_minutes": 1, "warned": False, "total": total,
+            "rescue_count": 0, "rescue_attempted": False,
+            "failed_services": [], "split": None,
+        }
+
+    def _refund(self, order_id=1841, refunded=50.0):
+        return {
+            "success": True, "ok": True, "order_id": order_id,
+            "refunded_etb": refunded, "provider_status": "canceled",
+            "duplicate": False,
+        }
+
+    async def _callback_with_app(self, data, paxyo=None):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        app = FakeApp()
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, _CallbackContext(app))
+        return query, app
+
+    async def _complete(self, merged, paxyo=None, user_id=1):
+        msg = FakeMessage()
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            result = await bot.complete_order(
+                msg, user_id, dict(merged), "en"
+            )
+        return msg, result
+
+    def _views_merged(self, **overrides):
+        merged = {
+            "platform": "tiktok",
+            "service_hint": "tiktok views",
+            "link": "https://tiktok.com/@x/video/1",
+            "quantity": 1000,
+        }
+        merged.update(overrides)
+        return merged
+
+    # -- prefs core ------------------------------------------------
+
+    def test_validate_set_get_clear(self):
+        self.assertEqual(
+            bot.validate_pref("pref_pick_order", "cheapest"),
+            "cheapest")
+        self.assertIsNone(
+            bot.validate_pref("pref_pick_order", "random"))
+        self.assertEqual(
+            bot.validate_pref("pref_max_slowness_min", 60), 60)
+        self.assertIsNone(
+            bot.validate_pref("pref_max_slowness_min", 4))
+        self.assertIsNone(
+            bot.validate_pref("pref_max_slowness_min", 20000))
+        self.assertIsNone(bot.validate_pref("pref_nope", True))
+        self.assertIsNone(bot.validate_pref("pref_ask_first", "yes"))
+        # Defaults: nothing set means the normal way.
+        self.assertIsNone(bot.get_pref(1, "pref_pick_order"))
+        self.assertEqual(bot.pref_pick_order(1), "fastest")
+        self.assertFalse(bot.pref_ask_first(1))
+        self.assertFalse(bot.pref_topup_missing(1))
+        self.assertEqual(bot.pref_no_confirm_cap(1), (False, 0))
+        # set/get/clear round trip (sync: no running loop, so no
+        # save task is queued).
+        self.assertEqual(
+            bot.set_pref(1, "pref_pick_order", "cheapest"),
+            "cheapest")
+        self.assertEqual(bot.get_pref(1, "pref_pick_order"), "cheapest")
+        self.assertEqual(bot.pref_pick_order(1), "cheapest")
+        bot.clear_pref(1, "pref_pick_order")
+        self.assertIsNone(bot.get_pref(1, "pref_pick_order"))
+        self.assertEqual(bot.pref_pick_order(1), "fastest")
+        # An invalid set stores nothing.
+        self.assertIsNone(
+            bot.set_pref(1, "pref_no_confirm_max_etb", 500))
+        self.assertIsNone(
+            bot.get_pref(1, "pref_no_confirm_max_etb"))
+
+    def test_default_quantity_lookup_order(self):
+        self._seed("pref_default_quantity", {
+            "tiktok:views": 2000, "*:followers": 3000, "*": 500,
+        })
+        # Exact platform:metric wins.
+        self.assertEqual(
+            bot.pref_default_quantity(1, "tiktok", "views"), 2000)
+        # Then *:metric, then the global "*".
+        self.assertEqual(
+            bot.pref_default_quantity(1, "instagram", "followers"),
+            3000)
+        self.assertEqual(
+            bot.pref_default_quantity(1, "instagram", "likes"), 500)
+        # No pref at all: no default.
+        self.assertIsNone(bot.pref_default_quantity(2, "tiktok", "views"))
+
+    def test_in_quiet_hours_overnight_and_day(self):
+        from datetime import datetime
+
+        self._seed("pref_quiet_hours",
+                   {"start": "22:00", "end": "07:00"})
+        tz = bot.EAT_TZ
+        self.assertTrue(bot.in_quiet_hours(
+            1, now=datetime(2026, 11, 15, 23, 0, tzinfo=tz)))
+        self.assertTrue(bot.in_quiet_hours(
+            1, now=datetime(2026, 11, 16, 6, 30, tzinfo=tz)))
+        self.assertTrue(bot.in_quiet_hours(
+            1, now=datetime(2026, 11, 15, 22, 0, tzinfo=tz)))
+        self.assertFalse(bot.in_quiet_hours(
+            1, now=datetime(2026, 11, 16, 7, 0, tzinfo=tz)))
+        self.assertFalse(bot.in_quiet_hours(
+            1, now=datetime(2026, 11, 15, 12, 0, tzinfo=tz)))
+        self.assertFalse(bot.in_quiet_hours(
+            1, now=datetime(2026, 11, 15, 21, 59, tzinfo=tz)))
+        # Nobody set quiet hours: never quiet.
+        self.assertFalse(bot.in_quiet_hours(
+            2, now=datetime(2026, 11, 15, 23, 0, tzinfo=tz)))
+
+    def test_filter_pref_candidates(self):
+        fast = self._svc(7000, "1 minute", 10.0)
+        slow = self._svc(7001, "24 hours", 1.26)
+        no_refill = dict(fast, refill=False)
+        with_refill = dict(fast, refill=True)
+        # Max slowness drops the slow one and names the filter.
+        self._seed("pref_max_slowness_min", 60)
+        kept, blocked = bot.filter_pref_candidates([fast, slow], 1)
+        self.assertEqual([s["service"] for s in kept], [7000])
+        self.assertIsNone(blocked)
+        kept, blocked = bot.filter_pref_candidates([slow], 1)
+        self.assertEqual(kept, [])
+        self.assertEqual(blocked, "max_slowness")
+        bot.clear_pref(1, "pref_max_slowness_min")
+        # Price ceiling drops the pricey one.
+        self._seed("pref_price_ceiling", 5.0)
+        kept, blocked = bot.filter_pref_candidates([fast, slow], 1)
+        self.assertEqual([s["service"] for s in kept], [7001])
+        self.assertIsNone(blocked)
+        kept, blocked = bot.filter_pref_candidates([fast], 1)
+        self.assertEqual(blocked, "price_ceiling")
+        # skip_ceiling is for rescues: the ceiling does not apply.
+        kept, blocked = bot.filter_pref_candidates(
+            [fast], 1, skip_ceiling=True)
+        self.assertEqual([s["service"] for s in kept], [7000])
+        self.assertIsNone(blocked)
+        bot.clear_pref(1, "pref_price_ceiling")
+        # Refill-only drops a service without refill.
+        self._seed("pref_refill_only", True)
+        kept, blocked = bot.filter_pref_candidates(
+            [no_refill, with_refill], 1)
+        self.assertEqual([s["service"] for s in kept], [7000])
+        kept, blocked = bot.filter_pref_candidates([no_refill], 1)
+        self.assertEqual(blocked, "refill_only")
+        bot.clear_pref(1, "pref_refill_only")
+        # The ban list (#39) drops the banned service.
+        self._seed("pref_banned_services", ["7000"])
+        kept, blocked = bot.filter_pref_candidates([fast, slow], 1)
+        self.assertEqual([s["service"] for s in kept], [7001])
+        kept, blocked = bot.filter_pref_candidates([fast], 1)
+        self.assertEqual(blocked, "banned")
+        bot.clear_pref(1, "pref_banned_services")
+        # Start-fast-only (#36) keeps only services starting
+        # within 15 minutes.
+        self._seed("pref_start_fast_only", True)
+        kept, blocked = bot.filter_pref_candidates([fast, slow], 1)
+        self.assertEqual([s["service"] for s in kept], [7000])
+        kept, blocked = bot.filter_pref_candidates([slow], 1)
+        self.assertEqual(blocked, "start_fast")
+        bot.clear_pref(1, "pref_start_fast_only")
+        # No prefs at all: nothing is filtered.
+        kept, blocked = bot.filter_pref_candidates([fast, slow], 1)
+        self.assertEqual(len(kept), 2)
+        self.assertIsNone(blocked)
+
+    def test_parse_deadline_and_drip(self):
+        from datetime import datetime
+
+        now = datetime(2026, 11, 15, 12, 0, tzinfo=bot.EAT_TZ)
+        # Sunday 15 Nov 12:00 EAT: "by friday 5pm" is Fri 20 Nov.
+        deadline = bot.parse_deadline("by friday 5pm", now=now)
+        self.assertEqual(
+            (deadline.day, deadline.hour), (20, 17))
+        self.assertEqual(
+            bot.parse_deadline("by 5pm", now=now).hour, 17)
+        self.assertEqual(
+            bot.parse_deadline("need it in 2 hours", now=now).hour, 14)
+        # A plain "in 2 hours" is not a deadline.
+        self.assertIsNone(bot.parse_deadline("in 2 hours", now=now))
+        self.assertIsNone(bot.parse_deadline("hello", now=now))
+        # Drip span: needs the spread word AND "over" + a duration.
+        self.assertEqual(
+            bot.parse_drip_span("spread 10000 views over 2 days"),
+            2880)
+        self.assertEqual(
+            bot.parse_drip_span("drip feed over 3 hours"), 180)
+        self.assertIsNone(bot.parse_drip_span("in 2 hours"))
+        # Drip plan: 10,000 over 2 days is 10 runs of 1,000.
+        svc = self._svc(7000, "1 minute", 10.0)
+        self.assertEqual(bot.drip_plan(10000, svc, 2880), (10, 288, 1000))
+        # An odd quantity cannot be split into equal runs.
+        self.assertIsNone(bot.drip_plan(10005, svc, 2880))
+
+    # -- settings chat handling ------------------------------------
+
+    async def test_settings_show_set_and_clear(self):
+        msg, _ = await self._turns([
+            ("what are my settings", intent_of("settings")),
+        ])
+        self.assertIn("haven't set anything yet", msg.text_sent[0])
+        msg, _ = await self._turns([
+            ("cheapest first", intent_of("settings")),
+        ])
+        self.assertIn("cheapest first", msg.text_sent[0].lower())
+        self.assertEqual(bot.get_pref(1, "pref_pick_order"), "cheapest")
+        # The settings list now names it.
+        msg, _ = await self._turns([
+            ("what are my settings", intent_of("settings")),
+        ])
+        self.assertIn("cheapest first", msg.text_sent[0].lower())
+
+    async def test_settings_reset_clears_all(self):
+        await self._turns([
+            ("cheapest first", intent_of("settings")),
+            ("don't message me at night", intent_of("settings")),
+        ])
+        self.assertEqual(bot.get_pref(1, "pref_pick_order"), "cheapest")
+        self.assertIsNotNone(bot.pref_quiet_hours(1))
+        # "reset my settings" is a clear-all, NOT a show — the
+        # show check runs after it for exactly this reason.
+        msg, _ = await self._turns([
+            ("reset my settings", intent_of("settings")),
+        ])
+        self.assertIn("cleared", msg.text_sent[0].lower())
+        self.assertIsNone(bot.get_pref(1, "pref_pick_order"))
+        self.assertIsNone(bot.pref_quiet_hours(1))
+
+    def test_settings_never_matches_orders(self):
+        self.assertIsNone(
+            bot.parse_pref_command("order 1000 tiktok views"))
+        self.assertIsNone(
+            bot.parse_pref_command("cheapest tiktok followers"))
+        self.assertIsNone(bot.parse_pref_command("yes"))
+        self.assertIsNone(
+            bot.parse_pref_command("i want 1000 instagram followers"))
+
+    async def test_no_confirm_confirm_back_and_cap(self):
+        # The opt-in is confirmed back in chat, with the cap.
+        msg, _ = await self._turns([
+            ("place small orders without asking",
+             intent_of("settings")),
+        ])
+        self.assertIn("without asking", msg.text_sent[0].lower())
+        self.assertIn("50", msg.text_sent[0])
+        self.assertTrue(bot.get_pref(1, "pref_no_confirm"))
+        self.assertEqual(
+            bot.get_pref(1, "pref_no_confirm_max_etb"), 50)
+        # A cap above 100 ETB is capped at 100 — never more.
+        msg, _ = await self._turns([
+            ("orders under 200 birr just place them",
+             intent_of("settings")),
+        ])
+        self.assertIn("100", msg.text_sent[0])
+        self.assertEqual(
+            bot.get_pref(1, "pref_no_confirm_max_etb"), 100)
+
+    # -- order flow ------------------------------------------------
+
+    async def test_cheapest_first_pick_vs_default(self):
+        # The fixture's cheapest service is the SLOWEST: default
+        # (fastest first) picks a 10.00 service, cheapest-first
+        # picks #5535 at 1.26.
+        fake = FakePaxyo(services=_views_fixture())
+        msg, result = await self._complete(
+            self._views_merged(), paxyo=fake)
+        self.assertTrue(result)
+        self.assertIn("Please confirm", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["total"], 10.00)
+        self.assertNotEqual(pending["service"]["service"], 5535)
+        # Cheapest-first on: the same order lands on #5535.
+        bot.PENDING.clear()
+        self._seed("pref_pick_order", "cheapest")
+        msg, result = await self._complete(
+            self._views_merged(), paxyo=fake)
+        self.assertTrue(result)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 5535)
+        self.assertEqual(pending["total"], 1.26)
+
+    async def test_pref_filter_blocks_all(self):
+        # Every candidate is slower than the customer's limit: the
+        # bot says which setting blocked it and keeps the draft.
+        self._seed("pref_max_slowness_min", 60)
+        slow = self._svc(7001, "24 hours", 1.26)
+        msg, result = await self._complete(
+            self._views_merged(),
+            paxyo=FakePaxyo(services=[slow]))
+        self.assertFalse(result)
+        self.assertIn("speed limit", msg.text_sent[0].lower())
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+
+    async def test_deadline_blocks_and_place_it_anyway(self):
+        from datetime import datetime, timedelta
+
+        # A deadline 30 minutes out, and only a 24-hour service:
+        # nothing can make it.
+        deadline = (
+            datetime.now(bot.EAT_TZ) + timedelta(minutes=30)
+        ).isoformat()
+        slow = self._svc(7001, "24 hours", 1.26)
+        msg, result = await self._complete(
+            self._views_merged(deadline=deadline),
+            paxyo=FakePaxyo(services=[slow]))
+        self.assertFalse(result)
+        self.assertIn("place it anyway", msg.text_sent[0].lower())
+        # "place it anyway" clears the deadline and the order goes
+        # through on the Confirm card, with no deadline on it.
+        bot.PARTIAL[1] = self._views_merged(deadline=deadline)
+        msg, _ = await self._turns([
+            ("place it anyway", intent_of("order")),
+        ], paxyo=FakePaxyo(services=[slow]))
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertNotIn("Needed by", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertNotIn("deadline", pending)
+
+    async def test_no_confirm_small_places_without_card(self):
+        self._seed("pref_no_confirm", True)
+        self._seed("pref_no_confirm_max_etb", 50)
+        fake = FakePaxyo(services=_views_fixture())
+        # 1,000 views at 10.00 is under the 50 cap: placed at
+        # once, no Confirm card, and the summary says so.
+        msg, result = await self._complete(
+            self._views_merged(), paxyo=fake)
+        self.assertTrue(result)
+        self.assertEqual(len(fake.orders_created), 1)
+        service_id, link, quantity = fake.orders_created[0]
+        self.assertEqual(
+            (link, quantity),
+            ("https://tiktok.com/@x/video/1", 1000))
+        # One of the 100 fast 10.00 services — not the slow
+        # cheapest one: fastest-first still rules the pick.
+        self.assertIn(service_id, range(7000, 7100))
+        self.assertIn("Placed without asking", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+        # A big order still gets its Confirm card.
+        fake2 = FakePaxyo(services=_views_fixture())
+        msg, result = await self._complete(
+            self._views_merged(quantity=10000), paxyo=fake2)
+        self.assertTrue(result)
+        self.assertEqual(fake2.orders_created, [])
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_no_confirm_never_for_drip(self):
+        self._seed("pref_no_confirm", True)
+        self._seed("pref_no_confirm_max_etb", 50)
+        fake = FakePaxyo(
+            services=_views_fixture(), dripfeed_live=True)
+        # A drip order must be shown on the card first, even when
+        # the customer opted into no-confirm small orders.
+        msg, result = await self._complete(
+            self._views_merged(quantity=10000, drip_span=2880),
+            paxyo=fake)
+        self.assertTrue(result)
+        self.assertEqual(fake.orders_created, [])
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn("Drip-feed: 10 runs of 1,000", msg.text_sent[0])
+
+    async def test_drip_refused_when_server_not_live(self):
+        fake = FakePaxyo(
+            services=_views_fixture(), dripfeed_live=False)
+        msg, result = await self._complete(
+            self._views_merged(quantity=10000, drip_span=2880),
+            paxyo=fake)
+        self.assertFalse(result)
+        self.assertIn("isn't set up on the server yet", msg.text_sent[0])
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_drip_refused_on_non_dripfeed_service(self):
+        svc = dict(self._svc(7000, "1 minute", 10.0), dripfeed=False)
+        fake = FakePaxyo(services=[svc], dripfeed_live=True)
+        msg, result = await self._complete(
+            self._views_merged(quantity=10000, drip_span=2880),
+            paxyo=fake)
+        self.assertFalse(result)
+        self.assertIn("doesn't offer drip-feed", msg.text_sent[0])
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_place_pending_order_drip_branch(self):
+        # A drip order is placed WHOLE — one provider order with
+        # runs/interval — never split-tested, even though the
+        # 500.00 total is over the 400 split-test line.
+        svc = dict(self._svc(7000, "1 minute", 10.0), dripfeed=True)
+        fake = FakePaxyo(services=[svc], dripfeed_live=True)
+        pending = {
+            "service": svc, "quantity": 10000,
+            "link": "https://tiktok.com/@x/video/1", "total": 500.0,
+            "drip": {"runs": 10, "interval": 288, "per_run_qty": 1000},
+        }
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(pending, 1)
+        self.assertIsNone(error)
+        self.assertEqual(result["drip"]["runs"], 10)
+        self.assertEqual(
+            fake.orders_created,
+            [(7000, "https://tiktok.com/@x/video/1", 1000)])
+        self.assertEqual(
+            fake.order_split_kwargs, [{"runs": 10, "interval": 288}])
+        entry = bot.WATCHED_ORDERS["1827"]
+        self.assertEqual(entry["drip"]["runs"], 10)
+        self.assertIsNone(entry.get("split"))
+
+    async def test_drip_order_never_stall_rescued(self):
+        # A drip order delivering over 2 days is not "stuck"
+        # after a few hours: the watch cycle leaves it alone.
+        svc = self._svc(7000, "1 minute", 10.0)
+        self._watch_small("1841", svc)
+        bot.WATCHED_ORDERS["1841"]["drip"] = {
+            "runs": 10, "interval": 288, "per_run_qty": 1000,
+        }
+        fake = FakePaxyo(services=[svc])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertIn("1841", bot.WATCHED_ORDERS)
+        self.assertEqual(app.bot.sent, [])
+
+    # -- ask-first rescue ------------------------------------------
+
+    async def test_ask_first_stall_proposes_and_waits(self):
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 9.0),
+        ]
+        self._watch_small("1841", services[0])
+        self._seed("pref_ask_first", True)
+        fake = FakePaxyo(
+            services=services,
+            cancel_refund_result=self._refund())
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        # Asked, not moved: no order, no refund yet.
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("Should I move it there?", app.bot.sent[0][1])
+        markup = app.bot.sent_markups[0]
+        buttons = [
+            b for row in markup.inline_keyboard for b in row
+        ]
+        self.assertEqual(
+            [b.callback_data for b in buttons],
+            ["rescue_yes:1841", "rescue_no:1841"])
+        entry = bot.WATCHED_ORDERS["1841"]
+        self.assertEqual(entry["rescue_proposal"]["kind"], "stall")
+        self.assertTrue(entry["warned"])
+
+    async def test_ask_first_yes_moves_it(self):
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 9.0),
+        ]
+        self._watch_small("1841", services[0])
+        self._seed("pref_ask_first", True)
+        fake = FakePaxyo(
+            services=services,
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        query, _app = await self._callback_with_app(
+            "rescue_yes:1841", paxyo=fake)
+        self.assertIn("Moving it", query.edited[0])
+        self.assertEqual(
+            fake.orders_created,
+            [(7001, "https://tiktok.com/@x/video/1", 1000)])
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+
+    async def test_ask_first_no_refunds(self):
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 9.0),
+        ]
+        self._watch_small("1841", services[0])
+        self._seed("pref_ask_first", True)
+        fake = FakePaxyo(
+            services=services,
+            cancel_refund_result=self._refund())
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        query, _app = await self._callback_with_app(
+            "rescue_no:1841", paxyo=fake)
+        self.assertIn("refunded", query.edited[0].lower())
+        self.assertIn("Nothing was moved", query.edited[0])
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+
+    async def test_default_auto_rescue_unchanged(self):
+        # Nobody set ask-first: the stuck order moves by itself,
+        # no question is ever asked.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 9.0),
+        ]
+        self._watch_small("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            cancel_refund_result=self._refund())
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(
+            fake.orders_created,
+            [(7001, "https://tiktok.com/@x/video/1", 1000)])
+        self.assertFalse(any(
+            "rescue_yes" in str(m) for m in app.bot.sent_markups
+        ))
+
+    async def test_rescue_pick_fastest_first_vs_cheapest_first(self):
+        # Owner decision (20:30 EAT): a small-order rescue takes
+        # the next FASTEST service that fits the confirmed price,
+        # not the cheapest — A is 2 min at 9.50, B is 3 min at
+        # 8.00, both fit the 10.00 confirmed. Cheapest-first
+        # customers get B instead.
+        stalled = self._svc(7000, "1 minute", 10.0)
+        fast = self._svc(7001, "2 minutes", 9.5)
+        cheap = self._svc(7002, "3 minutes", 8.0)
+        services = [stalled, fast, cheap]
+        self._watch_small("1841", stalled)
+        fake = FakePaxyo(
+            services=services,
+            cancel_refund_result=self._refund())
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created[0][0], 7001)
+        # Cheapest-first: the same stall moves to the cheapest
+        # affordable service instead.
+        bot.WATCHED_ORDERS.clear()
+        self._watch_small("1841", stalled)
+        self._seed("pref_pick_order", "cheapest")
+        fake2 = FakePaxyo(
+            services=services,
+            cancel_refund_result=self._refund())
+        app2 = FakeApp()
+        with mock.patch("bot.paxyo", fake2):
+            await bot.run_delivery_watch_cycle(app2)
+        self.assertEqual(fake2.orders_created[0][0], 7002)
+
+    async def test_split_test_propose(self):
+        # A stalled split-test leg also asks first: the proposal
+        # is stored (kind "split_test"), and nothing is refunded
+        # or ordered until the customer answers.
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+            self._svc(7002, "3 minutes", 30.0),
+        ]
+        self._watch_test("1841", services[0])
+        self._seed("pref_ask_first", True)
+        fake = FakePaxyo(
+            services=services,
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842, 1843])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        entry = bot.WATCHED_ORDERS["1841"]
+        self.assertEqual(
+            entry["rescue_proposal"]["kind"], "split_test")
+        self.assertIn("Should I move it there?", app.bot.sent[0][1])
+
+    # -- saving message (owner wording, 20:30 EAT) -----------------
+
+    def test_saving_message_wording_en_and_am(self):
+        en = bot.t(
+            "order_split_saved", "en",
+            saved="200.00", total="500.00")
+        self.assertIn("better deal", en.lower())
+        self.assertIn("returned to your balance", en.lower())
+        self.assertIn("200.00", en)
+        am = bot.t(
+            "order_split_saved", "am",
+            saved="200.00", total="500.00")
+        self.assertIn("የተሻለ ስምምነት", am)
+        self.assertIn("ተመልሷል", am)
+
+    async def test_saving_message_in_amharic_on_delivery(self):
+        # The full cheaper path, with the customer speaking
+        # Amharic: the delivery message carries the saving line
+        # in Amharic.
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+            self._svc(7002, "3 minutes", 30.0),
+        ]
+        self._watch_test("1841", services[0])
+        bot.LAST_LANG[1] = "am"
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={
+                "1841": "pending", "1842": "completed",
+                "1843": "completed",
+            },
+            cancel_refund_result=self._refund(),
+            cancel_refund_results={
+                "1841": self._refund(refunded=50.0),
+            },
+            next_order_ids=[1842, 1843],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        texts = [text for _, text in app.bot.sent]
+        self.assertTrue(any(
+            "የተሻለ ስምምነት" in t and "ተመልሷል" in t
+            for t in texts
+        ))
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    # -- top-up the missing part (#17) -----------------------------
+
+    async def test_topup_places_missing_part(self):
+        svc = self._svc(7000, "1 minute", 10.0)
+        self._watch_small("1841", svc)
+        self._seed("pref_topup_missing", True)
+        fake = FakePaxyo(services=[svc], status="partial")
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        # 700 of 1,000 delivered, 300 refunded (12.60 ETB): the
+        # missing 300 costs 3.00, paid from the refund.
+        self.assertEqual(
+            fake.orders_created,
+            [(7000, "https://tiktok.com/@x/video/1", 300)])
+        texts = " ".join(text for _, text in app.bot.sent)
+        self.assertIn("I ordered the missing 300 myself", texts)
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+
+    async def test_topup_too_expensive_refunds_instead(self):
+        # The same service at 100.00/1,000: the missing 300 costs
+        # 30.00, the refund is only 12.60 and the confirmed total
+        # is 10.00 (cover at most 1.00) — the refund stands.
+        svc = self._svc(7000, "1 minute", 100.0)
+        self._watch_small("1841", svc)
+        self._seed("pref_topup_missing", True)
+        fake = FakePaxyo(services=[svc], status="partial")
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        texts = " ".join(text for _, text in app.bot.sent)
+        self.assertIn("I refunded it instead", texts)
+
+    async def test_topup_off_by_default(self):
+        svc = self._svc(7000, "1 minute", 10.0)
+        self._watch_small("1841", svc)
+        fake = FakePaxyo(services=[svc], status="partial")
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        texts = " ".join(text for _, text in app.bot.sent)
+        self.assertIn("12.60", texts)
+
+    # -- auto-cancel (#34) -----------------------------------------
+
+    async def test_auto_cancel_stuck_order(self):
+        svc = self._svc(7000, "1 minute", 10.0)
+        self._watch_small("1841", svc)
+        self._seed("pref_auto_cancel_min", 60)
+        fake = FakePaxyo(
+            services=[svc], cancel_refund_result=self._refund())
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        # Stuck 200 minutes, limit 60: cancelled + refunded, no
+        # rescue order, no stuck warning.
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+        texts = " ".join(text for _, text in app.bot.sent)
+        self.assertIn("taking too long", texts)
+        self.assertIn("50.00", texts)
+
+    # -- quiet hours (#19) -----------------------------------------
+
+    async def test_notify_user_holds_in_quiet_hours(self):
+        self._seed("pref_quiet_hours",
+                   {"start": "22:00", "end": "07:00"})
+        app = FakeApp()
+        with mock.patch("bot.in_quiet_hours", return_value=True):
+            await bot.notify_user(app, 1, "hello")
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(bot.QUIET_HELD[1], [("hello", None)])
+        # Outside quiet hours it goes out at once.
+        with mock.patch("bot.in_quiet_hours", return_value=False):
+            await bot.notify_user(app, 1, "hello again")
+        self.assertEqual(app.bot.sent, [(1, "hello again")])
+        # Admins are exempt: William's alerts always go out.
+        bot.ADMIN_TELEGRAM_IDS.add(1)
+        try:
+            with mock.patch("bot.in_quiet_hours", return_value=True):
+                await bot.notify_user(app, 1, "admin alert")
+        finally:
+            bot.ADMIN_TELEGRAM_IDS.discard(1)
+        self.assertEqual(app.bot.sent[-1], (1, "admin alert"))
+
+    async def test_quiet_flush_sends_morning_batch(self):
+        bot.QUIET_HELD[1] = [("update 1", None), ("update 2", None)]
+        app = FakeApp()
+        with mock.patch("bot.in_quiet_hours", return_value=False):
+            await bot.run_quiet_flush_cycle(app)
+        sent = [text for _, text in app.bot.sent]
+        self.assertEqual(len(sent), 3)
+        self.assertIn("Good morning", sent[0])
+        self.assertEqual(sent[1], "update 1")
+        self.assertEqual(sent[2], "update 2")
+        self.assertEqual(bot.QUIET_HELD, {})
+        # Still inside quiet hours: everything stays held.
+        bot.QUIET_HELD[1] = [("update 3", None)]
+        with mock.patch("bot.in_quiet_hours", return_value=True):
+            await bot.run_quiet_flush_cycle(app)
+        self.assertEqual(len(app.bot.sent), 3)
+        self.assertEqual(bot.QUIET_HELD[1], [("update 3", None)])
+
+    # -- auto-repeat (#16) -----------------------------------------
+
+    async def test_auto_repeat_creates_once_dedupes_and_skips_smm(self):
+        svc = _views_fixture()[0]
+        self._seed("pref_auto_repeat", {
+            "interval_minutes": 10080,
+            "platform": "tiktok", "metric": "views",
+        })
+        pending = {
+            "service": svc,
+            "link": "https://tiktok.com/@x/video/1",
+            "quantity": 1000,
+        }
+        fake = FakePaxyo(services=_views_fixture())
+        with mock.patch("bot.paxyo", fake):
+            created = await bot._maybe_start_auto_repeat(1, pending)
+        self.assertTrue(created)
+        self.assertEqual(fake.recurring_created, [{
+            "telegram_id": 1, "service_id": 7000,
+            "link": "https://tiktok.com/@x/video/1",
+            "quantity": 1000, "interval_minutes": 10080,
+        }])
+        # A schedule for the same type already exists: no second one.
+        fake2 = FakePaxyo(
+            services=_views_fixture(),
+            schedules=[{"id": 7, "service_id": 7000}])
+        with mock.patch("bot.paxyo", fake2):
+            created = await bot._maybe_start_auto_repeat(1, pending)
+        self.assertFalse(created)
+        self.assertEqual(fake2.recurring_created, [])
+        # An SMM order skips auto-repeat (the server's recurring
+        # row carries no provider column yet).
+        smm_pending = dict(
+            pending,
+            service=dict(svc, provider="smm",
+                         combined_id="smm:7000"))
+        fake3 = FakePaxyo(services=_views_fixture())
+        with mock.patch("bot.paxyo", fake3):
+            created = await bot._maybe_start_auto_repeat(
+                1, smm_pending)
+        self.assertFalse(created)
+        self.assertEqual(fake3.recurring_created, [])
+
+    # -- prefs persistence -----------------------------------------
+
+    async def test_prefs_persist_round_trip(self):
+        fake = FakePaxyo(prefs={
+            "pref_pick_order": "cheapest",
+            "pref_ask_first": True,
+        })
+        with mock.patch("bot.paxyo", fake):
+            await bot._restore_prefs(1)
+        self.assertEqual(bot.get_pref(1, "pref_pick_order"), "cheapest")
+        self.assertTrue(bot.get_pref(1, "pref_ask_first"))
+        with mock.patch("bot.paxyo", fake):
+            bot.set_pref(1, "pref_pick_order", "fastest")
+            await self._flush()
+        self.assertIn(
+            (1, {"pref_pick_order": "fastest"}), fake.prefs_saved)
+        # The 5-second throttle: clear the clock so the null-clear
+        # save is queued too.
+        bot._LAST_PREFS_SAVE.clear()
+        with mock.patch("bot.paxyo", fake):
+            bot.clear_pref(1, "pref_ask_first")
+            await self._flush()
+        self.assertIn(
+            (1, {"pref_ask_first": None}), fake.prefs_saved)
+        self.assertIsNone(bot.get_pref(1, "pref_ask_first"))
+
+    # -- default link / quantity fill ------------------------------
+
+    async def test_default_link_fills_order(self):
+        self._seed(
+            "pref_default_link", "https://tiktok.com/@x/video/1")
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views", quantity=1000)),
+        ], paxyo=FakePaxyo(services=_views_fixture()))
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn(
+            "https://tiktok.com/@x/video/1", msg.text_sent[0])
+
+    async def test_default_link_control_asks_for_link(self):
+        msg, _ = await self._turns([
+            ("I want 1000 tiktok views",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views", quantity=1000)),
+        ], paxyo=FakePaxyo(services=_views_fixture()))
+        self.assertIn("send the link", msg.text_sent[0].lower())
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_default_quantity_fills_order(self):
+        self._seed("pref_default_quantity", {"tiktok:views": 2000})
+        msg, _ = await self._turns([
+            ("I want tiktok views https://tiktok.com/@x/video/1",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views",
+                       link="https://tiktok.com/@x/video/1")),
+        ], paxyo=FakePaxyo(services=_views_fixture()))
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn("2000", msg.text_sent[0])
+
+
+class TestCustomizationDataset(_SmartLoopBase):
+    """The ~1,000-message customization dataset (05/06) and its
+    training wiring: the files themselves, the parser's coverage
+    of the new options in English and Amharic, the "settings"
+    intent, the few-shot examples in the prompt, and two-at-once
+    settings."""
+
+    def _load_dataset(self, name):
+        import os
+        import re
+
+        path = os.path.join(
+            os.path.dirname(bot.__file__), "golden-dataset", name
+        )
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def _dataset_counts(self, name):
+        import re
+
+        text = self._load_dataset(name)
+        users = re.findall(r"^\d+\. User: ", text, flags=re.M)
+        shoulds = re.findall(r"Bot should:", text)
+        return len(users), len(shoulds), text
+
+    # -- the files -------------------------------------------------
+
+    def test_dataset_files_total_one_thousand(self):
+        en_users, en_shoulds, en_text = self._dataset_counts(
+            "05-customizations-english.md")
+        am_users, am_shoulds, am_text = self._dataset_counts(
+            "06-customizations-amharic.md")
+        self.assertEqual(en_users, 623)
+        self.assertEqual(am_users, 377)
+        self.assertEqual(en_users + am_users, 1000)
+        # Every example carries its expected behaviour.
+        self.assertEqual(en_shoulds, en_users)
+        self.assertEqual(am_shoulds, am_users)
+        # The provider is never named, in either file.
+        for text in (en_text, am_text):
+            self.assertNotRegex(text, r"(?i)godofpanel")
+            self.assertNotRegex(text, r"(?i)smmsocialmedia")
+
+    # -- parser: the new options, English --------------------------
+
+    def test_parser_new_options_english(self):
+        cases = [
+            # Favourites (#21): one service adds, a list replaces.
+            ("my favourite service is 5535",
+             {"action": "add_favourite", "id": "5535"}),
+            ("my favourite services are 5535, 6001",
+             {"action": "set_favourites",
+              "ids": ["5535", "6001"]}),
+            # Low-balance alert (#24) and weekly limit (#25).
+            ("warn me when my balance is below 100 birr",
+             {"action": "set", "key": "pref_low_balance_alert_etb",
+              "value": 100}),
+            ("don't let me spend more than 500 birr a week",
+             {"action": "set",
+              "key": "pref_weekly_spend_limit_etb", "value": 500}),
+            # Saved links (#31).
+            ("remember my main link https://tiktok.com/@x",
+             {"action": "set_saved_link", "name": "main",
+              "link": "https://tiktok.com/@x"}),
+            # Auto-cancel (#34) and start-fast-only (#36).
+            ("cancel it if it takes longer than 2 hours",
+             {"action": "set", "key": "pref_auto_cancel_min",
+              "value": 120}),
+            ("only use services that start fast",
+             {"action": "set", "key": "pref_start_fast_only",
+              "value": True}),
+            ("turn off start fast only",
+             {"action": "set", "key": "pref_start_fast_only",
+              "value": False}),
+            # Language lock (#37) and double confirm (#38).
+            ("always reply in amharic",
+             {"action": "set", "key": "pref_language",
+              "value": "am"}),
+            ("ask me twice before orders over 1000 birr",
+             {"action": "set", "key": "pref_double_confirm_etb",
+              "value": 1000}),
+            # Ban list (#39) and try-new (#40).
+            ("never use service 5535",
+             {"action": "add_banned", "ids": ["5535"]}),
+            ("try new services",
+             {"action": "set", "key": "pref_try_new",
+              "value": True}),
+            ("stop trying new services",
+             {"action": "set", "key": "pref_try_new",
+              "value": False}),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                action = bot.parse_pref_command(text)
+                self.assertIsNotNone(action, text)
+                for key, value in expected.items():
+                    self.assertEqual(action.get(key), value, text)
+
+    async def test_handler_new_options_english(self):
+        # Pause repeats (#27): one schedule paused, one line back.
+        msg, fake = await self._turns([
+            ("pause my repeats", intent_of("settings")),
+        ], paxyo=FakePaxyo(schedules=[{"id": 7}]))
+        self.assertIn("paused 1 repeating order", msg.text_sent[0])
+        self.assertEqual(fake.recurring_paused, [7])
+        # Best time (#32): the fastest TikTok views time is named.
+        msg, _ = await self._turns([
+            ("what time is best for tiktok views",
+             intent_of("settings")),
+        ], paxyo=FakePaxyo(services=_views_fixture()))
+        self.assertIn("fastest", msg.text_sent[0].lower())
+        self.assertIn("1 minute", msg.text_sent[0])
+        # Watch my post (#30): remembered, honestly not live yet.
+        msg, _ = await self._turns([
+            ("watch my post https://tiktok.com/@x/video/1 and top it up",
+             intent_of("settings")),
+        ])
+        self.assertIn("isn't switched on yet", msg.text_sent[0])
+        self.assertEqual(
+            bot.get_pref(1, "pref_watch_post")["link"],
+            "https://tiktok.com/@x/video/1")
+        # Wait for a lower price (#33): remembered, honestly not
+        # live yet.
+        msg, _ = await self._turns([
+            ("wait until tiktok views are under 2 birr",
+             intent_of("settings")),
+        ])
+        self.assertIn("isn't switched on yet", msg.text_sent[0])
+        self.assertEqual(
+            bot.get_pref(1, "pref_wait_price")["target"], 2.0)
+        # Monthly report (#35): remembered, honestly not live yet.
+        msg, _ = await self._turns([
+            ("send me a monthly report", intent_of("settings")),
+        ])
+        self.assertIn("isn't switched on yet", msg.text_sent[0])
+        self.assertTrue(bot.get_pref(1, "pref_monthly_report"))
+
+    def test_parser_not_available_options(self):
+        # The 11 not-approved options are recognised and refused
+        # honestly — never pretended to be set.
+        cases = [
+            ("pin service 5535", 9),
+            ("turn off the test order", 1),
+            ("make the test 20 percent", 2),
+            ("test orders over 1000", 3),
+            ("you can spend 50 more for me", 5),
+            ("try three times", 7),
+            ("set a spending cap of 1000", 10),
+            ("use two services for one order", 22),
+            ("send me a delivery report", 23),
+            ("tell me when my usual service gets cheaper", 28),
+            ("all or nothing for my orders", 29),
+        ]
+        for text, option in cases:
+            with self.subTest(text=text):
+                action = bot.parse_pref_command(text)
+                self.assertIsNotNone(action, text)
+                self.assertEqual(action["action"], "not_available")
+                self.assertEqual(action["option"], option)
+
+    async def test_handler_not_available_replies_honestly(self):
+        msg, _ = await self._turns([
+            ("pin service 5535", intent_of("settings")),
+        ])
+        self.assertIn("pin", msg.text_sent[0].lower())
+        self.assertIn("can't pin", msg.text_sent[0].lower())
+        self.assertIsNone(bot.get_pref(1, "pref_favourite_services"))
+
+    # -- parser: Amharic -------------------------------------------
+
+    async def test_amharic_settings_message_sets_pref(self):
+        # "Use the cheapest first" (dataset 06, section 4) —
+        # translated to English by the bridge, then handled like
+        # any English settings message; the reply goes back in
+        # the user's language.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = FakePaxyo()
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("settings"))
+        ), mock.patch("bot.paxyo", fake), \
+            mock.patch("bot.speak_reply"), mock.patch(
+                "bot.translate_to_english",
+                new=mock.AsyncMock(return_value="cheapest first")
+            ), mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(return_value="")):
+            await bot.handle_order_text(
+                update, None, "ርካሹን መጀመሪያ ተጠቀም")
+            await self._flush()
+        self.assertEqual(bot.get_pref(1, "pref_pick_order"), "cheapest")
+        self.assertEqual(bot.LAST_LANG.get(1), "am")
+        self.assertIn("cheapest first", msg.text_sent[0].lower())
+
+    async def test_amharic_turn_off_message(self):
+        # "Turn off cheapest first" — the off path works in
+        # Amharic too, once the bridge translates it. Turning off
+        # cheapest means back to the default, fastest-first.
+        bot.USER_TRAITS.setdefault(1, {})["pref_pick_order"] = "cheapest"
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = FakePaxyo()
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("settings"))
+        ), mock.patch("bot.paxyo", fake), \
+            mock.patch("bot.speak_reply"), mock.patch(
+                "bot.translate_to_english",
+                new=mock.AsyncMock(
+                    return_value="turn off cheapest first")
+            ), mock.patch(
+                "bot.translate_to_amharic",
+                new=mock.AsyncMock(return_value="")):
+            await bot.handle_order_text(
+                update, None, "ርካሹን መጀመሪያ አቁም")
+            await self._flush()
+        self.assertEqual(bot.get_pref(1, "pref_pick_order"), "fastest")
+        self.assertIn("fastest first", msg.text_sent[0].lower())
+
+    # -- settings intent + few-shot wiring -------------------------
+
+    async def test_settings_intent_dispatch(self):
+        # A phrasing the parser misses ("tell me about my account
+        # setup") still reaches the settings list through the
+        # classifier's "settings" intent.
+        msg, _ = await self._turns([
+            ("tell me about my account setup",
+             intent_of("settings")),
+        ])
+        self.assertIn("haven't set anything yet", msg.text_sent[0])
+
+    def test_few_shot_settings_examples(self):
+        examples = bot.FEW_SHOT_EXAMPLES
+        self.assertIn("cheapest first", examples)
+        self.assertIn("what are my settings", examples)
+        self.assertIn("don't message me at night", examples)
+        self.assertIn("settings", examples)
+        # The block stays inside its compact bounds (the
+        # shrink test pins the ceiling; this pins the content).
+        self.assertEqual(len(examples.splitlines()), 31)
+        self.assertLess(len(examples), 1700)
+        for line in examples.splitlines():
+            self.assertLess(len(line), 100)
+
+    async def test_two_settings_at_once(self):
+        msg, _ = await self._turns([
+            ("cheapest first and don't message me at night",
+             intent_of("settings")),
+        ])
+        self.assertEqual(bot.get_pref(1, "pref_pick_order"), "cheapest")
+        self.assertEqual(
+            bot.pref_quiet_hours(1), ("22:00", "07:00"))
+        # ONE combined reply, not two.
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("cheapest", msg.text_sent[0].lower())
+        self.assertIn("22:00", msg.text_sent[0])
+
+    # -- secrecy ---------------------------------------------------
+
+    def test_bot_never_names_the_provider(self):
+        with open(bot.__file__, encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertNotRegex(source, r"(?i)godofpanel")
+        self.assertNotRegex(source, r"(?i)smmsocialmedia")
 
 
 if __name__ == "__main__":
