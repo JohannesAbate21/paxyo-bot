@@ -2064,7 +2064,9 @@ TEXT = {
     # Stall rescue (feature 2, 15 Nov 2026): the first service
     # stalled, so the bot cancelled it, refunded it in full, and
     # moved the order to the next service. Both figures are stated
-    # — the price may differ, because it is a different service.
+    # — the new total is never more than the refunded one (owner
+    # rule, 15 Nov 2026: a rescue never charges more than the
+    # amount the user confirmed).
     "order_rescued": {
         "am": (
             "⏳ Order #{old_order_id} ({old_service} ×{quantity}) "
@@ -2082,6 +2084,21 @@ TEXT = {
             "(the refunded order was {refunded} ETB)."
         ),
     },
+    # Rescue with a Paxyo cover (15 Nov 2026): the replacement
+    # cost more than the confirmed total, so Paxyo paid the extra.
+    # Appended to the rescued message — the customer must see they
+    # still pay only what they confirmed. en + first-pass am,
+    # unreviewed.
+    "order_rescue_cover_note": {
+        "am": (
+            "Paxyo ተጨማሪ {cover} ETB ከፍሏል — እርስዎ አሁንም "
+            "ያረጋገጡትን {confirmed} ETB ብቻ ነው የሚከፍሉት።"
+        ),
+        "en": (
+            "Paxyo covers the extra {cover} ETB — you still pay "
+            "only the {confirmed} ETB you confirmed."
+        ),
+    },
     # Stall rescue (feature 2, 15 Nov 2026): all three services
     # stalled, so the bot stops moving the order. The order itself
     # is NOT refunded here — it is still in progress with the last
@@ -2089,24 +2106,45 @@ TEXT = {
     "order_rescue_exhausted": {
         "am": (
             "⏳ Order #{order_id} ({service} ×{quantity}) አሁንም "
-            "አልደረሰም — ወደ ቀጣዩ service ሁለት ጊዜ አዛውረነዋል "
-            "ሁለቱም ተዘግተዋል፣ ስለዚህ ማዛወር አቁመናል። Orderዎ አሁንም "
+            "አልደረሰም — ወደ ቀጣዩ service አራት ጊዜ አዛውረነዋል "
+            "ሁሉም ተዘግተዋል፣ ስለዚህ ማዛወር አቁመናል። Orderዎ አሁንም "
             "ከመጨረሻው service ጋር እየተሰራ ነው። ከቀጠለ support "
             "ያነጋግሩ: t.me/paxyo"
         ),
         "en": (
             "⏳ Your order #{order_id} ({service} ×{quantity}) is "
             "still not delivering — we already moved it to the next "
-            "service twice and both stalled too, so we've stopped "
-            "moving it. Your order is still in progress with the "
-            "last service. If it stays stuck, talk to support: "
-            "t.me/paxyo"
+            "service four times and all of them stalled too, so "
+            "we've stopped moving it. Your order is still in "
+            "progress with the last service. If it stays stuck, "
+            "talk to support: t.me/paxyo"
+        ),
+    },
+    # Rescue price cap (owner rule, 15 Nov 2026): every remaining
+    # service costs more than the amount the user confirmed, so
+    # the bot cancelled + refunded the stalled order in full and
+    # did NOT move it. The refund figure and the plain reason are
+    # both stated — never just the generic stuck warning. en +
+    # first-pass am, unreviewed.
+    "order_rescue_pricier": {
+        "am": (
+            "⏳ Order #{order_id} ({service} ×{quantity}) ስለተዘገየ "
+            "ሰርዤ {refunded} ETB ወደ balanceዎ መልሻለሁ። ቀጣዩ service "
+            "ከ {refunded} ETB በላይ ስለሚያስከፍል orderዎን አላዛወርኩም "
+            "— በማንኛውም ጊዜ እንደገና ማዘዝ ይችላሉ።"
+        ),
+        "en": (
+            "⏳ Your order #{order_id} ({service} ×{quantity}) "
+            "stalled, so I cancelled it and refunded {refunded} "
+            "ETB to your balance. The next services cost more than "
+            "the {refunded} ETB you confirmed, so I did not move "
+            "your order — you can order again any time."
         ),
     },
     # Failed-order rescue (second provider, 15 Nov 2026): the
     # provider ended the order failed, so the bot refunds it and
-    # re-places it on the next-fastest service, across providers.
-    # Four messages, one per outcome — each states exactly what
+    # re-places it on the next-fastest affordable service, across
+    # providers. Four messages, one per outcome — each states exactly what
     # happened to the money, never promises a refund that did not
     # happen. en + first-pass am, unreviewed.
     "order_failed_rescued": {
@@ -2139,6 +2177,27 @@ TEXT = {
             "order again any time."
         ),
     },
+    # Rescue price cap, failed-order side (owner rule, 15 Nov
+    # 2026): the order failed and was refunded in full, but every
+    # remaining service costs more than the amount the user
+    # confirmed, so no replacement was placed. The refund figure
+    # and the plain reason are both stated. en + first-pass am,
+    # unreviewed.
+    "order_failed_refunded_pricier": {
+        "am": (
+            "Order #{order_id} ({service} ×{quantity}) ስለተበላሸ "
+            "{refunded} ETB ወደ balanceዎ መልሻለሁ። ቀጣዩ service ከ "
+            "{refunded} ETB በላይ ስለሚያስከፍል orderዎን አላዛወርኩም — "
+            "በማንኛውም ጊዜ እንደገና ማዘዝ ይችላሉ።"
+        ),
+        "en": (
+            "Your order #{order_id} ({service} ×{quantity}) failed, "
+            "so I refunded {refunded} ETB to your "
+            "balance. The next services cost more than the "
+            "{refunded} ETB you confirmed, so I did not move your "
+            "order — you can order again any time."
+        ),
+    },
     "order_failed_no_refund": {
         "am": (
             "Order #{order_id} ({service} ×{quantity}) ተበልሿል። "
@@ -2165,6 +2224,166 @@ TEXT = {
             "as failed, but I could not confirm the refund yet. "
             "Please talk to support: t.me/paxyo and mention order "
             "#{order_id} — no new order was placed."
+        ),
+    },
+    # Split-test for big orders (owner, 15 Nov 2026): an order over
+    # 400 ETB is placed as a 10% test first, then the remaining
+    # 90% once the test delivers. The total quantity is never more
+    # than the customer ordered, and a cheaper service refunds the
+    # difference to the balance. en + first-pass am, unreviewed.
+    "order_split_test_placed": {
+        "am": (
+            "ይህን service በመጀመሪያ {test_quantity} ከ {quantity} "
+            "እየሞከርኩ ነው — ከደረሰ ቀሪውን ወዲያውኑ አስቀምጣለሁ። "
+            "ጠቅላላው order {quantity} ሆኖ ይቀራል፣ ከዚህ በላይ አይሆንም።"
+        ),
+        "en": (
+            "I'm testing this service with the first {test_quantity} "
+            "of {quantity} — if it delivers, I'll place the rest "
+            "right away. The full order stays {quantity}, never more."
+        ),
+    },
+    "order_split_test_done": {
+        "am": (
+            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ደርሰዋል — ቀሪውን {rest_quantity} በተመሳሳይ service ላይ "
+            "አሁን እያስቀመጥኩ ነው (order #{new_order_id})።"
+        ),
+        "en": (
+            "✅ The first {test_quantity} of {quantity} are "
+            "delivered — placing the remaining {rest_quantity} on "
+            "the same service now (order #{new_order_id})."
+        ),
+    },
+    # Split-test saving line (owner, 15 Nov 2026): the cheaper
+    # service cost less than the confirmed total, so the difference
+    # was never charged — it stays in the balance. The confirmed
+    # total is never taken upfront, so there is no separate refund
+    # transaction; the figure is stated here and the mini-app
+    # history shows both order rows and the resulting balance.
+    "order_split_saved": {
+        "am": (
+            "{saved} ETB ቆጥበዋል — serviceው ካረጋገጡት {total} ETB "
+            "ያነሰ ስለሚያስከፍል ልዩነቱ በ balanceዎ ይቀራል።"
+        ),
+        "en": (
+            "You saved {saved} ETB — the service cost less than "
+            "the {total} ETB you confirmed, so the difference "
+            "stays in your balance."
+        ),
+    },
+    "order_split_test_moved": {
+        "am": (
+            "⏳ በ {old_service} ላይ ያለው ሙከራ (order "
+            "#{old_order_id}, {test_quantity}) አልደረሰም፣ ስለዚህ "
+            "ሰርዤ {refunded} ETB ወደ balanceዎ መልሻለሁ። ቀጣዩን "
+            "service አሁን እየሞከርኩ ነው — {new_service} (ሙከራ "
+            "order #{new_order_id})።"
+        ),
+        "en": (
+            "⏳ The test on {old_service} (order #{old_order_id}, "
+            "{test_quantity}) didn't deliver, so I cancelled it and "
+            "refunded {refunded} ETB to your balance. I'm testing "
+            "the next service now — {new_service} (test order "
+            "#{new_order_id})."
+        ),
+    },
+    "order_split_no_service": {
+        "am": (
+            "⏳ በ {service} ላይ ያለው ሙከራ (order #{order_id}, "
+            "{test_quantity}) አልደረሰም፣ ስለዚህ ሰርዤ {refunded} ETB "
+            "ወደ balanceዎ መልሻለሁ። በዋጋዎ ውስጥ የሚሞከር ሌላ "
+            "service የለም፣ ስለዚህ ምንም አልተቀመጠም — በማንኛውም ጊዜ "
+            "እንደገና ማዘዝ ይችላሉ።"
+        ),
+        "en": (
+            "⏳ The test on {service} (order #{order_id}, "
+            "{test_quantity}) didn't deliver, so I cancelled it and "
+            "refunded {refunded} ETB to your balance. No more "
+            "services to try in your price range, so nothing was "
+            "placed — you can order again any time."
+        ),
+    },
+    # Split-test cap, stall side (owner, 15 Nov 2026): the test is
+    # NOT refunded here — it is still in progress with the last
+    # service — so no refund figure is claimed, like
+    # order_rescue_exhausted.
+    "order_split_exhausted": {
+        "am": (
+            "⏳ የሙከራ orderዎ #{order_id} ({service} ×{quantity}) "
+            "አሁንም አልደረሰም — ወደ ሌላ service ሁለት ጊዜ አዛውረነዋል "
+            "ሁለቱም ተዘግተዋል፣ ስለዚህ ማዛወር አቁመናል። የሙከራ orderዎ "
+            "አሁንም ከመጨረሻው service ጋር እየተሰራ ነው። ከቀጠለ "
+            "support ያነጋግሩ: t.me/paxyo"
+        ),
+        "en": (
+            "⏳ Your test order #{order_id} ({service} ×{quantity}) "
+            "is still not delivering — we already tried the other "
+            "services twice and both stalled too, so we've stopped "
+            "moving it. Your test order is still in progress with "
+            "the last service. If it stays stuck, talk to support: "
+            "t.me/paxyo"
+        ),
+    },
+    # Split-test cap, failed side (owner, 15 Nov 2026): the test
+    # WAS refunded here, so the figure is stated and the entry is
+    # dropped — nothing is left in progress.
+    "order_split_cap_refunded": {
+        "am": (
+            "የሙከራ orderዎ #{order_id} ({service} ×{test_quantity}) "
+            "አልደረሰም ሌሎቹን serviceዎች አስቀድመን ሞክረናል፣ ስለዚህ "
+            "{refunded} ETB ወደ balanceዎ መልሻለሁ እና አቁሜአለሁ። "
+            "በማንኛውም ጊዜ እንደገና ማዘዝ ይችላሉ።"
+        ),
+        "en": (
+            "Your test order #{order_id} ({service} "
+            "×{test_quantity}) didn't deliver and we've already "
+            "tried the other services, so I refunded {refunded} "
+            "ETB to your balance and stopped. You can order again "
+            "any time."
+        ),
+    },
+    "order_split_rest_failed": {
+        "am": (
+            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ደርሰዋል። ቀሪውን {rest_quantity} አሁን ማስቀመጥ "
+            "አልቻልኩም — እባክዎ ቀሪውን እንደገና ይዘዙ ወይም support "
+            "ያነጋግሩ: t.me/paxyo"
+        ),
+        "en": (
+            "✅ The first {test_quantity} of {quantity} are "
+            "delivered. I couldn't place the remaining "
+            "{rest_quantity} right now — please order the rest "
+            "again or talk to support: t.me/paxyo"
+        ),
+    },
+    "order_split_rest_topup": {
+        "am": (
+            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ደርሰዋል። ቀሪው {rest_quantity} {needed} ETB ይፈልጋል፣ "
+            "balanceዎ ግን {balance} ETB ነው — እባክዎ top up "
+            "ያድርጉ እና ቀሪውን እንደገና ይዘዙ።"
+        ),
+        "en": (
+            "✅ The first {test_quantity} of {quantity} are "
+            "delivered. The remaining {rest_quantity} needs "
+            "{needed} ETB, but your balance is {balance} ETB — "
+            "please top up and order the rest again."
+        ),
+    },
+    "order_split_rest_no_cover": {
+        "am": (
+            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ደርሰዋል። ቀሪው {rest_quantity} ካረጋገጡት ትንሽ በላይ "
+            "ያስከፍላል፣ ተጨማሪው cover ገና አልተጀመረም — እባክዎ "
+            "support ያነጋግሩ: t.me/paxyo እና orderዎን ይጥቀሱ።"
+        ),
+        "en": (
+            "✅ The first {test_quantity} of {quantity} are "
+            "delivered. The remaining {rest_quantity} costs a "
+            "little more than you confirmed, and the extra cover "
+            "isn't switched on yet — please talk to support: "
+            "t.me/paxyo and mention your order."
         ),
     },
     # Abandoned-order nudge (feature 4, 15 Nov 2026): one nudge
@@ -4093,6 +4312,11 @@ class PaxyoClient:
         self._client = httpx.AsyncClient(timeout=30.0, trust_env=False)
         self._services_cache = None
         self._services_cached_at = 0.0
+        # Split-test cover (15 Nov 2026): whether the server
+        # honours paxyo_cover_etb on order placement (GET
+        # /split-cover/status). None = unknown yet; cached per
+        # process once read — a deploy restarts it.
+        self._split_cover_live = None
         # Price-change watch (feature 6, 15 Nov 2026): incremented
         # on each REAL catalogue fetch (never on a cache hit), so
         # the scheduler can tell a fresh catalogue from a cached
@@ -4233,21 +4457,61 @@ class PaxyoClient:
         return data if isinstance(data, dict) else None
 
     async def create_order(
-        self, telegram_id: int, service_id: int, link: str, quantity: int, idempotency_key: str
+        self, telegram_id: int, service_id: int, link: str, quantity: int, idempotency_key: str,
+        split_group_id=None, split_part=None,
+        confirmed_total_etb=None, paxyo_cover_etb=None,
     ):
+        # Split-test (15 Nov 2026): the optional split fields mark
+        # a leg of a split order and, for a pricier replacement,
+        # the Paxyo-paid cover. The server ignores unknown fields
+        # until the split-cover splice is installed, so a cover is
+        # only ever SENT when split_cover_live() says the server
+        # honours it (see _attempt_split_test_rescue) — sending it
+        # blind would debit the full total instead.
+        body = {
+            "telegram_id": telegram_id,
+            "service_id": service_id,
+            "link": link,
+            "quantity": quantity,
+            "idempotency_key": idempotency_key,
+        }
+        if split_group_id:
+            body["split_group_id"] = split_group_id
+        if split_part:
+            body["split_part"] = split_part
+        if confirmed_total_etb is not None:
+            body["confirmed_total_etb"] = confirmed_total_etb
+        if paxyo_cover_etb:
+            body["paxyo_cover_etb"] = paxyo_cover_etb
         return await self._send(
-            build_api_request(
-                "POST",
-                "/orders",
-                {
-                    "telegram_id": telegram_id,
-                    "service_id": service_id,
-                    "link": link,
-                    "quantity": quantity,
-                    "idempotency_key": idempotency_key,
-                },
-            )
+            build_api_request("POST", "/orders", body)
         )
+
+    async def split_cover_live(self):
+        """GET /split-cover/status -> True when the server honours
+        the Paxyo cover on order placement (server /
+        api-order-split-cover.php installed, 15 Nov 2026).
+        404-tolerant like the other optional endpoints: unknown
+        means not live. Cached per process — a deploy restarts
+        it, and the install flips it on the next deploy."""
+        if self._split_cover_live is not None:
+            return self._split_cover_live
+        try:
+            data = await self._send(
+                build_api_request("GET", "/split-cover/status")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /split-cover/status returned 404 "
+                    "(endpoint not live yet)"
+                )
+                self._split_cover_live = False
+                return False
+            raise
+        live = bool((data or {}).get("split_cover_live"))
+        self._split_cover_live = live
+        return live
 
     # --------------------------------------------- second provider ------
     # Contract (server side, server/api-order-smm.php — NOT installed
@@ -4264,22 +4528,33 @@ class PaxyoClient:
     # not installed yet and is logged, not hidden.
 
     async def create_order_smm(
-        self, telegram_id: int, service_id: int, link: str, quantity: int, idempotency_key: str
+        self, telegram_id: int, service_id: int, link: str, quantity: int, idempotency_key: str,
+        split_group_id=None, split_part=None,
+        confirmed_total_etb=None, paxyo_cover_etb=None,
     ):
         """POST /orders/smm -> the placed SMM order, same shape as
-        create_order. Raises on any failure (incl. 404)."""
+        create_order. Raises on any failure (incl. 404). Split
+        fields ride along exactly like create_order (see above) —
+        the server ignores them until the split-cover splice is
+        installed, so a cover is only sent when split_cover_live()
+        says it is honoured."""
+        body = {
+            "telegram_id": telegram_id,
+            "service_id": service_id,
+            "link": link,
+            "quantity": quantity,
+            "idempotency_key": idempotency_key,
+        }
+        if split_group_id:
+            body["split_group_id"] = split_group_id
+        if split_part:
+            body["split_part"] = split_part
+        if confirmed_total_etb is not None:
+            body["confirmed_total_etb"] = confirmed_total_etb
+        if paxyo_cover_etb:
+            body["paxyo_cover_etb"] = paxyo_cover_etb
         return await self._send(
-            build_api_request(
-                "POST",
-                "/orders/smm",
-                {
-                    "telegram_id": telegram_id,
-                    "service_id": service_id,
-                    "link": link,
-                    "quantity": quantity,
-                    "idempotency_key": idempotency_key,
-                },
-            )
+            build_api_request("POST", "/orders/smm", body)
         )
 
     async def order_status(self, order_id, telegram_id: int, provider=None):
@@ -7691,10 +7966,15 @@ WATCHED_ORDERS = {}
 RATING_ASKED = set()
 RATED_ORDERS = set()
 # Stall rescue (feature 2, 15 Nov 2026): the most rescues for one
-# order chain — the first order, then at most two moves (#1 -> #2,
-# #2 -> #3). After that the bot stops moving the order and says so
+# order chain — the first order, then at most four moves, for 5
+# tries total (owner, settled 15 Nov 19:55 EAT). One "try" is one
+# service attempt: in the split-test flow a test order plus its
+# remainder on the SAME service counts as ONE try (the remainder
+# is the completion of that try, not a new one); a stalled test
+# that moves the bot to the next service uses up one try. After
+# the fifth try the bot stops moving the order and says so
 # honestly; it never loops forever.
-MAX_STALL_RESCUES = 2
+MAX_STALL_RESCUES = 4
 # Features 6–10 (10-feature build round, 15 Nov 2026).
 # Loyalty bonus (feature 9): DECIDED by William 15 Nov 10:57 EAT —
 # 10% of the 10 orders' total. CONFIRMED, no longer an open
@@ -11200,7 +11480,8 @@ def is_order_stuck(placed_at: float, avg_minutes, now: float) -> bool:
 
 
 def watch_order(user_id: int, order_id, service, quantity, link,
-                total=None, rescue_count=0, failed_services=None):
+                total=None, rescue_count=0, failed_services=None,
+                split=None):
     """Start watching a placed order for its delivery update and
     stuck warning (ideas batch, 15 Nov 2026). Only orders placed
     through the bot are watched — one delivered message and at most
@@ -11209,7 +11490,12 @@ def watch_order(user_id: int, order_id, service, quantity, link,
     never watched. `total` is what the user paid (for the rescue
     message, when the server's refund reply omits the figure);
     `rescue_count` / `failed_services` carry a rescue chain forward
-    onto the replacement order (stall rescue, 15 Nov 2026)."""
+    onto the replacement order (stall rescue, 15 Nov 2026).
+    `split` (split-test, 15 Nov 2026) is the split context dict
+    (group_id, leg "test"/"remainder", total_qty, test_qty,
+    rest_qty, confirmed_total, spent) — the scheduler routes a
+    watched split leg through the split-test flow instead of the
+    plain rescue flow."""
     if order_id is None or str(order_id) in ("", "?"):
         return
     avg = None
@@ -11229,6 +11515,7 @@ def watch_order(user_id: int, order_id, service, quantity, link,
         "rescue_count": rescue_count,
         "rescue_attempted": False,
         "failed_services": list(failed_services or []),
+        "split": dict(split) if split is not None else None,
     }
 
 
@@ -11259,20 +11546,36 @@ def _crosssell_line(services, service):
     )
 
 
-def _next_rescue_service(services, service, failed_services):
-    """The next-best service for a stalled order: the same platform
-    + metric, fastest first (reuse pick_services), excluding every
-    service that already stalled in this chain — not just the latest
-    one, or the second rescue would go back to the first failure.
-    Returns None when no service is left. `failed_services` holds
-    COMBINED ids ("gop:<id>" / "smm:<id>", second provider, 15 Nov
-    2026) — a bare id in there is treated as a GOP id, so it
-    can never wrongly exclude the other provider's service of the
-    same number; the caller records combined ids."""
-    platform, hint = _platform_hint_of_service(service or {})
-    picks = pick_services(
-        services or [], platform=platform, service_hint=hint, limit=3,
-    )
+def _rescue_price_cap(watched, service, quantity):
+    """The most a rescue replacement may cost (owner rule, 15 Nov
+    2026): the amount the user confirmed for the original order —
+    never more. The watch entry keeps the confirmed total; when it
+    is missing (an older entry), the original service's catalogue
+    estimate is the cap. After a rescue the replacement's own
+    total becomes the cap for the next rescue, so the cap only
+    ever stays the same or shrinks down a chain."""
+    total = (watched or {}).get("total")
+    if total is None:
+        total = estimated_total_etb(
+            float((service or {}).get("rate_etb_per_1000") or 0),
+            quantity,
+        )
+    return float(total)
+
+
+# How many fastest candidates the rescue pick looks at: pricier
+# candidates are skipped (owner rule, 15 Nov 2026), so the pick
+# must look further down the list than the old limit of 3 to find
+# an affordable service.
+RESCUE_CANDIDATE_LIMIT = 10
+
+
+def _failed_combined_ids(service, failed_services):
+    """The set of combined ids ("gop:<id>" / "smm:<id>") that must
+    never be picked again in this chain: every failed service plus
+    the service itself. A bare id in failed_services is treated
+    as a GOP id, so it can never wrongly exclude the other
+    provider's service of the same number."""
     failed = set()
     for sid in failed_services or []:
         if isinstance(sid, str) and ":" in sid:
@@ -11283,10 +11586,292 @@ def _next_rescue_service(services, service, failed_services):
         except (TypeError, ValueError):
             continue
     failed.add(service_combined_id(service or {}))
-    for pick in picks:
-        if service_combined_id(pick) not in failed:
-            return pick
+    return failed
+
+
+# Split-test for big orders (owner, 15 Nov 2026): an order over
+# this confirmed total is placed as a 10% test first, then the
+# remaining 90% once the test delivers. The default method — it
+# can be customised per customer later (no per-customer settings
+# are built now).
+SPLIT_TEST_THRESHOLD_ETB = 400
+SPLIT_TEST_FRACTION = 0.10
+# Paxyo covers at most this fraction above the confirmed total
+# when no cheaper service works (owner, 15 Nov 2026) — the extra
+# comes from Paxyo's pocket, never from the customer.
+SPLIT_COVER_MAX_FRACTION = 0.10
+
+
+def _ceil_to_10(value):
+    """Round a quantity UP to a multiple of 10 — quantities must
+    be multiples of 10 (the server enforces it)."""
+    import math
+
+    return int(math.ceil(float(value) / 10.0)) * 10
+
+
+def _service_min_qty(service):
+    """A service's minimum quantity, or 0 when it has none."""
+    try:
+        return max(0, int((service or {}).get("min") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def split_test_quantities(quantity, service):
+    """(test_qty, rest_qty) for a split-test placement, or None
+    when the order cannot be split on this service. The test is
+    10% of the order rounded UP to a multiple of 10, at least the
+    service minimum (also rounded up to a multiple of 10), and
+    the remainder is the exact rest — so test + rest is exactly
+    the ordered quantity, never more. None when the remainder
+    would be zero or below the service minimum: a small order on
+    a high-minimum service is placed whole instead, on the
+    non-split path."""
+    try:
+        qty = int(quantity)
+    except (TypeError, ValueError):
+        return None
+    if qty <= 0:
+        return None
+    if qty % 10 != 0:
+        # Quantities are multiples of 10 (the bot enforces it at
+        # parse, the server at placement) — a non-multiple order
+        # cannot be split exactly, so it is placed whole instead.
+        return None
+    minimum = _ceil_to_10(_service_min_qty(service))
+    test_qty = max(_ceil_to_10(qty * SPLIT_TEST_FRACTION), minimum)
+    if test_qty > qty:
+        return None
+    rest_qty = qty - test_qty
+    if rest_qty <= 0 or rest_qty < minimum:
+        return None
+    return (test_qty, rest_qty)
+
+
+def split_leg_cover(confirmed_total, leg_qty, total_qty, leg_cost):
+    """Paxyo's cover for one leg of a split order: the leg's cost
+    above the user's proportional share of the confirmed total
+    (share = confirmed * leg_qty / total_qty). Zero when the leg
+    costs at most its share — the common case, where the service
+    is the confirmed one or cheaper. The caller caps the cover
+    for the whole order at 10% of the confirmed total; this
+    helper only ever prices one leg."""
+    try:
+        share = float(confirmed_total) * int(leg_qty) / int(total_qty)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+    return round(max(0.0, float(leg_cost) - share), 2)
+
+
+def _next_split_service(services, service, failed_services, total_qty,
+                        confirmed_total, allow_cover=True):
+    """The next service for a stalled split test: the same platform
+    + metric, CHEAPEST first (the retry walks down the cheaper
+    services), excluding every service that already stalled in
+    this chain and any service the order cannot be split on (its
+    remainder would fall below its minimum). Returns (service,
+    cover) or (None, 0.0): cover is the Paxyo-paid extra when the
+    cheapest remaining service costs more than the confirmed
+    total — at most 10% of it, and only when no affordable
+    service exists at all (the list is cheapest-first, so the
+    first candidate within the band is the cheapest one there).
+    A candidate beyond the +10% band is never returned. The pool
+    is the same 10 fastest as the rescue pick, re-sorted cheapest
+    first — the cap on attempts bounds the walk anyway.
+    `allow_cover` is False until the server confirms it honours
+    the cover (split_cover_live): without it only a service
+    costing at most the confirmed total is returned."""
+    platform, hint = _platform_hint_of_service(service or {})
+    picks = pick_services(
+        services or [], platform=platform, service_hint=hint,
+        limit=RESCUE_CANDIDATE_LIMIT,
+    )
+    failed = _failed_combined_ids(service, failed_services)
+    candidates = [
+        p for p in picks
+        if service_combined_id(p) not in failed
+        and split_test_quantities(total_qty, p) is not None
+    ]
+    candidates.sort(
+        key=lambda p: estimated_total_etb(
+            float(p.get("rate_etb_per_1000") or 0), total_qty
+        )
+    )
+    max_cover = round(
+        float(confirmed_total) * SPLIT_COVER_MAX_FRACTION, 2
+    )
+    for pick in candidates:
+        full = estimated_total_etb(
+            float(pick.get("rate_etb_per_1000") or 0), total_qty
+        )
+        cover = round(max(0.0, full - float(confirmed_total)), 2)
+        if cover == 0.0:
+            return pick, 0.0
+        if allow_cover and cover <= max_cover:
+            return pick, cover
+    return None, 0.0
+
+
+def _split_replacement_kwargs(watched):
+    """Split markers for a replacement of a split remainder leg
+    (15 Nov 2026): the replacement is still the remainder of the
+    same split order, so it carries the same group id, the
+    "remainder" part, and the confirmed total — the server
+    records it on the order row and the mini-app history shows
+    it as part of the split. {} for a non-split order (or a
+    split order without a group), so plain rescues are unchanged.
+    No cover rides here: the plain rescue's price cap already
+    holds the replacement at or below the remainder's own cost."""
+    split_ctx = (watched or {}).get("split") or {}
+    if not split_ctx.get("group_id"):
+        return {}
+    return {
+        "split_group_id": split_ctx.get("group_id"),
+        "split_part": "remainder",
+        "confirmed_total_etb": split_ctx.get("confirmed_total"),
+    }
+
+
+def _split_test_admin_text(order_id, service, test_qty, refunded,
+                           failed, next_step, cost=None):
+    """The admin message for a stuck split test (owner, 15 Nov
+    2026): order id, service, quantity, cost, and what the bot
+    did next — so William can cancel it manually if the
+    automatic cancel did not go through. English only, never
+    names the provider. `refunded` is None when nothing was
+    refunded yet (the automatic cancel did not go through) — the
+    message then says so plainly instead of claiming a refund;
+    `cost` is the test order's total for the parenthetical, and
+    defaults to the refunded figure."""
+    amount = cost if cost is not None else refunded
+    if refunded is None:
+        money = "Not refunded yet — please cancel it manually."
+    else:
+        money = f"Refunded {format_money(refunded)} ETB."
+    return (
+        f"⚠️ Split test {'failed' if failed else 'stalled'}: "
+        f"order #{order_id} — "
+        f"{short_service_name(service.get('name')) or 'service'} "
+        f"×{int(test_qty or 0)} ({format_money(amount or 0)} ETB). "
+        f"{money} {next_step}"
+    )
+
+
+def _next_rescue_service(services, service, failed_services,
+                         max_total=None, quantity=0, cheapest_first=False):
+    """The next-best service for a stalled order: the same platform
+    + metric, fastest first (reuse pick_services), excluding every
+    service that already stalled in this chain — not just the latest
+    one, or the second rescue would go back to the first failure.
+    Returns None when no service is left. `failed_services` holds
+    COMBINED ids ("gop:<id>" / "smm:<id>", second provider, 15 Nov
+    2026) — a bare id in there is treated as a GOP id, so it
+    can never wrongly exclude the other provider's service of the
+    same number; the caller records combined ids.
+
+    Price cap (owner rule, 15 Nov 2026): when `max_total` is set,
+    only a service whose total for `quantity` is at most
+    `max_total` is returned — the fastest AFFORDABLE service,
+    across both providers. A pricier candidate is skipped, not
+    an attempt: skipping never consumes a rescue. With no cap
+    (max_total None) the pick is the old fastest-first one.
+    `cheapest_first` (small-order +10% band, 15 Nov 2026) sorts
+    the survivors cheapest first instead — used only for the
+    Paxyo-paid band, where the cheapest service in the band costs
+    Paxyo the least. The default pick stays fastest-first: the
+    standing fulfilment rule, pinned by the cross-provider tests,
+    and fastest-vs-cheapest is a per-customer setting William
+    approved separately (customizations, 15 Nov 19:57 EAT), not a
+    change to the default."""
+    platform, hint = _platform_hint_of_service(service or {})
+    picks = pick_services(
+        services or [], platform=platform, service_hint=hint,
+        limit=RESCUE_CANDIDATE_LIMIT,
+    )
+    failed = _failed_combined_ids(service, failed_services)
+    candidates = [
+        pick for pick in picks
+        if service_combined_id(pick) not in failed
+    ]
+    if cheapest_first:
+        candidates.sort(
+            key=lambda p: estimated_total_etb(
+                float(p.get("rate_etb_per_1000") or 0), quantity
+            )
+        )
+    for pick in candidates:
+        if max_total is not None:
+            total = estimated_total_etb(
+                float(pick.get("rate_etb_per_1000") or 0), quantity
+            )
+            if total > float(max_total):
+                continue
+        return pick
     return None
+
+
+def _rescue_with_cover(services, service, failed_services, quantity,
+                       confirmed_total, allow_cover=True):
+    """The rescue pick with the Paxyo +10% band (owner, 15 Nov
+    2026 — small orders, and the split-test path's own pick is
+    _next_split_service): first the fastest service costing at
+    most the confirmed total — the cheaper tier is tried first,
+    so a rescue never goes pricier while an affordable service
+    exists. Only when no affordable service exists, the CHEAPEST
+    service costing up to 10% above the confirmed total, with
+    cover = the excess over the confirmed total (Paxyo's pocket —
+    the customer still pays only the confirmed total). Returns
+    (service, cover) or (None, 0.0); cover is 0 in the cheaper
+    tier. `allow_cover` is False until the server confirms it
+    honours the cover (split_cover_live) — without it only a
+    service costing at most the confirmed total is returned, the
+    old strict-cap behaviour. A candidate beyond the +10% band is
+    never returned."""
+    nxt = _next_rescue_service(
+        services, service, failed_services,
+        max_total=confirmed_total, quantity=quantity,
+    )
+    if nxt is not None:
+        return nxt, 0.0
+    if not allow_cover:
+        return None, 0.0
+    band_max = round(
+        float(confirmed_total) * (1 + SPLIT_COVER_MAX_FRACTION), 2
+    )
+    nxt = _next_rescue_service(
+        services, service, failed_services,
+        max_total=band_max, quantity=quantity, cheapest_first=True,
+    )
+    if nxt is None:
+        return None, 0.0
+    cover = round(
+        max(
+            0.0,
+            estimated_total_etb(
+                float(nxt.get("rate_etb_per_1000") or 0), quantity
+            ) - float(confirmed_total),
+        ),
+        2,
+    )
+    return nxt, cover
+
+
+def _rescue_cover_kwargs(watched, confirmed_total, cover):
+    """The extra order fields for a rescue replacement that uses
+    the Paxyo cover (15 Nov 2026): the confirmed total and the
+    cover, on top of whatever split markers the order already
+    carries (a split remainder leg keeps its group id and part).
+    {} when there is no cover — a plain rescue sends nothing
+    extra. The server validates cover <= 10% of the confirmed
+    total and debits total - cover, so the customer still pays
+    only the confirmed total."""
+    if not cover or cover <= 0:
+        return _split_replacement_kwargs(watched)
+    kwargs = dict(_split_replacement_kwargs(watched))
+    kwargs["confirmed_total_etb"] = float(confirmed_total)
+    kwargs["paxyo_cover_etb"] = float(cover)
+    return kwargs
 
 
 async def _attempt_stall_rescue(app, order_id, watched, services=None):
@@ -11305,7 +11890,20 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
     or the server would return the duplicate instead of a new
     order. Prices always come from the catalogue (pick_services /
     the service rate) — never from the AI, and nothing about the
-    provider is ever named to the user."""
+    provider is ever named to the user. Price cap (owner rule,
+    15 Nov 2026, extended with the +10% Paxyo band the same day):
+    the replacement costs at most the amount the user confirmed —
+    the pick tries the cheaper tier first, and only when no
+    service fits the confirmed total does it use a service up to
+    10% above it, the extra covered by Paxyo (the customer still
+    pays only the confirmed total). When every remaining service
+    costs more than the confirmed total plus 10%, the order is
+    refunded in full with a plain message instead of being moved.
+    Skipping a pricier candidate is not a rescue attempt. The
+    band does NOT apply to a split remainder leg: its cover
+    fields would overwrite the split group's confirmed total on
+    the order row, so a remainder rescue keeps the strict cap
+    (the remainder leg's own total)."""
     user_id = watched.get("user_id")
     service = watched.get("service") or {}
     quantity = watched.get("quantity") or 0
@@ -11313,7 +11911,14 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
     # Find the replacement FIRST: when no next service exists the
     # order is left alone (still pending, still refundable later)
     # and the caller sends the stuck warning instead of cancelling
-    # an order that cannot be replaced.
+    # an order that cannot be replaced. The pick is price-capped
+    # (owner rule, 15 Nov 2026, with the +10% Paxyo band): the
+    # cheaper tier first, then the cheapest service up to 10%
+    # above the confirmed total with Paxyo covering the extra.
+    # The cover is only offered when the server confirms it
+    # honours it (split_cover_live) — a cover the server ignores
+    # would debit the full cost. A split remainder leg never uses
+    # the band (see the docstring): its own total stays the cap.
     if services is None:
         try:
             services = await paxyo.services()
@@ -11322,13 +11927,29 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
                 "stall rescue %s: services fetch failed: %s", order_id, exc
             )
             return False
-    nxt = _next_rescue_service(services, service, watched.get("failed_services"))
-    if nxt is None:
-        log.warning("stall rescue %s: no next service", order_id)
-        return False
-    new_total = estimated_total_etb(
-        float(nxt.get("rate_etb_per_1000") or 0), quantity
+    confirmed_total = _rescue_price_cap(watched, service, quantity)
+    try:
+        cover_live = await paxyo.split_cover_live()
+    except Exception:
+        cover_live = False
+    allow_cover = (watched.get("split") or {}).get("leg") != "remainder"
+    nxt, cover = _rescue_with_cover(
+        services, service, watched.get("failed_services"), quantity,
+        confirmed_total, allow_cover=cover_live and allow_cover,
     )
+    pricier_only = False
+    if nxt is None:
+        # No affordable service — but is there any service at all?
+        # None at all: leave the order alone, as before. Services
+        # that exist but all cost more than the confirmed total
+        # plus the 10% band: refund in full and tell the user
+        # plainly instead of the generic stuck warning.
+        if _next_rescue_service(
+            services, service, watched.get("failed_services")
+        ) is None:
+            log.warning("stall rescue %s: no next service", order_id)
+            return False
+        pricier_only = True
     try:
         refund = await paxyo.cancel_refund(order_id, user_id)
     except Exception as exc:
@@ -11349,9 +11970,33 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
         refunded = estimated_total_etb(
             float(service.get("rate_etb_per_1000") or 0), quantity
         )
-    # The refund was just credited, so the balance check below runs
-    # against the refunded balance — a pricier replacement can
-    # still be too much for it, and then no order is placed.
+    if pricier_only:
+        # Refunded in full, no replacement: the next services all
+        # cost more than the confirmed amount, so the bot does not
+        # move the order. Resolved — the caller sends no stuck
+        # warning for this episode.
+        await notify_user(
+            app, user_id,
+            t(
+                "order_rescue_pricier", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                quantity=int(quantity or 0),
+                refunded=format_money(refunded),
+            ),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
+    new_total = estimated_total_etb(
+        float(nxt.get("rate_etb_per_1000") or 0), quantity
+    )
+    # The refund was just credited, and the replacement costs at
+    # most the refunded amount plus the Paxyo cover (price cap
+    # above), so this check normally passes — it stays as a guard
+    # for a balance read that fails or disagrees, and then no
+    # order is placed. With a cover the server debits new_total -
+    # cover, so the balance only needs to cover that part.
     try:
         bal = await paxyo.balance(user_id)
     except Exception as exc:
@@ -11359,15 +12004,17 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
             "stall rescue %s: balance check failed: %s", order_id, exc
         )
         return False
-    if not bal.get("found") or float(bal.get("balance", 0)) < new_total:
+    need = round(new_total - cover, 2)
+    if not bal.get("found") or float(bal.get("balance", 0)) < need:
         log.warning(
             "stall rescue %s: balance too low for replacement (%s < %s)",
-            order_id, bal.get("balance", 0), new_total,
+            order_id, bal.get("balance", 0), need,
         )
         return False
     try:
         result = await create_order_for_service(
             paxyo, user_id, nxt, link, quantity, uuid.uuid4().hex,
+            split=_rescue_cover_kwargs(watched, confirmed_total, cover),
         )
     except Exception as exc:
         log.warning(
@@ -11400,22 +12047,30 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None):
         total=new_total,
         rescue_count=(watched.get("rescue_count") or 0) + 1,
         failed_services=failed,
+        split=watched.get("split"),
     )
-    await notify_user(
-        app, user_id,
-        t(
-            "order_rescued", "en",
-            old_order_id=order_id,
-            old_service=short_service_name(service.get("name"))
-            or f"service {service.get('service')}",
-            quantity=int(quantity or 0),
-            refunded=format_money(refunded),
-            new_service=short_service_name(nxt.get("name"))
-            or f"service {nxt.get('service')}",
-            new_order_id=new_id,
-            new_total=format_money(new_total),
-        ),
+    rescued_text = t(
+        "order_rescued", "en",
+        old_order_id=order_id,
+        old_service=short_service_name(service.get("name"))
+        or f"service {service.get('service')}",
+        quantity=int(quantity or 0),
+        refunded=format_money(refunded),
+        new_service=short_service_name(nxt.get("name"))
+        or f"service {nxt.get('service')}",
+        new_order_id=new_id,
+        new_total=format_money(new_total),
     )
+    if cover > 0:
+        # The new order costs more than the refunded one — say
+        # plainly that Paxyo covers the extra, so the user never
+        # reads the higher figure as a charge to them.
+        rescued_text += "\n" + t(
+            "order_rescue_cover_note", "en",
+            cover=format_money(cover),
+            confirmed=format_money(refunded),
+        )
+    await notify_user(app, user_id, rescued_text)
     return True
 
 
@@ -11455,7 +12110,18 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
     fulfilment design as the stall rescue. The replacement is placed
     with a FRESH idempotency key, never the original order's key.
     Prices always come from the catalogue — never from the AI, and
-    nothing about the provider is ever named to the user."""
+    nothing about the provider is ever named to the user. Price cap
+    (owner rule, 15 Nov 2026, extended with the +10% Paxyo band the
+    same day): the replacement costs at most the amount the user
+    confirmed — the pick tries the cheaper tier first, and only
+    when no service fits the confirmed total does it use a service
+    up to 10% above it, the extra covered by Paxyo (the customer
+    still pays only the confirmed total). When every remaining
+    service costs more than the confirmed total plus 10%, the order
+    stays refunded in full with a plain message instead of being
+    moved. Skipping a pricier candidate is not a rescue attempt.
+    The band does NOT apply to a split remainder leg (its cover
+    fields would overwrite the split group's confirmed total)."""
     user_id = watched.get("user_id")
     service = watched.get("service") or {}
     quantity = watched.get("quantity") or 0
@@ -11539,6 +12205,25 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
         WATCHED_ORDERS.pop(order_id, None)
         return True
 
+    async def _refunded_pricier():
+        # Refunded in full, no replacement: the next services all
+        # cost more than the confirmed amount, so the bot does not
+        # move the order. The refund figure and the plain reason
+        # are both stated.
+        await notify_user(
+            app, user_id,
+            t(
+                "order_failed_refunded_pricier", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                quantity=int(quantity or 0),
+                refunded=format_money(refunded),
+            ),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
+
     # The refund is done even when no replacement follows — the cap
     # limits RE-PLACEMENT attempts, never the refund itself.
     if (watched.get("rescue_count") or 0) >= MAX_STALL_RESCUES:
@@ -11556,16 +12241,40 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
                 order_id, exc,
             )
             return await _refunded_no_replacement()
-    nxt = _next_rescue_service(services, service, watched.get("failed_services"))
+    confirmed_total = _rescue_price_cap(watched, service, quantity)
+    try:
+        cover_live = await paxyo.split_cover_live()
+    except Exception:
+        cover_live = False
+    allow_cover = (watched.get("split") or {}).get("leg") != "remainder"
+    nxt, cover = _rescue_with_cover(
+        services, service, watched.get("failed_services"), quantity,
+        confirmed_total, allow_cover=cover_live and allow_cover,
+    )
     if nxt is None:
+        # No affordable service — but is there any service at all?
+        # None at all: refund only, as before. Services that exist
+        # but all cost more than the confirmed total plus the 10%
+        # band: refund only, with the plain reason.
+        if _next_rescue_service(
+            services, service, watched.get("failed_services")
+        ) is not None:
+            log.warning(
+                "failed rescue %s: only pricier services remain",
+                order_id,
+            )
+            return await _refunded_pricier()
         log.warning("failed rescue %s: no next service", order_id)
         return await _refunded_no_replacement()
     new_total = estimated_total_etb(
         float(nxt.get("rate_etb_per_1000") or 0), quantity
     )
-    # The refund was just credited, so the balance check below runs
-    # against the refunded balance — a pricier replacement can
-    # still be too much for it, and then no order is placed.
+    # The refund was just credited, and the replacement costs at
+    # most the refunded amount plus the Paxyo cover (price cap
+    # above), so this check normally passes — it stays as a guard
+    # for a balance read that fails or disagrees, and then no
+    # order is placed. With a cover the server debits new_total -
+    # cover, so the balance only needs to cover that part.
     try:
         bal = await paxyo.balance(user_id)
     except Exception as exc:
@@ -11573,15 +12282,17 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
             "failed rescue %s: balance check failed: %s", order_id, exc
         )
         return await _refunded_no_replacement()
-    if not bal.get("found") or float(bal.get("balance", 0)) < new_total:
+    need = round(new_total - cover, 2)
+    if not bal.get("found") or float(bal.get("balance", 0)) < need:
         log.warning(
             "failed rescue %s: balance too low for replacement (%s < %s)",
-            order_id, bal.get("balance", 0), new_total,
+            order_id, bal.get("balance", 0), need,
         )
         return await _refunded_no_replacement()
     try:
         result = await create_order_for_service(
             paxyo, user_id, nxt, link, quantity, uuid.uuid4().hex,
+            split=_rescue_cover_kwargs(watched, confirmed_total, cover),
         )
     except Exception as exc:
         log.warning(
@@ -11618,20 +12329,525 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
         total=new_total,
         rescue_count=(watched.get("rescue_count") or 0) + 1,
         failed_services=failed,
+        split=watched.get("split"),
+    )
+    rescued_text = t(
+        "order_failed_rescued", "en",
+        old_order_id=order_id,
+        old_service=short_service_name(service.get("name"))
+        or f"service {service.get('service')}",
+        quantity=int(quantity or 0),
+        refunded=format_money(refunded),
+        new_service=short_service_name(nxt.get("name"))
+        or f"service {nxt.get('service')}",
+        new_order_id=new_id,
+        new_total=format_money(new_total),
+    )
+    if cover > 0:
+        # The new order costs more than the refunded one — say
+        # plainly that Paxyo covers the extra, so the user never
+        # reads the higher figure as a charge to them.
+        rescued_text += "\n" + t(
+            "order_rescue_cover_note", "en",
+            cover=format_money(cover),
+            confirmed=format_money(refunded),
+        )
+    await notify_user(app, user_id, rescued_text)
+    return True
+
+
+async def _place_split_remainder(app, test_order_id, watched):
+    """Place the remaining 90% after a split test delivered, on the
+    same service. Returns True always — the test entry is dropped
+    either way, so the caller never replays it. Never raises.
+
+    The remainder is watched like any placed order, with the split
+    context carried forward (leg "remainder", spent = the delivered
+    test's cost) so its delivery message states the full ordered
+    quantity and the saving. When the remainder cannot be placed
+    (balance short, cover not live yet, placement refused) the
+    user is told honestly what happened to the delivered test and
+    what to do — the test portion stays delivered and paid, the
+    rest is simply not ordered."""
+    user_id = watched.get("user_id")
+    service = watched.get("service") or {}
+    split = watched.get("split") or {}
+    link = watched.get("link")
+    rest_qty = split.get("rest_qty") or 0
+    total_qty = split.get("total_qty") or watched.get("quantity") or 0
+    test_qty = split.get("test_qty") or 0
+    confirmed_total = float(split.get("confirmed_total") or 0)
+    test_cost = float(watched.get("total") or 0)
+    rest_cost = estimated_total_etb(
+        float(service.get("rate_etb_per_1000") or 0), rest_qty
+    )
+    cover = split_leg_cover(confirmed_total, rest_qty, total_qty, rest_cost)
+    need = round(rest_cost - cover, 2)
+    try:
+        bal = await paxyo.balance(user_id)
+    except Exception as exc:
+        log.warning(
+            "split remainder %s: balance check failed: %s",
+            test_order_id, exc,
+        )
+        await notify_user(
+            app, user_id,
+            t(
+                "order_split_rest_failed", "en",
+                test_quantity=int(test_qty or 0),
+                quantity=int(total_qty or 0),
+                rest_quantity=int(rest_qty or 0),
+            ),
+        )
+        WATCHED_ORDERS.pop(test_order_id, None)
+        return True
+    if not bal.get("found") or float(bal.get("balance", 0)) < need:
+        await notify_user(
+            app, user_id,
+            t(
+                "order_split_rest_topup", "en",
+                test_quantity=int(test_qty or 0),
+                quantity=int(total_qty or 0),
+                rest_quantity=int(rest_qty or 0),
+                needed=format_money(need),
+                balance=format_money(bal.get("balance", 0)),
+            ),
+        )
+        WATCHED_ORDERS.pop(test_order_id, None)
+        return True
+    if cover > 0:
+        # A cover above zero with the endpoint not live would debit
+        # the full rest cost (overcharging the user when their
+        # balance happens to cover it), so the remainder is only
+        # placed with a cover the server confirms it supports.
+        try:
+            live = await paxyo.split_cover_live()
+        except Exception:
+            live = False
+        if not live:
+            await notify_user(
+                app, user_id,
+                t(
+                    "order_split_rest_no_cover", "en",
+                    test_quantity=int(test_qty or 0),
+                    quantity=int(total_qty or 0),
+                    rest_quantity=int(rest_qty or 0),
+                ),
+            )
+            WATCHED_ORDERS.pop(test_order_id, None)
+            return True
+    split_kwargs = {
+        "split_group_id": split.get("group_id"),
+        "split_part": "remainder",
+        "confirmed_total_etb": confirmed_total,
+    }
+    if cover > 0:
+        split_kwargs["paxyo_cover_etb"] = cover
+    try:
+        result = await create_order_for_service(
+            paxyo, user_id, service, link, rest_qty,
+            f"split-rest-{uuid.uuid4().hex}",
+            split=split_kwargs,
+        )
+    except Exception as exc:
+        log.warning(
+            "split remainder %s: placement failed: %s", test_order_id, exc
+        )
+        await notify_user(
+            app, user_id,
+            t(
+                "order_split_rest_failed", "en",
+                test_quantity=int(test_qty or 0),
+                quantity=int(total_qty or 0),
+                rest_quantity=int(rest_qty or 0),
+            ),
+        )
+        WATCHED_ORDERS.pop(test_order_id, None)
+        return True
+    order = result.get("order", result) if isinstance(result, dict) else {}
+    new_id = order.get("id") or order.get("order_id") or "?"
+    # The server computes the real total; use it when the reply
+    # carries it, else the catalogue estimate above.
+    server_total = order.get("total", order.get("charge"))
+    if server_total is not None:
+        try:
+            rest_cost = round(float(server_total), 2)
+        except (TypeError, ValueError):
+            pass
+    failed = list(watched.get("failed_services") or [])
+    WATCHED_ORDERS.pop(test_order_id, None)
+    LAST_ORDER[user_id] = new_id
+    watch_order(
+        user_id, new_id, service, rest_qty, link,
+        total=rest_cost,
+        rescue_count=watched.get("rescue_count") or 0,
+        failed_services=failed,
+        split={
+            "group_id": split.get("group_id"),
+            "leg": "remainder",
+            "total_qty": total_qty,
+            "test_qty": test_qty,
+            "rest_qty": rest_qty,
+            "confirmed_total": confirmed_total,
+            "spent": test_cost,
+        },
     )
     await notify_user(
         app, user_id,
         t(
-            "order_failed_rescued", "en",
+            "order_split_test_done", "en",
+            test_quantity=int(test_qty or 0),
+            quantity=int(total_qty or 0),
+            rest_quantity=int(rest_qty or 0),
+            new_order_id=new_id,
+        ),
+    )
+    return True
+
+
+async def _attempt_split_test_rescue(app, order_id, watched, services=None,
+                                     now=None, failed=False):
+    """Rescue one split-test leg that stalled (or failed at the
+    provider): refund the test, tell William, and test the next
+    service — cheapest first. Returns True when the entry is
+    resolved (a new test is watched, or the user was told honestly
+    and the entry dropped); False when the caller should keep
+    watching (refund endpoint not live yet, or a transient failure
+    before any refund). Never raises.
+
+    A stalled test counts as an attempt under MAX_STALL_RESCUES
+    like any rescue; skipping a service that is pricier than the
+    confirmed total plus the 10% Paxyo tolerance is not an
+    attempt. The test order is a real order the customer paid
+    for, so it stays in the orders table (and the mini-app
+    history) — the refund is a balance credit on it, not a
+    deletion. William also gets an admin message for every stuck
+    test, so he can cancel it manually if the automatic cancel
+    did not go through. Nothing is returned False after the
+    refund: once the money is back, the entry is always resolved
+    with a plain message, never left to the generic stuck
+    warning (which would claim an order is still being worked on
+    after it was refunded)."""
+    user_id = watched.get("user_id")
+    service = watched.get("service") or {}
+    split = watched.get("split") or {}
+    test_qty = watched.get("quantity") or 0
+    total_qty = split.get("total_qty") or test_qty
+    confirmed_total = float(split.get("confirmed_total") or 0)
+    link = watched.get("link")
+    if now is None:
+        import time
+
+        now = time.time()
+    if services is None:
+        try:
+            services = await paxyo.services()
+        except Exception as exc:
+            log.warning(
+                "split test rescue %s: services fetch failed: %s",
+                order_id, exc,
+            )
+            return False
+    # The next service is picked BEFORE the refund, so a pick that
+    # needs the Paxyo cover can check the server honours it first
+    # — a cover the server ignores would debit the full cost.
+    try:
+        cover_live = await paxyo.split_cover_live()
+    except Exception:
+        cover_live = False
+    nxt, cover = _next_split_service(
+        services, service, watched.get("failed_services"), total_qty,
+        confirmed_total, allow_cover=cover_live,
+    )
+    # Balance pre-check: the refund of this test (its stored total)
+    # lands back first, so the new test is affordable when the
+    # current balance plus that refund covers its cost after cover.
+    test_total = watched.get("total")
+    if test_total is None:
+        test_total = estimated_total_etb(
+            float(service.get("rate_etb_per_1000") or 0), test_qty
+        )
+    if nxt is not None:
+        new_test_qty, _new_rest = split_test_quantities(total_qty, nxt)
+        new_test_cost = estimated_total_etb(
+            float(nxt.get("rate_etb_per_1000") or 0), new_test_qty
+        )
+        leg_cover = split_leg_cover(
+            confirmed_total, new_test_qty, total_qty, new_test_cost
+        )
+        try:
+            bal = await paxyo.balance(user_id)
+        except Exception as exc:
+            log.warning(
+                "split test rescue %s: balance check failed: %s",
+                order_id, exc,
+            )
+            return False
+        available = float(bal.get("balance", 0)) + float(test_total or 0)
+        if not bal.get("found") or available < round(
+            new_test_cost - leg_cover, 2
+        ):
+            log.warning(
+                "split test rescue %s: balance too low for next test "
+                "(%s < %s)", order_id, available,
+                round(new_test_cost - leg_cover, 2),
+            )
+            return False
+    # Refund the test leg: cancel + refund when it stalled,
+    # fail-refund when the provider ended it failed.
+    if failed:
+        # Throttle like the failed-rescue path: one fail-refund
+        # attempt per hour per order.
+        last_try = watched.get("fail_refund_attempted_at") or 0
+        if last_try and not watched.get("fail_refund_done"):
+            if now - last_try < FAIL_REFUND_RETRY_SECONDS:
+                return False
+        watched["fail_refund_attempted_at"] = now
+        try:
+            refund = await paxyo.fail_refund(order_id, user_id)
+        except Exception as exc:
+            log.warning(
+                "split test rescue %s: fail-refund failed: %s",
+                order_id, exc,
+            )
+            conflicts = (watched.get("fail_refund_conflicts") or 0) + 1
+            watched["fail_refund_conflicts"] = conflicts
+            if conflicts >= 2 and not watched.get(
+                "fail_refund_unclear_sent"
+            ):
+                watched["fail_refund_unclear_sent"] = True
+                # The provider will not confirm the failure, so
+                # the refund cannot be made — William gets the
+                # order details so he can check it manually.
+                await notify_admins(
+                    app,
+                    _split_test_admin_text(
+                        order_id, service, test_qty, None, failed,
+                        "The provider will not confirm the "
+                        "failure, so no refund could be made.",
+                        cost=test_total,
+                    ),
+                )
+                await notify_user(
+                    app, user_id,
+                    t(
+                        "order_failed_unclear", "en",
+                        order_id=order_id,
+                        service=short_service_name(service.get("name"))
+                        or f"service {service.get('service')}",
+                        quantity=int(test_qty or 0),
+                    ),
+                )
+            return False
+        if not refund:
+            # None: the endpoint is not live yet — tell the user
+            # once, honestly, and keep watching: if the endpoint
+            # is installed later, the next hourly retry refunds
+            # and rescues. William is told too — the test order is
+            # still open, so he can check it manually.
+            if not watched.get("fail_refund_not_live_sent"):
+                watched["fail_refund_not_live_sent"] = True
+                await notify_admins(
+                    app,
+                    _split_test_admin_text(
+                        order_id, service, test_qty, None, failed,
+                        "The refund endpoint is not live yet — the "
+                        "test order is still open.",
+                        cost=test_total,
+                    ),
+                )
+                await notify_user(
+                    app, user_id,
+                    t(
+                        "order_failed_no_refund", "en",
+                        order_id=order_id,
+                        service=short_service_name(service.get("name"))
+                        or f"service {service.get('service')}",
+                        quantity=int(test_qty or 0),
+                    ),
+                )
+            return False
+        watched["fail_refund_done"] = True
+    else:
+        try:
+            refund = await paxyo.cancel_refund(order_id, user_id)
+        except Exception as exc:
+            log.warning(
+                "split test rescue %s: cancel-refund failed: %s",
+                order_id, exc,
+            )
+            # The automatic cancel did not go through — William
+            # gets the order details so he can cancel it manually.
+            await notify_admins(
+                app,
+                _split_test_admin_text(
+                    order_id, service, test_qty, None, failed,
+                    "The automatic cancel did not go through.",
+                    cost=test_total,
+                ),
+            )
+            return False
+        if not refund:
+            # None: the endpoint is not live yet (404) — nothing
+            # was refunded, nothing to move. William is told so
+            # he can cancel it manually; the stuck warning covers
+            # the user.
+            await notify_admins(
+                app,
+                _split_test_admin_text(
+                    order_id, service, test_qty, None, failed,
+                    "The cancel endpoint is not live yet — the "
+                    "test order is still open.",
+                    cost=test_total,
+                ),
+            )
+            return False
+    refunded = refund.get("refunded_etb")
+    if refunded is None:
+        refunded = test_total
+    if refunded is None:
+        refunded = estimated_total_etb(
+            float(service.get("rate_etb_per_1000") or 0), test_qty
+        )
+    capped = (watched.get("rescue_count") or 0) >= MAX_STALL_RESCUES
+    if capped:
+        # The refund still happens at the cap — the cap limits
+        # RE-PLACEMENT attempts, never the refund itself.
+        await notify_admins(
+            app,
+            _split_test_admin_text(
+                order_id, service, test_qty, refunded, failed,
+                "Rescue cap reached — refunded, no further tries.",
+            ),
+        )
+        await notify_user(
+            app, user_id,
+            t(
+                "order_split_cap_refunded", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                test_quantity=int(test_qty or 0),
+                refunded=format_money(refunded),
+            ),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
+    if nxt is None:
+        await notify_admins(
+            app,
+            _split_test_admin_text(
+                order_id, service, test_qty, refunded, failed,
+                "No service left within the price band — refunded, "
+                "nothing placed.",
+            ),
+        )
+        await notify_user(
+            app, user_id,
+            t(
+                "order_split_no_service", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                test_quantity=int(test_qty or 0),
+                refunded=format_money(refunded),
+            ),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
+    new_test_qty, new_rest_qty = split_test_quantities(total_qty, nxt)
+    new_test_cost = estimated_total_etb(
+        float(nxt.get("rate_etb_per_1000") or 0), new_test_qty
+    )
+    leg_cover = split_leg_cover(
+        confirmed_total, new_test_qty, total_qty, new_test_cost
+    )
+    split_kwargs = {
+        "split_group_id": split.get("group_id"),
+        "split_part": "test",
+        "confirmed_total_etb": confirmed_total,
+    }
+    if leg_cover > 0:
+        split_kwargs["paxyo_cover_etb"] = leg_cover
+    try:
+        result = await create_order_for_service(
+            paxyo, user_id, nxt, link, new_test_qty,
+            f"split-test-{uuid.uuid4().hex}",
+            split=split_kwargs,
+        )
+    except Exception as exc:
+        log.warning(
+            "split test rescue %s: next test failed: %s", order_id, exc
+        )
+        await notify_admins(
+            app,
+            _split_test_admin_text(
+                order_id, service, test_qty, refunded, failed,
+                f"Refunded; the next test on "
+                f"{short_service_name(nxt.get('name'))} could not "
+                f"be placed.",
+            ),
+        )
+        await notify_user(
+            app, user_id,
+            t(
+                "order_split_no_service", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                test_quantity=int(test_qty or 0),
+                refunded=format_money(refunded),
+            ),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
+    order = result.get("order", result) if isinstance(result, dict) else {}
+    new_id = order.get("id") or order.get("order_id") or "?"
+    server_total = order.get("total", order.get("charge"))
+    if server_total is not None:
+        try:
+            new_test_cost = round(float(server_total), 2)
+        except (TypeError, ValueError):
+            pass
+    failed_services = list(watched.get("failed_services") or [])
+    failed_services.append(service_combined_id(service))
+    WATCHED_ORDERS.pop(order_id, None)
+    LAST_ORDER[user_id] = new_id
+    watch_order(
+        user_id, new_id, nxt, new_test_qty, link,
+        total=new_test_cost,
+        rescue_count=(watched.get("rescue_count") or 0) + 1,
+        failed_services=failed_services,
+        split={
+            "group_id": split.get("group_id"),
+            "leg": "test",
+            "total_qty": total_qty,
+            "test_qty": new_test_qty,
+            "rest_qty": new_rest_qty,
+            "confirmed_total": confirmed_total,
+            "spent": 0.0,
+        },
+    )
+    await notify_admins(
+        app,
+        _split_test_admin_text(
+            order_id, service, test_qty, refunded, failed,
+            f"Testing {short_service_name(nxt.get('name'))} next "
+            f"(test order #{new_id}).",
+        ),
+    )
+    await notify_user(
+        app, user_id,
+        t(
+            "order_split_test_moved", "en",
             old_order_id=order_id,
             old_service=short_service_name(service.get("name"))
             or f"service {service.get('service')}",
-            quantity=int(quantity or 0),
+            test_quantity=int(test_qty or 0),
             refunded=format_money(refunded),
             new_service=short_service_name(nxt.get("name"))
             or f"service {nxt.get('service')}",
             new_order_id=new_id,
-            new_total=format_money(new_total),
         ),
     )
     return True
@@ -11790,13 +13006,43 @@ async def run_delivery_watch_cycle(app, now=None):
         ).strip().lower()
         if status in ("completed", "success", "paid"):
             service = watched.get("service") or {}
+            split = watched.get("split") or {}
+            if split.get("leg") == "test":
+                # Split-test (15 Nov 2026): the test delivered —
+                # place the remaining 90% on the same service. No
+                # delivery message yet: the order is not finished.
+                await _place_split_remainder(app, order_id, watched)
+                continue
+            qty = int(watched.get("quantity") or 0)
+            saved = 0.0
+            if split.get("leg") == "remainder":
+                # The remainder delivered: the whole order is done.
+                # State the FULL ordered quantity (test + rest),
+                # and the money saved when the cheaper service cost
+                # less than the confirmed total.
+                qty = int(split.get("total_qty") or qty)
+                spent = float(split.get("spent") or 0)
+                total_spent = spent + float(watched.get("total") or 0)
+                saved = round(
+                    float(split.get("confirmed_total") or 0)
+                    - total_spent,
+                    2,
+                )
             text = t(
                 "order_delivered", "en",
-                quantity=int(watched.get("quantity") or 0),
+                quantity=qty,
                 service=short_service_name(service.get("name"))
                 or f"service {service.get('service')}",
                 order_id=order_id,
             )
+            if saved > 0:
+                text += "\n" + t(
+                    "order_split_saved", "en",
+                    saved=format_money(saved),
+                    total=format_money(
+                        split.get("confirmed_total") or 0
+                    ),
+                )
             if services is None:
                 try:
                     services = await paxyo.services()
@@ -11862,26 +13108,6 @@ async def run_delivery_watch_cycle(app, now=None):
             # not the stuck warning, for this episode; a failed
             # rescue falls through to the warning below.
             if not watched.get("rescue_attempted"):
-                if (watched.get("rescue_count") or 0) >= MAX_STALL_RESCUES:
-                    # All three services stalled: honest final
-                    # message, once, and stop — never loop forever.
-                    # The order stays watched, so a late delivery
-                    # still gets its message.
-                    if not watched.get("warned"):
-                        service = watched.get("service") or {}
-                        await notify_user(
-                            app, user_id,
-                            t(
-                                "order_rescue_exhausted", "en",
-                                order_id=order_id,
-                                service=short_service_name(
-                                    service.get("name"))
-                                or f"service {service.get('service')}",
-                                quantity=int(watched.get("quantity") or 0),
-                            ),
-                        )
-                        watched["warned"] = True
-                    continue
                 if services is None:
                     try:
                         services = await paxyo.services()
@@ -11890,9 +13116,42 @@ async def run_delivery_watch_cycle(app, now=None):
                             "delivery watch services failed: %s", exc
                         )
                         services = []
-                rescued = await _attempt_stall_rescue(
-                    app, order_id, watched, services or []
-                )
+                split = watched.get("split") or {}
+                if split.get("leg") == "test":
+                    # Split-test (15 Nov 2026): a stalled test is
+                    # rescued by the split-test flow (refund, tell
+                    # William, next cheaper test) — not the plain
+                    # rescue. The cap is handled inside it: a test
+                    # at the cap is refunded, not left "still in
+                    # progress", so the exhausted check below is
+                    # skipped for test legs.
+                    rescued = await _attempt_split_test_rescue(
+                        app, order_id, watched, services or [], now
+                    )
+                else:
+                    if (watched.get("rescue_count") or 0) >= MAX_STALL_RESCUES:
+                        # All five tries stalled: honest final
+                        # message, once, and stop — never loop forever.
+                        # The order stays watched, so a late delivery
+                        # still gets its message.
+                        if not watched.get("warned"):
+                            service = watched.get("service") or {}
+                            await notify_user(
+                                app, user_id,
+                                t(
+                                    "order_rescue_exhausted", "en",
+                                    order_id=order_id,
+                                    service=short_service_name(
+                                        service.get("name"))
+                                    or f"service {service.get('service')}",
+                                    quantity=int(watched.get("quantity") or 0),
+                                ),
+                            )
+                            watched["warned"] = True
+                        continue
+                    rescued = await _attempt_stall_rescue(
+                        app, order_id, watched, services or []
+                    )
                 watched["rescue_attempted"] = True
                 if rescued:
                     continue
@@ -11921,11 +13180,21 @@ async def run_delivery_watch_cycle(app, now=None):
             # (that may be the user's own cancel) or "refunded"
             # (already refunded). False keeps the entry watched;
             # the next cycle retries (throttled inside the rescue).
-            # services passes through as-is: None means "fetch the
+            # A failed split TEST leg goes through the split-test
+            # rescue instead (refund, tell William, next cheaper
+            # test); a failed remainder leg uses the plain rescue
+            # with its split context carried forward. services
+            # passes through as-is: None means "fetch the
             # catalogue inside", like the stall branch below.
-            handled = await _attempt_failed_rescue(
-                app, order_id, watched, services, now
-            )
+            split = watched.get("split") or {}
+            if split.get("leg") == "test":
+                handled = await _attempt_split_test_rescue(
+                    app, order_id, watched, services, now, failed=True
+                )
+            else:
+                handled = await _attempt_failed_rescue(
+                    app, order_id, watched, services, now
+                )
             if handled:
                 continue
         elif status in ("cancelled", "canceled", "refunded"):
@@ -13540,21 +14809,110 @@ def pending_for_user(user_id: int):
 
 
 async def create_order_for_service(client, user_id: int, service, link: str,
-                                   quantity: int, idempotency_key: str):
+                                   quantity: int, idempotency_key: str,
+                                   split=None):
     """Place an order on the service's own provider (second provider,
     15 Nov 2026): a GOP service goes through POST /orders,
     an SMM Social Media service through POST /orders/smm. The
     service dict decides — its provider/combined_id, never the bare
     id (2,790 bare ids collide between the providers). Same reply
     shape either way; errors raise exactly like create_order does,
-    so every caller keeps its own failure handling."""
+    so every caller keeps its own failure handling. `split` is an
+    optional dict of split-test fields (split_group_id,
+    split_part, confirmed_total_etb, paxyo_cover_etb) passed
+    through to the order endpoint — omitted entirely for a normal
+    order, so every existing caller is unchanged."""
+    split = dict(split or {})
     if service_provider(service) == "smm":
         return await client.create_order_smm(
             user_id, int(service["service"]), link, quantity, idempotency_key,
+            split_group_id=split.get("split_group_id"),
+            split_part=split.get("split_part"),
+            confirmed_total_etb=split.get("confirmed_total_etb"),
+            paxyo_cover_etb=split.get("paxyo_cover_etb"),
         )
     return await client.create_order(
         user_id, int(service["service"]), link, quantity, idempotency_key,
+        split_group_id=split.get("split_group_id"),
+        split_part=split.get("split_part"),
+        confirmed_total_etb=split.get("confirmed_total_etb"),
+        paxyo_cover_etb=split.get("paxyo_cover_etb"),
     )
+
+
+async def _place_split_test(pending, user_id: int, split_qtys):
+    """Place the 10% test leg of a big order (split-test, owner,
+    15 Nov 2026). Returns (result, error) like place_pending_order:
+    result carries split_test=True so the callers can say the order
+    is being tested first. The test is a REAL order on the fastest
+    (confirmed) service — it is recorded in the orders table and
+    the mini-app history like any order, with the split markers on
+    it (split-test idempotency key + split fields). The remaining
+    90% is placed by the delivery watch once this test delivers."""
+    service = pending["service"]
+    quantity = pending["quantity"]
+    total = pending["total"]
+    link = pending["link"]
+    test_qty, rest_qty = split_qtys
+    group_id = uuid.uuid4().hex
+    try:
+        result = await create_order_for_service(
+            paxyo, user_id, service, link, test_qty,
+            f"split-test-{uuid.uuid4().hex}",
+            split={
+                "split_group_id": group_id,
+                "split_part": "test",
+                "confirmed_total_etb": float(total),
+            },
+        )
+    except httpx.HTTPStatusError as exc:
+        log.warning("split test rejected: %s", exc.response.status_code)
+        return None, ("order_failed",)
+    except Exception as exc:
+        log.warning("split test failed: %s", exc)
+        return None, ("order_failed",)
+    order = result.get("order", result) if isinstance(result, dict) else {}
+    order_id = order.get("id") or order.get("order_id") or "?"
+    status = order.get("status", "pending")
+    LAST_ORDER[user_id] = order_id
+    test_cost = estimated_total_etb(
+        float(service.get("rate_etb_per_1000") or 0), test_qty
+    )
+    server_total = order.get("total", order.get("charge"))
+    if server_total is not None:
+        try:
+            test_cost = round(float(server_total), 2)
+        except (TypeError, ValueError):
+            pass
+    watch_order(
+        user_id, order_id, service, test_qty, link,
+        total=test_cost,
+        split={
+            "group_id": group_id,
+            "leg": "test",
+            "total_qty": quantity,
+            "test_qty": test_qty,
+            "rest_qty": rest_qty,
+            "confirmed_total": float(total),
+            "spent": 0.0,
+        },
+    )
+    learn_from_placed_order(user_id, service, quantity)
+    return {
+        "order_id": order_id,
+        "status": status,
+        "service": (
+            clean_service_name(service.get("name"))
+            if pending.get("full_name")
+            else short_service_name(service.get("name"))
+        ),
+        "quantity": quantity,
+        "link": link,
+        "total": total,
+        "split_test": True,
+        "test_order_id": order_id,
+        "test_quantity": test_qty,
+    }, None
 
 
 async def place_pending_order(pending, user_id: int):
@@ -13575,6 +14933,19 @@ async def place_pending_order(pending, user_id: int):
         return None, ("not_understood",)
     if not bal.get("found") or float(bal.get("balance", 0)) < total:
         return None, ("insufficient", bal.get("balance", 0), total)
+    # Split-test for big orders (owner, 15 Nov 2026): over 400 ETB
+    # the order is placed as a 10% test first; the remaining 90%
+    # follows once the test delivers (delivery watch). A service
+    # the order cannot be split on falls through to the normal
+    # whole placement below — the order still goes through.
+    try:
+        total_value = float(total)
+    except (TypeError, ValueError):
+        total_value = 0.0
+    if total_value > SPLIT_TEST_THRESHOLD_ETB:
+        split_qtys = split_test_quantities(quantity, service)
+        if split_qtys is not None:
+            return await _place_split_test(pending, user_id, split_qtys)
     try:
         result = await create_order_for_service(
             paxyo, user_id, service, pending["link"], quantity,
@@ -13643,6 +15014,15 @@ async def send_order_result(message, lang: str, pending, user_id: int):
         order_id=result["order_id"],
         status=result["status"],
     )
+    # Split-test (15 Nov 2026): the summary shows the full order
+    # as confirmed, plus one line saying the first 10% is being
+    # tested first — the rest follows once it delivers.
+    if result.get("split_test"):
+        summary += "\n" + t(
+            "order_split_test_placed", lang,
+            test_quantity=result["test_quantity"],
+            quantity=result["quantity"],
+        )
     # Ideas batch (15 Nov 2026): one-tap reorder under the summary,
     # and the quick-reply keyboard stays under the chat after a
     # completed flow. (The Confirm-tap path shows the same summary
@@ -21310,6 +22690,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order_id=result["order_id"],
             status=result["status"],
         )
+        # Split-test (15 Nov 2026): same note as the
+        # text-acceptance summary above.
+        if result.get("split_test"):
+            summary += "\n" + t(
+                "order_split_test_placed", lang,
+                test_quantity=result["test_quantity"],
+                quantity=result["quantity"],
+            )
         # Per-user personality (feature 5, 15 Nov 2026): the same
         # tone shaping as the text-acceptance summary — brief gets
         # the summary alone, chatty one warm line, formal a polite

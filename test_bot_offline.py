@@ -404,6 +404,7 @@ class FakePaxyo:
                  services=None, status_by_order=None, admin_stats=None,
                  my_referral=None, referral_error=None,
                  cancel_refund_result=None, cancel_refund_error=None,
+                 cancel_refund_results=None,
                  fail_refund_result=None, fail_refund_error=None,
                  next_order_ids=None, traits=None,
                  promo_codes=None, promo_none=False,
@@ -422,7 +423,8 @@ class FakePaxyo:
                  cancel_order_error=None, partial_result=None,
                  partial_none=False, partial_error=None,
                  fraud_flags=None, fraud_none=False,
-                 order_records=None, order_status_none=False):
+                 order_records=None, order_status_none=False,
+                 split_cover_live=False):
         self._balance = balance
         self._status = status
         self._status_by_order = dict(status_by_order or {})
@@ -449,6 +451,11 @@ class FakePaxyo:
         # tests keep their order id).
         self._cancel_refund_result = cancel_refund_result
         self._cancel_refund_error = cancel_refund_error
+        # Per-order refund figures for rescue chains (price cap,
+        # 15 Nov 2026): {"1841": {...refunded_etb 10.0...},
+        # "1842": {...refunded_etb 5.0...}} — a chain refunds each
+        # order's own stored total, not one figure for all.
+        self._cancel_refund_results = dict(cancel_refund_results or {})
         self._next_order_ids = list(next_order_ids or [])
         self.cancel_refund_calls = []
         # Failed-order rescue (second provider, 15 Nov 2026): a
@@ -485,6 +492,16 @@ class FakePaxyo:
         # None-on-404 for an unknown order id.
         self._order_records = dict(order_records or {})
         self._order_status_none = order_status_none
+        # Split-test (15 Nov 2026): whether the server honours the
+        # Paxyo cover (GET /split-cover/status) — False by default,
+        # so tests prove the strict-cap behaviour until the endpoint
+        # is "installed". order_split_kwargs / smm_order_split_kwargs
+        # record the split kwargs of every order created (one dict
+        # per order, only the kwargs actually passed, in creation
+        # order), so tests can assert the markers and the cover.
+        self._split_cover_live = split_cover_live
+        self.order_split_kwargs = []
+        self.smm_order_split_kwargs = []
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
         self.order_keys = []
@@ -633,20 +650,46 @@ class FakePaxyo:
     async def balance(self, telegram_id):
         return {"found": True, "balance": self._balance}
 
-    async def create_order(self, telegram_id, service_id, link, quantity, idempotency_key):
+    async def create_order(self, telegram_id, service_id, link, quantity, idempotency_key,
+                         split_group_id=None, split_part=None,
+                         confirmed_total_etb=None, paxyo_cover_etb=None):
         self.orders_created.append((service_id, link, quantity))
         self.order_keys.append(idempotency_key)
+        self.order_split_kwargs.append({
+            k: v for k, v in {
+                "split_group_id": split_group_id,
+                "split_part": split_part,
+                "confirmed_total_etb": confirmed_total_etb,
+                "paxyo_cover_etb": paxyo_cover_etb,
+            }.items() if v is not None
+        })
         new_id = self._next_order_ids.pop(0) if self._next_order_ids else 1827
         return {"order": {"id": new_id, "status": "pending"}}
 
-    async def create_order_smm(self, telegram_id, service_id, link, quantity, idempotency_key):
+    async def create_order_smm(self, telegram_id, service_id, link, quantity, idempotency_key,
+                             split_group_id=None, split_part=None,
+                             confirmed_total_etb=None, paxyo_cover_etb=None):
         """Mirror POST /orders/smm (second provider, 15 Nov 2026):
         same shape as create_order, recorded separately so tests
         can tell which endpoint an order went to."""
         self.smm_orders_created.append((service_id, link, quantity))
         self.order_keys.append(idempotency_key)
+        self.smm_order_split_kwargs.append({
+            k: v for k, v in {
+                "split_group_id": split_group_id,
+                "split_part": split_part,
+                "confirmed_total_etb": confirmed_total_etb,
+                "paxyo_cover_etb": paxyo_cover_etb,
+            }.items() if v is not None
+        })
         new_id = self._next_order_ids.pop(0) if self._next_order_ids else 1827
         return {"order": {"id": new_id, "status": "pending"}}
+
+    async def split_cover_live(self):
+        """Mirror GET /split-cover/status (split-test, 15 Nov
+        2026): True only when the test seeds split_cover_live=True
+        — the server endpoint is not live by default."""
+        return self._split_cover_live
 
     async def cancel_refund(self, order_id, telegram_id):
         """Mirror POST /orders/{id}/cancel-refund (stall rescue,
@@ -675,7 +718,10 @@ class FakePaxyo:
             raise bot.httpx.HTTPStatusError(
                 "cancel-refund failed", request=req, response=resp
             )
-        return self._cancel_refund_result
+        result = self._cancel_refund_results.get(str(order_id))
+        if result is None:
+            result = self._cancel_refund_result
+        return result
 
     async def fail_refund(self, order_id, telegram_id):
         """Mirror POST /orders/{id}/fail-refund (failed-order
@@ -20654,11 +20700,22 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
 class TestStallRescue(unittest.IsolatedAsyncioTestCase):
     """Automatic stall rescue (feature 2, 15 Nov 2026): a stuck
     order is cancelled + refunded once and re-placed on the
-    next-best service in the same category — at most twice per
-    chain (#1 -> #2 -> #3), then the bot stops and says so
-    honestly. The rescue never shows a Confirm card (the user
+    next-best service in the same category — at most four times
+    per chain (5 tries total: the original plus 4 re-placements,
+    owner settled 15 Nov 19:55 EAT), then the bot stops and says
+    so honestly. The rescue never shows a Confirm card (the user
     already confirmed the order), uses a fresh idempotency key,
-    and only ever touches orders the bot placed and watches."""
+    and only ever touches orders the bot placed and watches.
+    Price cap (owner rule, 15 Nov 2026, extended with the +10%
+    Paxyo band the same day): a replacement costs at most the
+    amount the user confirmed — the cheaper tier is tried first,
+    and only when no service fits the confirmed total does the
+    bot use a service up to 10% above it, the extra covered by
+    Paxyo; when every remaining service costs more than the
+    confirmed total plus 10% the order is refunded in full with a
+    plain message instead of being moved. Skipping a pricier
+    candidate is not an attempt, and the band is only offered
+    when the server confirms it honours the cover."""
 
     def setUp(self):
         bot.WATCHED_ORDERS.clear()
@@ -20723,6 +20780,64 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
                 "average_time": "3 minutes", "active": True,
                 "provider_service_id": 7002,
             },
+        ]
+
+    def _svc(self, sid, minutes, price):
+        return {
+            "service": sid, "name": f"TikTok Video Views | {sid}",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": price, "min": 10, "max": 1000000,
+            "average_time": minutes, "active": True,
+            "provider_service_id": sid,
+        }
+
+    def _rescue_fixture_pricier_first(self):
+        # The fastest remaining service is pricier than the
+        # confirmed total; a slower one is affordable.
+        return [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 20.0),
+            self._svc(7002, "3 minutes", 5.0),
+        ]
+
+    def _rescue_fixture_all_pricier(self):
+        # Every remaining service costs more than the confirmed
+        # 10.00 — no affordable replacement exists.
+        return [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 20.0),
+            self._svc(7002, "3 minutes", 15.0),
+        ]
+
+    def _rescue_fixture_same_price(self):
+        return [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 10.0),
+        ]
+
+    def _rescue_fixture_chain(self):
+        # One pricier service behind four affordable ones, so a
+        # chain can skip the pricier service four times and still
+        # get all four of its re-placements before the cap stops
+        # it (5 tries total, owner settled 15 Nov 19:55 EAT).
+        return [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 20.0),
+            self._svc(7002, "3 minutes", 5.0),
+            self._svc(7003, "4 minutes", 5.0),
+            self._svc(7004, "5 minutes", 5.0),
+            self._svc(7005, "6 minutes", 5.0),
+        ]
+
+    def _rescue_fixture_all_affordable(self):
+        # Every service costs at most the confirmed total, so a
+        # five-order chain runs to the rescue cap (5 tries total).
+        return [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 5.0),
+            self._svc(7002, "3 minutes", 5.0),
+            self._svc(7003, "4 minutes", 5.0),
+            self._svc(7004, "5 minutes", 5.0),
         ]
 
     def _refund(self, order_id=1841, refunded=10.0):
@@ -20823,6 +20938,32 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(bot._next_rescue_service([], services[0], []))
 
+    def test_next_rescue_service_skips_pricier_for_cheaper(self):
+        # Price cap (owner rule, 15 Nov 2026): the pick is the
+        # fastest AFFORDABLE service — a pricier candidate is
+        # skipped for a cheaper one further down the list.
+        services = self._rescue_fixture_pricier_first()
+        nxt = bot._next_rescue_service(
+            services, services[0], [], max_total=10.0, quantity=1000,
+        )
+        self.assertEqual(nxt["service"], 7002)
+        # Same price is affordable (the cap is "at most").
+        nxt = bot._next_rescue_service(
+            services, services[0], [], max_total=5.0, quantity=1000,
+        )
+        self.assertEqual(nxt["service"], 7002)
+        # Every remaining service pricier: no pick.
+        nxt = bot._next_rescue_service(
+            services, services[2], ["gop:7000", "gop:7001"],
+            max_total=5.0, quantity=1000,
+        )
+        self.assertIsNone(nxt)
+        # No cap: the old fastest-first pick is unchanged.
+        nxt = bot._next_rescue_service(
+            services, services[1], ["gop:7000"]
+        )
+        self.assertEqual(nxt["service"], 7002)
+
     def test_watch_order_starts_rescue_state(self):
         service = self._rescue_fixture()[0]
         bot.watch_order(1, 1841, service, 1000,
@@ -20917,6 +21058,166 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
         self.assertIn("#1842", app.bot.sent[1][1])
         self.assertIn("delivered", app.bot.sent[1][1])
         self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    # --- the price cap: pricier services are skipped -----------
+
+    async def test_pricier_next_service_skipped_for_cheaper_further_down(self):
+        # The fastest remaining service (20.00) costs more than
+        # the confirmed 10.00, so the rescue skips it and takes
+        # the slower affordable one (5.00) instead.
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture_pricier_first(),
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("#1842", text)
+        self.assertIn("10.00", text)  # the refunded order
+        self.assertIn("5.00", text)  # the new order — cheaper
+        self.assertIn("moved", text)
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(
+            fake.orders_created,
+            [(7002, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        entry = bot.WATCHED_ORDERS["1842"]
+        self.assertEqual(entry["rescue_count"], 1)
+        self.assertEqual(entry["failed_services"], ["gop:7000"])
+
+    async def test_all_remaining_pricier_refunds_and_tells_user(self):
+        # Every remaining service costs more than the confirmed
+        # 10.00: the order is refunded in full, nothing is placed,
+        # and the user gets the plain reason — not the generic
+        # stuck warning.
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture_all_pricier(),
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("10.00", text)  # the full refund
+        self.assertIn("cost more", text)
+        self.assertIn("did not move", text)
+        self.assertIn("refunded", text)
+        self.assertNotIn("longer than usual", text)
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    async def test_same_price_replacement_still_works(self):
+        # Same price is not "more": the rescue moves the order.
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture_same_price(),
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("10.00", app.bot.sent[0][1])
+        self.assertEqual(
+            fake.orders_created,
+            [(7001, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        self.assertEqual(bot.WATCHED_ORDERS["1842"]["rescue_count"], 1)
+
+    async def test_rescue_chain_skips_do_not_consume_attempts(self):
+        # Skipping a pricier candidate is not an attempt: the
+        # chain still gets its four re-placements, and the cap
+        # still stops it after the fourth one.
+        import time
+
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture_chain(),
+            status_by_order={
+                "1841": "pending", "1842": "pending",
+                "1843": "pending", "1844": "pending",
+                "1845": "pending",
+            },
+            cancel_refund_result=self._refund(),
+            cancel_refund_results={
+                "1841": self._refund(refunded=10.0),
+                "1842": self._refund(order_id="1842", refunded=5.0),
+                "1843": self._refund(order_id="1843", refunded=5.0),
+                "1844": self._refund(order_id="1844", refunded=5.0),
+            },
+            next_order_ids=[1842, 1843, 1844, 1845],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)  # #1 -> #2 (7002)
+            self.assertEqual(
+                bot.WATCHED_ORDERS["1842"]["rescue_count"], 1
+            )
+            bot.WATCHED_ORDERS["1842"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #2 -> #3 (7003)
+            self.assertEqual(
+                bot.WATCHED_ORDERS["1843"]["rescue_count"], 2
+            )
+            bot.WATCHED_ORDERS["1843"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #3 -> #4 (7004)
+            self.assertEqual(
+                bot.WATCHED_ORDERS["1844"]["rescue_count"], 3
+            )
+            bot.WATCHED_ORDERS["1844"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #4 -> #5 (7005)
+            self.assertEqual(
+                bot.WATCHED_ORDERS["1845"]["rescue_count"], 4
+            )
+            bot.WATCHED_ORDERS["1845"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #5 stalls: stop
+            await bot.run_delivery_watch_cycle(app)  # nothing new
+        self.assertEqual(len(app.bot.sent), 5)
+        self.assertIn("#1842", app.bot.sent[0][1])
+        self.assertIn("#1843", app.bot.sent[1][1])
+        self.assertIn("#1844", app.bot.sent[2][1])
+        self.assertIn("#1845", app.bot.sent[3][1])
+        final = app.bot.sent[4][1]
+        self.assertIn("#1845", final)
+        self.assertIn("still not delivering", final)
+        self.assertIn("stopped", final)
+        self.assertIn("still in progress", final)
+        self.assertIn("t.me/paxyo", final)
+        self.assertNotIn("refund", final.lower())
+        # Four rescues, four different fresh keys, four
+        # replacements on the next affordable service each time —
+        # the pricier 7001 was skipped four times and consumed no
+        # attempt.
+        self.assertEqual(len(fake.cancel_refund_calls), 4)
+        self.assertEqual(len(fake.orders_created), 4)
+        self.assertEqual(
+            [s for s, _, _ in fake.orders_created],
+            [7002, 7003, 7004, 7005],
+        )
+        self.assertEqual(len(set(fake.order_keys)), 4)
+        self.assertTrue(bot.WATCHED_ORDERS["1845"]["warned"])
 
     # --- rescue failures: warning, no retry ----------------------
 
@@ -21023,24 +21324,80 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
         self.assertTrue(bot.WATCHED_ORDERS["1841"]["rescue_attempted"])
 
-    # --- all three services fail ---------------------------------
+    # --- the price cap stops a chain at a pricier service --------
 
-    async def test_all_three_fail_final_message_then_stop(self):
+    async def test_chain_stops_at_pricier_refund(self):
+        # Price cap (owner rule, 15 Nov 2026): #1 (10.00) rescues
+        # onto #2 (5.00), but #2's only remaining service (20.00)
+        # costs more than the 5.00 now confirmed — so #2 is
+        # refunded in full with a plain message, not moved to #3.
         import time
 
         self._watch("1841")
         fake = FakePaxyo(
             services=self._rescue_fixture(),
-            status_by_order={
-                "1841": "pending", "1842": "pending", "1843": "pending",
-            },
+            status_by_order={"1841": "pending", "1842": "pending"},
             cancel_refund_result=self._refund(),
-            next_order_ids=[1842, 1843],
+            cancel_refund_results={
+                "1841": self._refund(refunded=10.0),
+                "1842": self._refund(order_id="1842", refunded=5.0),
+            },
+            next_order_ids=[1842],
         )
         app = FakeApp()
         with mock.patch("bot.paxyo", fake):
             await bot.run_delivery_watch_cycle(app)  # #1 stalls -> #2
+            self.assertEqual(
+                bot.WATCHED_ORDERS["1842"]["rescue_count"], 1
+            )
             # The replacement stalls too: age its watch entry.
+            bot.WATCHED_ORDERS["1842"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #2: pricier only
+            await bot.run_delivery_watch_cycle(app)  # nothing new
+        self.assertEqual(len(app.bot.sent), 2)
+        self.assertIn("#1842", app.bot.sent[0][1])
+        pricier = app.bot.sent[1][1]
+        self.assertIn("#1842", pricier)
+        self.assertIn("5.00", pricier)  # the refunded order
+        self.assertIn("cost more", pricier)
+        self.assertIn("refunded", pricier)
+        self.assertIn("did not move", pricier)
+        self.assertNotIn("longer than usual", pricier)
+        # One replacement, two refunds (one per rescue episode),
+        # and the order is resolved — no third placement, no
+        # stuck warning.
+        self.assertEqual(len(fake.cancel_refund_calls), 2)
+        self.assertEqual(len(fake.orders_created), 1)
+        self.assertEqual(
+            [s for s, _, _ in fake.orders_created], [7001]
+        )
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    async def test_all_five_affordable_fail_final_message_then_stop(self):
+        # Same chain, but every service is affordable (10.00 ->
+        # 5.00 -> 5.00 -> 5.00 -> 5.00): the rescue cap still stops
+        # the chain at five placements, with the honest final
+        # message and no refund claimed for the order still in
+        # progress.
+        import time
+
+        self._watch("1841")
+        fake = FakePaxyo(
+            services=self._rescue_fixture_all_affordable(),
+            status_by_order={
+                "1841": "pending", "1842": "pending",
+                "1843": "pending", "1844": "pending",
+                "1845": "pending",
+            },
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842, 1843, 1844, 1845],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)  # #1 stalls -> #2
+            # Each replacement stalls too: age its watch entry.
             bot.WATCHED_ORDERS["1842"]["placed_at"] = (
                 time.time() - 200 * 60
             )
@@ -21048,27 +21405,39 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
             bot.WATCHED_ORDERS["1843"]["placed_at"] = (
                 time.time() - 200 * 60
             )
-            await bot.run_delivery_watch_cycle(app)  # #3 stalls: stop
+            await bot.run_delivery_watch_cycle(app)  # #3 stalls -> #4
+            bot.WATCHED_ORDERS["1844"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #4 stalls -> #5
+            bot.WATCHED_ORDERS["1845"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # #5 stalls: stop
             await bot.run_delivery_watch_cycle(app)  # nothing new
-        self.assertEqual(len(app.bot.sent), 3)
+        self.assertEqual(len(app.bot.sent), 5)
         self.assertIn("#1842", app.bot.sent[0][1])
         self.assertIn("#1843", app.bot.sent[1][1])
-        final = app.bot.sent[2][1]
-        self.assertIn("#1843", final)
+        self.assertIn("#1844", app.bot.sent[2][1])
+        self.assertIn("#1845", app.bot.sent[3][1])
+        final = app.bot.sent[4][1]
+        self.assertIn("#1845", final)
         self.assertIn("still not delivering", final)
         self.assertIn("stopped", final)
         self.assertIn("still in progress", final)
         self.assertIn("t.me/paxyo", final)
         self.assertNotIn("refund", final.lower())
-        # Two rescues, two different fresh keys, two replacements
-        # on the next service each time — and no third attempt.
-        self.assertEqual(len(fake.cancel_refund_calls), 2)
-        self.assertEqual(len(fake.orders_created), 2)
+        # Four rescues, four different fresh keys, four
+        # replacements on the next service each time — and no
+        # fifth attempt.
+        self.assertEqual(len(fake.cancel_refund_calls), 4)
+        self.assertEqual(len(fake.orders_created), 4)
         self.assertEqual(
-            [s for s, _, _ in fake.orders_created], [7001, 7002]
+            [s for s, _, _ in fake.orders_created],
+            [7001, 7002, 7003, 7004],
         )
-        self.assertEqual(len(set(fake.order_keys)), 2)
-        self.assertTrue(bot.WATCHED_ORDERS["1843"]["warned"])
+        self.assertEqual(len(set(fake.order_keys)), 4)
+        self.assertTrue(bot.WATCHED_ORDERS["1845"]["warned"])
 
     # --- non-stuck orders untouched ------------------------------
 
@@ -21123,7 +21492,12 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
     total, recorded once ever server-side, so a retry after a
     successful refund is safe; a 409 (provider disagrees) keeps
     the order watched, and a 404 (endpoint not live) tells the
-    user honestly once and retries hourly."""
+    user honestly once and retries hourly. Price cap (owner rule,
+    15 Nov 2026): a replacement must cost at most the amount the
+    user confirmed — pricier services are skipped (a skip is not
+    an attempt), and when every remaining service costs more the
+    order stays refunded in full with a plain message instead of
+    being moved."""
 
     def setUp(self):
         bot.WATCHED_ORDERS.clear()
@@ -21288,6 +21662,7 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
                 self._smm_views(),
                 self._gop_views(7001, "3 minutes", 20.0),
                 self._gop_views(7002, "1 minute", 10.0),
+                self._gop_views(7003, "2 minutes", 4.0),
             ],
             status_by_order={"1841": "failed"},
             fail_refund_result=self._refund(refunded=5.0),
@@ -21300,16 +21675,87 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
         text = app.bot.sent[0][1]
         self.assertIn("failed", text)
         self.assertIn("5.00", text)  # the refunded SMM order
+        self.assertIn("4.00", text)  # the new order — cheaper
         self.assertEqual(fake.fail_refund_calls, [("1841", 1)])
-        # The replacement is the fastest remaining GOP service
-        # (7002 at 1 minute), not the SMM service that failed.
+        # The replacement is the fastest AFFORDABLE GOP service
+        # (7003 at 2 minutes): the fastest one (7002) costs more
+        # than the confirmed 5.00, so it is skipped.
         self.assertEqual(fake.smm_orders_created, [])
         self.assertEqual(
             fake.orders_created,
-            [(7002, "https://tiktok.com/@x/video/1", 1000)],
+            [(7003, "https://tiktok.com/@x/video/1", 1000)],
         )
         entry = bot.WATCHED_ORDERS["1842"]
         self.assertEqual(entry["failed_services"], ["smm:874"])
+
+    # --- the price cap: pricier services are skipped -------------
+
+    async def test_failed_order_all_remaining_pricier_refunds_with_reason(self):
+        # Every remaining service costs more than the confirmed
+        # 10.00: the failed order is refunded in full, nothing is
+        # placed, and the user gets the plain reason.
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[
+                self._gop_views(),
+                self._smm_views(price=20.0),
+                self._gop_views(7001, "3 minutes", 15.0),
+            ],
+            status_by_order={"1841": "failed"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("failed", text)
+        self.assertIn("10.00", text)  # the full refund
+        self.assertIn("cost more", text)
+        self.assertIn("did not move", text)
+        self.assertIn("refunded", text)
+        self.assertNotIn("No replacement order was placed", text)
+        self.assertEqual(fake.fail_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.smm_orders_created, [])
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+
+    async def test_failed_gop_order_skips_pricier_smm_for_cheaper_gop(self):
+        # Cross-provider price cap: the fastest remaining service
+        # is the SMM one at 20.00 — pricier than the confirmed
+        # 10.00 — so it is skipped and the cheaper GOP service at
+        # 5.00 takes the order instead.
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[
+                self._gop_views(),
+                self._smm_views(price=20.0),
+                self._gop_views(7001, "3 minutes", 5.0),
+            ],
+            status_by_order={"1841": "failed"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("#1842", text)
+        self.assertIn("10.00", text)  # the refunded order
+        self.assertIn("5.00", text)  # the new order — cheaper
+        self.assertIn("moved", text)
+        self.assertEqual(fake.smm_orders_created, [])
+        self.assertEqual(
+            fake.orders_created,
+            [(7001, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        entry = bot.WATCHED_ORDERS["1842"]
+        self.assertEqual(entry["rescue_count"], 1)
+        self.assertEqual(entry["failed_services"], ["gop:7000"])
 
     # --- watch: stalled GOP order -> SMM replacement (stall path) --
 
@@ -21441,9 +21887,9 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_order_at_rescue_cap_refunds_only(self):
         # The cap limits RE-PLACEMENT attempts, never the refund:
-        # a chain that already rescued twice still gets its money
-        # back when the third order fails.
-        self._watch("1841", self._gop_views(), rescue_count=2)
+        # a chain that already rescued four times still gets its
+        # money back when the fifth order fails.
+        self._watch("1841", self._gop_views(), rescue_count=4)
         fake = FakePaxyo(
             services=[
                 self._gop_views(),
@@ -21480,6 +21926,881 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.fail_refund_calls, [])
         self.assertEqual(fake.cancel_refund_calls, [])
         self.assertEqual(bot.WATCHED_ORDERS, {})
+
+
+class TestSplitTest(unittest.IsolatedAsyncioTestCase):
+    """Split-test for big orders + the +10% Paxyo band (owner, 15 Nov
+    2026): orders over 400 ETB place a 10% test first, then the
+    remaining 90% once the test delivers; a stalled test moves to
+    the next cheaper service with the same test; a cheaper success
+    refunds the difference and never orders more than asked; no
+    cheaper service means a pricier one up to +10%, Paxyo-covered.
+    Small orders (400 or less) place whole, with the same +10%
+    band on rescue. The cap is 5 tries total (owner settled 15 Nov
+    19:55 EAT): a test plus its remainder on the same service
+    counts as ONE try; a stalled test moving to the next service
+    uses up one try."""
+
+    def setUp(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.LAST_ORDER.clear()
+        bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot.RATING_ASKED.clear()
+
+    def tearDown(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.LAST_ORDER.clear()
+        bot.PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot.RATING_ASKED.clear()
+
+    def _svc(self, sid, minutes, price, provider="gop"):
+        return {
+            "service": sid, "provider": provider,
+            "combined_id": f"{provider}:{sid}",
+            "provider_service_id": sid,
+            "name": f"TikTok Video Views | {sid}",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": price, "min": 10, "max": 1000000,
+            "average_time": minutes, "active": True,
+        }
+
+    def _pending(self, service, quantity, total):
+        return {
+            "service": service, "quantity": quantity,
+            "link": "https://tiktok.com/@x/video/1", "total": total,
+        }
+
+    def _watch_test(self, order_id, service, minutes_ago=200,
+                    quantity=1000, total_qty=10000, confirmed=500.0,
+                    rescue_count=0, failed_services=None):
+        # Seed a watched 10% test leg: quantity is the test size,
+        # total is the test's own cost, split carries the whole
+        # order (total_qty, rest, confirmed total).
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": 1,
+            "service": service,
+            "quantity": quantity,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time() - minutes_ago * 60,
+            "avg_minutes": 1,
+            "warned": False,
+            "total": bot.estimated_total_etb(
+                float(service.get("rate_etb_per_1000") or 0), quantity),
+            "rescue_count": rescue_count,
+            "rescue_attempted": False,
+            "failed_services": list(failed_services or []),
+            "split": {
+                "group_id": "group-test-1",
+                "leg": "test",
+                "total_qty": total_qty,
+                "test_qty": quantity,
+                "rest_qty": total_qty - quantity,
+                "confirmed_total": confirmed,
+                "spent": 0.0,
+            },
+        }
+
+    def _watch_small(self, order_id, service, total=10.0):
+        # Seed a watched WHOLE small order (no split context):
+        # the plain rescue path, with the confirmed total.
+        import time
+
+        bot.WATCHED_ORDERS[str(order_id)] = {
+            "user_id": 1,
+            "service": service,
+            "quantity": 1000,
+            "link": "https://tiktok.com/@x/video/1",
+            "placed_at": time.time() - 200 * 60,
+            "avg_minutes": 1, "warned": False, "total": total,
+            "rescue_count": 0, "rescue_attempted": False,
+            "failed_services": [], "split": None,
+        }
+
+    def _refund(self, order_id=1841, refunded=50.0):
+        return {
+            "success": True, "ok": True, "order_id": order_id,
+            "refunded_etb": refunded, "provider_status": "canceled",
+            "duplicate": False,
+        }
+
+    # --- split quantities + cover math ---------------------------
+
+    def test_split_test_quantities(self):
+        svc = self._svc(7000, "1 minute", 50.0)
+        self.assertEqual(bot.split_test_quantities(10000, svc), (1000, 9000))
+        self.assertEqual(bot.split_test_quantities(1000, svc), (100, 900))
+        # A non-multiple-of-10 quantity cannot be split exactly.
+        self.assertIsNone(bot.split_test_quantities(10005, svc))
+        self.assertIsNone(bot.split_test_quantities(0, svc))
+        # The service minimum binds the test, not the remainder.
+        self.assertEqual(
+            bot.split_test_quantities(
+                100, dict(svc, min=50)), (50, 50))
+        # Remainder below the minimum: no split, place whole.
+        self.assertIsNone(
+            bot.split_test_quantities(100, dict(svc, min=60)))
+        # Minimum above the whole order: no split either.
+        self.assertIsNone(
+            bot.split_test_quantities(1000, dict(svc, min=2000)))
+
+    def test_split_leg_cover(self):
+        # The leg's cost above its proportional share of the
+        # confirmed total; zero when the leg costs at most its
+        # share.
+        self.assertEqual(
+            bot.split_leg_cover(500.0, 1000, 10000, 55.0), 5.0)
+        self.assertEqual(
+            bot.split_leg_cover(500.0, 9000, 10000, 495.0), 45.0)
+        self.assertEqual(
+            bot.split_leg_cover(500.0, 1000, 10000, 40.0), 0.0)
+        self.assertEqual(
+            bot.split_leg_cover(500.0, 1000, 10000, 50.0), 0.0)
+
+    def test_rescue_with_cover_tiers(self):
+        # Cheaper tier first (fastest within the confirmed total),
+        # then the cheapest service in the +10% band with its
+        # cover, then nothing beyond the band.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 11.0),
+            self._svc(7002, "3 minutes", 9.0),
+        ]
+        nxt, cover = bot._rescue_with_cover(
+            services, services[0], [], 1000, 10.0, allow_cover=True,
+        )
+        self.assertEqual(nxt["service"], 7002)
+        self.assertEqual(cover, 0.0)
+        # Only the band service left: within +10% with cover 1.00.
+        nxt, cover = bot._rescue_with_cover(
+            services, services[0], ["gop:7002"], 1000, 10.0,
+            allow_cover=True,
+        )
+        self.assertEqual(nxt["service"], 7001)
+        self.assertEqual(cover, 1.0)
+        # Cover not live: the band is not offered (strict cap).
+        nxt, cover = bot._rescue_with_cover(
+            services, services[0], ["gop:7002"], 1000, 10.0,
+            allow_cover=False,
+        )
+        self.assertIsNone(nxt)
+        self.assertEqual(cover, 0.0)
+        # Beyond the band: nothing, even with the cover live.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 12.0),
+        ]
+        nxt, cover = bot._rescue_with_cover(
+            services, services[0], [], 1000, 10.0, allow_cover=True,
+        )
+        self.assertIsNone(nxt)
+        self.assertEqual(cover, 0.0)
+
+    def test_next_rescue_service_cheapest_first_flag(self):
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 20.0),
+            self._svc(7002, "3 minutes", 5.0),
+        ]
+        # Default: fastest first, as before.
+        nxt = bot._next_rescue_service(
+            services, services[0], [], quantity=1000,
+        )
+        self.assertEqual(nxt["service"], 7001)
+        # Cheapest-first (the +10% band pick): the cheapest.
+        nxt = bot._next_rescue_service(
+            services, services[0], [], quantity=1000,
+            cheapest_first=True,
+        )
+        self.assertEqual(nxt["service"], 7002)
+
+    # --- placement: big orders split, small orders do not --------
+
+    async def test_big_order_splits_ten_ninety_on_fastest(self):
+        service = self._svc(7000, "1 minute", 50.0)
+        fake = FakePaxyo(
+            services=[service], next_order_ids=[1841],
+        )
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(
+                self._pending(service, 10000, 500.0), 1,
+            )
+        self.assertIsNone(error)
+        self.assertTrue(result["split_test"])
+        self.assertEqual(result["test_quantity"], 1000)
+        self.assertEqual(result["quantity"], 10000)
+        self.assertEqual(result["total"], 500.0)
+        # Only the 10% test was placed — the remainder waits for
+        # the test to deliver.
+        self.assertEqual(
+            fake.orders_created,
+            [(7000, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        self.assertTrue(fake.order_keys[0].startswith("split-test-"))
+        kwargs = fake.order_split_kwargs[0]
+        self.assertEqual(kwargs["split_part"], "test")
+        self.assertEqual(kwargs["confirmed_total_etb"], 500.0)
+        self.assertIn("split_group_id", kwargs)
+        # The watch entry is the test leg of the split order.
+        entry = bot.WATCHED_ORDERS["1841"]
+        self.assertEqual(entry["split"]["leg"], "test")
+        self.assertEqual(entry["split"]["total_qty"], 10000)
+        self.assertEqual(entry["split"]["test_qty"], 1000)
+        self.assertEqual(entry["split"]["rest_qty"], 9000)
+        self.assertEqual(entry["split"]["confirmed_total"], 500.0)
+        self.assertEqual(entry["rescue_count"], 0)
+        self.assertEqual(
+            entry["split"]["group_id"], kwargs["split_group_id"])
+        # The summary note names the test size and the full order.
+        note = bot.t(
+            "order_split_test_placed", "en",
+            test_quantity=1000, quantity=10000,
+        )
+        self.assertIn("1000", note)
+        self.assertIn("10000", note)
+
+    async def test_small_order_places_whole_no_split(self):
+        # 400 ETB or less: the whole order goes at once on the
+        # fastest service — no test, no split markers.
+        service = self._svc(7000, "1 minute", 10.0)
+        fake = FakePaxyo(
+            services=[service], next_order_ids=[1841],
+        )
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(
+                self._pending(service, 1000, 10.0), 1,
+            )
+        self.assertIsNone(error)
+        self.assertIsNone(result.get("split_test"))
+        self.assertEqual(
+            fake.orders_created,
+            [(7000, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        self.assertFalse(fake.order_keys[0].startswith("split-"))
+        self.assertEqual(fake.order_split_kwargs[0], {})
+        self.assertIsNone(bot.WATCHED_ORDERS["1841"].get("split"))
+        # Exactly at the 400 line: still whole, no split.
+        fake = FakePaxyo(
+            services=[service], next_order_ids=[1842],
+        )
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(
+                self._pending(service, 40000, 400.0), 1,
+            )
+        self.assertIsNone(error)
+        self.assertIsNone(result.get("split_test"))
+        self.assertEqual(fake.orders_created[0][2], 40000)
+
+    # --- the split flow through the scheduler --------------------
+
+    async def test_test_delivers_places_remainder_same_service(self):
+        # Test delivers -> the remaining 90% goes on the SAME
+        # service, and the total quantity is exactly the order.
+        service = self._svc(7000, "1 minute", 50.0)
+        self._watch_test("1841", service)
+        fake = FakePaxyo(
+            services=[service],
+            status_by_order={"1841": "completed"},
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        # One message: the test passed, the rest is being placed —
+        # no delivery message yet, the order is not finished.
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("placing the remaining", app.bot.sent[0][1])
+        self.assertIn("9000", app.bot.sent[0][1])
+        self.assertIn("#1842", app.bot.sent[0][1])
+        self.assertEqual(
+            fake.orders_created,
+            [(7000, "https://tiktok.com/@x/video/1", 9000)],
+        )
+        self.assertTrue(fake.order_keys[0].startswith("split-rest-"))
+        kwargs = fake.order_split_kwargs[0]
+        self.assertEqual(kwargs["split_part"], "remainder")
+        self.assertEqual(kwargs["confirmed_total_etb"], 500.0)
+        # The remainder is watched as ONE try with the test: the
+        # rescue count does not move, and the split context carries
+        # the delivered test's cost for the saving line.
+        self.assertEqual(set(bot.WATCHED_ORDERS), {"1842"})
+        entry = bot.WATCHED_ORDERS["1842"]
+        self.assertEqual(entry["split"]["leg"], "remainder")
+        self.assertEqual(entry["rescue_count"], 0)
+        self.assertEqual(entry["split"]["spent"], 50.0)
+        self.assertEqual(
+            entry["split"]["group_id"], "group-test-1")
+
+    async def test_remainder_delivers_full_quantity_no_saving(self):
+        # Same price throughout: the delivery message states the
+        # FULL ordered quantity (test + rest), with no saving line.
+        service = self._svc(7000, "1 minute", 50.0)
+        self._watch_test("1841", service)
+        fake = FakePaxyo(
+            services=[service],
+            status_by_order={
+                "1841": "completed", "1842": "completed",
+            },
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+            await bot.run_delivery_watch_cycle(app)
+        texts = [text for _, text in app.bot.sent]
+        # The test-done message also says "delivered" ("the first
+        # 1,000 ... are delivered") — it is not the delivery
+        # message; exclude it by its "placing the remaining" line.
+        delivered = [
+            t for t in texts
+            if "delivered" in t.lower()
+            and "placing the remaining" not in t.lower()
+        ]
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("10000", delivered[0])
+        self.assertNotIn("saved", delivered[0].lower())
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    async def test_stalled_test_moves_to_next_cheaper(self):
+        # Cheapest first: the stalled test is refunded and the next
+        # test goes on the cheapest remaining service, not the
+        # second-fastest.
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+            self._svc(7002, "3 minutes", 30.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(
+            fake.orders_created,
+            [(7002, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        # The new test is watched as try 2 (one try used up).
+        entry = bot.WATCHED_ORDERS["1842"]
+        self.assertEqual(entry["split"]["leg"], "test")
+        self.assertEqual(entry["rescue_count"], 1)
+        self.assertEqual(entry["split"]["total_qty"], 10000)
+        self.assertEqual(entry["failed_services"], ["gop:7000"])
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("#1842", text)
+        self.assertIn("50.00", text)  # the refunded test
+
+    async def test_cheaper_success_refunds_difference_quantity_exact(self):
+        # The full cheaper path: stalled test -> cheaper test ->
+        # test delivers -> remainder on the cheaper service ->
+        # delivery states the full quantity and the exact saving.
+        # The customer never gets more than the 10,000 ordered.
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+            self._svc(7002, "3 minutes", 30.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={
+                "1841": "pending", "1842": "completed",
+                "1843": "completed",
+            },
+            cancel_refund_result=self._refund(),
+            cancel_refund_results={
+                "1841": self._refund(refunded=50.0),
+            },
+            next_order_ids=[1842, 1843],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)  # stall -> test 2
+            await bot.run_delivery_watch_cycle(app)  # test 2 -> rest
+            await bot.run_delivery_watch_cycle(app)  # rest delivers
+        # Only the cheaper service was ever ordered on after the
+        # stall: a 1,000 test and the 9,000 remainder — exactly
+        # 10,000 in total, never more, even though the money would
+        # have bought more views at the cheaper rate.
+        self.assertEqual(
+            fake.orders_created,
+            [
+                (7002, "https://tiktok.com/@x/video/1", 1000),
+                (7002, "https://tiktok.com/@x/video/1", 9000),
+            ],
+        )
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        texts = [text for _, text in app.bot.sent]
+        # The test-done message also says "delivered" ("the first
+        # 1,000 ... are delivered") — it is not the delivery
+        # message; exclude it by its "placing the remaining" line.
+        delivered = [
+            t for t in texts
+            if "delivered" in t.lower()
+            and "placing the remaining" not in t.lower()
+        ]
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("10000", delivered[0])
+        # Confirmed 500.00, actually spent 30.00 + 270.00 = 300.00:
+        # the 200.00 difference was never charged, and the message
+        # says so with the exact figure.
+        self.assertIn("200.00", delivered[0])
+        self.assertIn("saved", delivered[0].lower())
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    async def test_no_cheaper_uses_pricier_within_ten_percent(self):
+        # No cheaper service works: the pricier one is used, but
+        # only within +10% — and the cover is recorded on both
+        # legs, so the customer still pays only the confirmed 500.
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 55.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={
+                "1841": "pending", "1842": "completed",
+                "1843": "completed",
+            },
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842, 1843],
+            split_cover_live=True,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)  # stall -> test 2
+            await bot.run_delivery_watch_cycle(app)  # test 2 -> rest
+            await bot.run_delivery_watch_cycle(app)  # rest delivers
+        # Test leg cover 5.00 (55.00 - 50.00 share), remainder leg
+        # cover 45.00 (495.00 - 450.00 share): 50.00 in total, the
+        # full +10% band, never more.
+        self.assertEqual(
+            fake.orders_created,
+            [
+                (7001, "https://tiktok.com/@x/video/1", 1000),
+                (7001, "https://tiktok.com/@x/video/1", 9000),
+            ],
+        )
+        self.assertEqual(
+            fake.order_split_kwargs[0]["paxyo_cover_etb"], 5.0)
+        self.assertEqual(
+            fake.order_split_kwargs[0]["confirmed_total_etb"], 500.0)
+        self.assertEqual(
+            fake.order_split_kwargs[1]["paxyo_cover_etb"], 45.0)
+        texts = [text for _, text in app.bot.sent]
+        # The test-done message also says "delivered" ("the first
+        # 1,000 ... are delivered") — it is not the delivery
+        # message; exclude it by its "placing the remaining" line.
+        delivered = [
+            t for t in texts
+            if "delivered" in t.lower()
+            and "placing the remaining" not in t.lower()
+        ]
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("10000", delivered[0])
+        # No saving line: the order cost more than confirmed, and
+        # Paxyo covered the extra — the user is never told they
+        # saved money they did not save.
+        self.assertNotIn("saved", delivered[0].lower())
+
+    async def test_pricier_beyond_ten_percent_refunds_no_placement(self):
+        # The only remaining service is 20% above the confirmed
+        # total — beyond the band: full refund, nothing placed.
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 60.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+            split_cover_live=True,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.cancel_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("50.00", app.bot.sent[0][1])
+        self.assertIn("refunded", app.bot.sent[0][1].lower())
+
+    # --- the admin alert for stuck tests -------------------------
+
+    async def test_stuck_test_alerts_admin_with_details(self):
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake), mock.patch.object(
+            bot, "ADMIN_TELEGRAM_IDS", {999},
+        ):
+            await bot.run_delivery_watch_cycle(app)
+        admin = [t for cid, t in app.bot.sent if cid == 999]
+        self.assertEqual(len(admin), 1)
+        self.assertIn("#1841", admin[0])
+        self.assertIn("1000", admin[0])  # the test quantity
+        self.assertIn("50.00", admin[0])  # the test cost / refund
+        self.assertIn("#1842", admin[0])  # what the bot did next
+        # The user still gets their own message too.
+        user = [t for cid, t in app.bot.sent if cid == 1]
+        self.assertEqual(len(user), 1)
+
+    async def test_admin_alert_skipped_without_admin_id(self):
+        # No admin id configured: the alert is skipped gracefully
+        # (no exception, no message to anyone but the user).
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result=self._refund(),
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(
+            {cid for cid, _ in app.bot.sent}, {1})
+
+    async def test_stuck_test_alerts_admin_when_cancel_not_live(self):
+        # The cancel endpoint is not live yet: nothing is refunded
+        # and nothing moves — but William is still told, so he can
+        # cancel the stuck test manually.
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            # cancel_refund_result=None (default): 404, not live.
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake), mock.patch.object(
+            bot, "ADMIN_TELEGRAM_IDS", {999},
+        ):
+            await bot.run_delivery_watch_cycle(app)
+        admin = [t for cid, t in app.bot.sent if cid == 999]
+        self.assertEqual(len(admin), 1)
+        self.assertIn("#1841", admin[0])
+        self.assertIn("cancel", admin[0].lower())
+        self.assertNotIn("Refunded", admin[0])
+        self.assertEqual(fake.orders_created, [])
+        # The user gets the stuck warning, not a rescue message.
+        user = [t for cid, t in app.bot.sent if cid == 1]
+        self.assertEqual(len(user), 1)
+        self.assertIn("longer than usual", user[0])
+
+    # --- small orders: whole placement, +10% band on rescue -----
+
+    async def test_small_order_rescue_uses_cover_within_ten_percent(self):
+        # Small order, only a +10% service left, cover live: the
+        # replacement is placed with the cover, and the user is
+        # told Paxyo covers the extra — they still pay only 10.00.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 11.0),
+        ]
+        self._watch_small("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result={
+                "success": True, "ok": True, "order_id": 1841,
+                "refunded_etb": 10.0, "provider_status": "canceled",
+                "duplicate": False,
+            },
+            next_order_ids=[1842],
+            split_cover_live=True,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(
+            fake.orders_created,
+            [(7001, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        self.assertEqual(
+            fake.order_split_kwargs[0],
+            {"confirmed_total_etb": 10.0, "paxyo_cover_etb": 1.0},
+        )
+        text = app.bot.sent[0][1]
+        self.assertIn("11.00", text)  # the new order's full cost
+        self.assertIn("Paxyo covers the extra 1.00 ETB", text)
+        self.assertIn("10.00", text)  # what the user still pays
+
+    async def test_small_order_rescue_cover_not_live_keeps_strict_cap(self):
+        # Same setup, cover NOT live: the +10% service is not
+        # offered — refund in full, no placement, plain message.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 11.0),
+        ]
+        self._watch_small("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result={
+                "success": True, "ok": True, "order_id": 1841,
+                "refunded_etb": 10.0, "provider_status": "canceled",
+                "duplicate": False,
+            },
+            next_order_ids=[1842],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+        self.assertIn("cost more", app.bot.sent[0][1])
+        self.assertIn("10.00", app.bot.sent[0][1])
+
+    async def test_small_order_rescue_beyond_ten_percent_refunds(self):
+        # 20% above confirmed: beyond the band even with the cover
+        # live — refund, no placement.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 12.0),
+        ]
+        self._watch_small("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result={
+                "success": True, "ok": True, "order_id": 1841,
+                "refunded_etb": 10.0, "provider_status": "canceled",
+                "duplicate": False,
+            },
+            next_order_ids=[1842],
+            split_cover_live=True,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+        self.assertIn("cost more", app.bot.sent[0][1])
+
+    async def test_small_order_rescue_cheaper_tier_first(self):
+        # A cheaper service exists alongside a band service: the
+        # cheaper tier wins, with no cover at all.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 11.0),
+            self._svc(7002, "3 minutes", 9.0),
+        ]
+        self._watch_small("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "pending"},
+            cancel_refund_result={
+                "success": True, "ok": True, "order_id": 1841,
+                "refunded_etb": 10.0, "provider_status": "canceled",
+                "duplicate": False,
+            },
+            next_order_ids=[1842],
+            split_cover_live=True,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(
+            fake.orders_created,
+            [(7002, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        self.assertEqual(fake.order_split_kwargs[0], {})
+        self.assertNotIn(
+            "Paxyo covers", app.bot.sent[0][1])
+
+    async def test_small_failed_order_rescue_uses_cover(self):
+        # The failed path takes the band too: a provider-failed
+        # small order is refunded and re-placed within +10%.
+        services = [
+            self._svc(7000, "1 minute", 10.0),
+            self._svc(7001, "2 minutes", 11.0),
+        ]
+        self._watch_small("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={"1841": "failed"},
+            fail_refund_result={
+                "success": True, "ok": True, "order_id": 1841,
+                "refunded_etb": 10.0, "provider_status": "failed",
+                "duplicate": False,
+            },
+            next_order_ids=[1842],
+            split_cover_live=True,
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(
+            fake.orders_created,
+            [(7001, "https://tiktok.com/@x/video/1", 1000)],
+        )
+        self.assertEqual(
+            fake.order_split_kwargs[0],
+            {"confirmed_total_etb": 10.0, "paxyo_cover_etb": 1.0},
+        )
+        self.assertIn(
+            "Paxyo covers the extra 1.00 ETB", app.bot.sent[0][1])
+
+    # --- the cap: 5 tries, and what one try means -----------------
+
+    async def test_five_try_split_chain_stops_with_refund(self):
+        # Five tries, then stop: four stalled tests move the bot
+        # down the cheaper services, and the fifth stalled test is
+        # refunded in full with no further placement.
+        import time
+
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+            self._svc(7002, "3 minutes", 30.0),
+            self._svc(7003, "4 minutes", 20.0),
+            self._svc(7004, "5 minutes", 10.0),
+        ]
+        self._watch_test("1841", services[0])
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={
+                "1841": "pending", "1842": "pending",
+                "1843": "pending", "1844": "pending",
+                "1845": "pending",
+            },
+            cancel_refund_result=self._refund(),
+            cancel_refund_results={
+                "1841": self._refund(refunded=50.0),
+                "1842": self._refund(order_id="1842", refunded=10.0),
+                "1843": self._refund(order_id="1843", refunded=20.0),
+                "1844": self._refund(order_id="1844", refunded=30.0),
+                "1845": self._refund(order_id="1845", refunded=40.0),
+            },
+            next_order_ids=[1842, 1843, 1844, 1845],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)  # try 1 -> 2
+            bot.WATCHED_ORDERS["1842"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # try 2 -> 3
+            bot.WATCHED_ORDERS["1843"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # try 3 -> 4
+            bot.WATCHED_ORDERS["1844"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # try 4 -> 5
+            self.assertEqual(
+                bot.WATCHED_ORDERS["1845"]["rescue_count"], 4)
+            bot.WATCHED_ORDERS["1845"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)  # try 5: refund
+            await bot.run_delivery_watch_cycle(app)  # nothing new
+        # Four rescue tests placed — cheapest first, so the chain
+        # walks up from the cheapest (7004) to the dearest
+        # remaining (7001) — five refunds (one per try), and the
+        # order is resolved — no sixth placement.
+        self.assertEqual(
+            [s for s, _, _ in fake.orders_created],
+            [7004, 7003, 7002, 7001],
+        )
+        self.assertEqual(len(fake.cancel_refund_calls), 5)
+        self.assertEqual(len(app.bot.sent), 5)
+        final = app.bot.sent[4][1]
+        self.assertIn("#1845", final)
+        self.assertIn("40.00", final)  # the refunded fifth test
+        self.assertIn("refunded", final.lower())
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    async def test_test_plus_remainder_counts_as_one_try(self):
+        # A test that delivers and its remainder on the SAME
+        # service count as ONE try: when the remainder then stalls,
+        # its rescue is try 2 (rescue_count 1), not try 3.
+        import time
+
+        services = [
+            self._svc(7000, "1 minute", 50.0),
+            self._svc(7001, "2 minutes", 40.0),
+        ]
+        service = services[0]
+        fake = FakePaxyo(
+            services=services,
+            status_by_order={
+                "1841": "completed", "1842": "pending",
+            },
+            cancel_refund_result=self._refund(),
+            cancel_refund_results={
+                "1842": self._refund(order_id="1842", refunded=450.0),
+            },
+            next_order_ids=[1841, 1842, 1843],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(
+                self._pending(service, 10000, 500.0), 1,
+            )
+            self.assertIsNone(error)
+            self.assertEqual(result["order_id"], 1841)
+            group_id = bot.WATCHED_ORDERS["1841"]["split"]["group_id"]
+            await bot.run_delivery_watch_cycle(app)  # test -> rest
+            self.assertEqual(
+                bot.WATCHED_ORDERS["1842"]["rescue_count"], 0)
+            # The remainder stalls: age it, then rescue it.
+            bot.WATCHED_ORDERS["1842"]["placed_at"] = (
+                time.time() - 200 * 60
+            )
+            await bot.run_delivery_watch_cycle(app)
+        # The replacement is the 9,000 remainder (not a new full
+        # order) on the next service, as try 2 — rescue_count 1 —
+        # and it keeps the same split group as a remainder leg.
+        self.assertEqual(
+            fake.orders_created[-1],
+            (7001, "https://tiktok.com/@x/video/1", 9000),
+        )
+        entry = bot.WATCHED_ORDERS["1843"]
+        self.assertEqual(entry["rescue_count"], 1)
+        self.assertEqual(entry["split"]["leg"], "remainder")
+        self.assertEqual(entry["split"]["group_id"], group_id)
+        kwargs = fake.order_split_kwargs[-1]
+        self.assertEqual(kwargs["split_part"], "remainder")
+        self.assertEqual(kwargs["split_group_id"], group_id)
 
 
 class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
