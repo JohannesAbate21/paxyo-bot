@@ -396,6 +396,7 @@ class FakePaxyo:
 
     def __init__(self, balance=1000.0, recent=None, schedules=None, due=None,
                  deposit_none=False, deposit_error=None,
+                 deposit_error_status=400,
                  deposits=None, deposits_none=False, status="pending",
                  session=None, delayed=None, delayed_due=None,
                  delayed_none=False, claim_ok=True):
@@ -413,6 +414,7 @@ class FakePaxyo:
         self.deposits_created = []
         self._deposit_none = deposit_none
         self._deposit_error = deposit_error
+        self._deposit_error_status = deposit_error_status
         self._deposits = list(deposits) if deposits is not None else []
         self._deposits_none = deposits_none
         self.deposit_status_checked = []
@@ -488,8 +490,10 @@ class FakePaxyo:
     async def create_deposit(self, telegram_id, amount, method, phone):
         """Mirror POST /deposits. deposit_none=True returns None (the
         real client does that on a 404: endpoint not live yet).
-        deposit_error=<message> raises the 400 the real client raises
-        when the server rejects the deposit."""
+        deposit_error=<message> raises the HTTP error the real client
+        raises when the server rejects the deposit (status
+        deposit_error_status, default 400; use 502 for the Chapa
+        Direct Charge refusal)."""
         if self._deposit_none:
             return None
         if self._deposit_error is not None:
@@ -497,7 +501,8 @@ class FakePaxyo:
                 "POST", "https://paxyo.et/api/bot/deposits"
             )
             resp = bot.httpx.Response(
-                400, json={"error": self._deposit_error}, request=req
+                self._deposit_error_status,
+                json={"error": self._deposit_error}, request=req
             )
             raise bot.httpx.HTTPStatusError(
                 "bad request", request=req, response=resp
@@ -617,13 +622,15 @@ class FakeQuery:
         self.data = data
         self.message = FakeMessage(message_text)
         self.edited = []
+        self.edited_markups = []
         self.answered = False
 
     async def answer(self):
         self.answered = True
 
-    async def edit_message_text(self, text):
+    async def edit_message_text(self, text, reply_markup=None):
         self.edited.append(text)
+        self.edited_markups.append(reply_markup)
 
 
 class FakeCallbackUpdate:
@@ -2926,6 +2933,9 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.PENDING_DEPOSIT, {})
 
     async def test_deposit_not_ready_when_endpoint_missing(self):
+        # Deliberately updated (embedded deposit, 15 Nov 2026): a
+        # missing endpoint no longer ends in a bare paxyo.et text —
+        # the user gets the deposit page embedded in Telegram.
         fake = FakePaxyo(deposit_none=True)
         await self._send(
             "deposit 10 telebirr 099387383",
@@ -2933,10 +2943,8 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
             paxyo=fake,
         )
         query = await self._confirm(fake)
-        self.assertEqual(
-            query.edited,
-            ["Deposit by chat is not ready yet — please deposit at paxyo.et."],
-        )
+        self.assertIn("couldn't be sent", query.edited[0])
+        self.assertIn("Telegram", query.edited[0])
         self.assertEqual(fake.deposits_created, [])
 
     async def test_deposit_api_error_shown_briefly(self):
@@ -3010,6 +3018,243 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ስልክዎ", text)
         self.assertIn("PIN", text)
         self.assertNotIn("paxyo.et", text)
+
+
+class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
+    """Embedded deposit (owner, 15 Nov 2026): when the USSD push
+    cannot be sent — Chapa Direct Charge is off for this account —
+    the bot offers the Paxyo deposit page INSIDE Telegram as a Web
+    App, so the chat never closes. A plain paxyo.et link stays as the
+    fallback, and "I paid" rechecks the deposit the same way as
+    before (the server re-verifies with Chapa and credits once)."""
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.LAST_DEPOSIT.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.LAST_DEPOSIT.clear()
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply") as speak:
+            await bot.handle_order_text(update, None, text)
+        self.assertEqual(msg.voice_sent, [])  # text in -> text only
+        return msg
+
+    async def _confirm(self, fake):
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        query = FakeQuery(f"confirm:{confirm_id}", message_text="Please confirm:")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update, None)
+        return query
+
+    def _webapp_button(self, markup):
+        """The row-0 button of a deposit keyboard, or None."""
+        if markup is None:
+            return None
+        rows = markup.inline_keyboard
+        if not rows or not rows[0]:
+            return None
+        return rows[0][0]
+
+    def test_webapp_url_is_paxyo_https(self):
+        self.assertEqual(bot.DEPOSIT_WEBAPP_URL, "https://paxyo.et/?login")
+        self.assertTrue(bot.DEPOSIT_WEBAPP_URL.startswith("https://"))
+        self.assertEqual(bot.PAXYO_SITE_URL, "https://paxyo.et/")
+
+    def test_keyboard_rows_with_amount(self):
+        markup = bot.deposit_webapp_keyboard("en", amount=100)
+        rows = markup.inline_keyboard
+        self.assertEqual(len(rows), 3)
+        webapp = rows[0][0]
+        self.assertIn("100.00 ETB", webapp.text)
+        self.assertIsNotNone(webapp.web_app)
+        self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
+        fallback = rows[1][0]
+        self.assertEqual(fallback.url, "https://paxyo.et/")
+        self.assertIsNone(fallback.web_app)
+        paid = rows[2][0]
+        self.assertEqual(paid.callback_data, "checkdep:")
+        self.assertIn("I paid", paid.text)
+
+    def test_keyboard_rows_without_amount(self):
+        markup = bot.deposit_webapp_keyboard("en")
+        webapp = self._webapp_button(markup)
+        self.assertIn("Deposit in Telegram", webapp.text)
+        self.assertNotIn("ETB", webapp.text)
+        self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
+
+    def test_keyboard_amharic(self):
+        markup = bot.deposit_webapp_keyboard("am", amount=100)
+        rows = markup.inline_keyboard
+        self.assertIn("100.00 ETB", rows[0][0].text)
+        self.assertIn("ያድርጉ", rows[0][0].text)
+        self.assertEqual(rows[0][0].web_app.url, bot.DEPOSIT_WEBAPP_URL)
+        self.assertIn("ከፍዬአለሁ", rows[2][0].text)
+        self.assertEqual(rows[2][0].callback_data, "checkdep:")
+
+    async def test_confirm_502_offers_webapp_not_raw_error(self):
+        # Chapa's live refusal, as a 502: the user must never see
+        # the provider's raw message — they get the embedded page.
+        fake = FakePaxyo(
+            deposit_error="You are not allowed for direct charges, "
+                          "please contact us!",
+            deposit_error_status=502,
+        )
+        await self._send(
+            "deposit 10 telebirr 099387383",
+            intent_of("deposit", amount=10, method="telebirr", phone="099387383"),
+            paxyo=fake,
+        )
+        query = await self._confirm(fake)
+        self.assertTrue(query.answered)
+        self.assertEqual(len(query.edited), 1)
+        self.assertIn("couldn't be sent", query.edited[0])
+        self.assertIn("Telegram", query.edited[0])
+        self.assertNotIn("not allowed for direct charges", query.edited[0])
+        webapp = self._webapp_button(query.edited_markups[0])
+        self.assertIsNotNone(webapp)
+        self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
+        self.assertIn("10.00 ETB", webapp.text)
+        self.assertEqual(fake.deposits_created, [])
+
+    async def test_confirm_not_ready_offers_webapp(self):
+        fake = FakePaxyo(deposit_none=True)
+        await self._send(
+            "deposit 10 telebirr 099387383",
+            intent_of("deposit", amount=10, method="telebirr", phone="099387383"),
+            paxyo=fake,
+        )
+        query = await self._confirm(fake)
+        self.assertIn("couldn't be sent", query.edited[0])
+        webapp = self._webapp_button(query.edited_markups[0])
+        self.assertIsNotNone(webapp)
+        self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
+        self.assertEqual(fake.deposits_created, [])
+
+    async def test_confirm_400_still_shows_brief_message(self):
+        # A 4xx is the user's own input problem: the brief message
+        # stays, with no Web App button — only a 5xx (the payment
+        # service failing) routes to the embedded page.
+        fake = FakePaxyo(deposit_error="Amount below minimum (10 ETB).")
+        await self._send(
+            "deposit 10 telebirr 099387383",
+            intent_of("deposit", amount=10, method="telebirr", phone="099387383"),
+            paxyo=fake,
+        )
+        query = await self._confirm(fake)
+        self.assertEqual(query.edited, ["Amount below minimum (10 ETB)."])
+        self.assertIsNone(query.edited_markups[0])
+        self.assertEqual(fake.deposits_created, [])
+
+    async def test_yes_acceptance_502_offers_webapp(self):
+        fake = FakePaxyo(
+            deposit_error="You are not allowed for direct charges, "
+                          "please contact us!",
+            deposit_error_status=502,
+        )
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        intents = [
+            intent_of("deposit", amount=10, method="telebirr", phone="099387383"),
+            intent_of("unclear"),
+        ]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, "deposit 10 telebirr 099387383")
+            await bot.handle_order_text(update, None, "yes")
+        self.assertIn("couldn't be sent", msg.text_sent[1])
+        webapp = self._webapp_button(msg.markups[1])
+        self.assertIsNotNone(webapp)
+        self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
+
+    async def test_success_push_has_no_webapp_button(self):
+        # The fake's success shape returns steps (Dial / Pay to /
+        # checkout link), not a push: either way the instructions
+        # carry no Web App button — it only appears on failure.
+        fake = FakePaxyo()
+        await self._send(
+            "deposit 10 telebirr 099387383",
+            intent_of("deposit", amount=10, method="telebirr", phone="099387383"),
+            paxyo=fake,
+        )
+        query = await self._confirm(fake)
+        self.assertIn("Dial *847#", query.edited[0])
+        self.assertIn("https://checkout.chapa.co/pay/dep-1", query.edited[0])
+        self.assertIsNone(query.edited_markups[0])
+        self.assertEqual(len(fake.deposits_created), 1)
+
+    async def test_insufficient_balance_offers_webapp(self):
+        # Not enough balance for a batch: the refusal carries the
+        # embedded deposit button (generic label — no amount, the
+        # user may want more than the shortfall).
+        paxyo = FakePaxyo(balance=10.0)
+        orders = [
+            {"platform": "instagram", "service_hint": "followers",
+             "link": "@user1", "quantity": 1000},
+            {"platform": "instagram", "service_hint": "followers",
+             "link": "https://instagram.com/p/a", "quantity": 2000},
+            {"platform": "instagram",
+             "service_hint": "cheapest instagram followers",
+             "link": "https://instagram.com/p/b", "quantity": 500},
+        ]
+        msg = await self._send(
+            "Three orders please.",
+            intent_of("batch", orders=orders), paxyo=paxyo,
+        )
+        confirm_id = next(iter(bot.PENDING_BATCH))
+        query = FakeQuery(f"confirm:{confirm_id}", message_text="Please confirm:")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo):
+            await bot.on_callback(update, None)
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertIn("Not enough balance", query.edited[0])
+        webapp = self._webapp_button(query.edited_markups[0])
+        self.assertIsNotNone(webapp)
+        self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
+        self.assertIn("Deposit in Telegram", webapp.text)
+
+    async def test_paid_button_rechecks_website_deposit(self):
+        # The return path: the user paid on the embedded page (a
+        # website deposit, not a chat one), taps "I paid", and the
+        # bot rechecks the newest deposit with Chapa — no new money
+        # path, the same deposit_status_text as "I paid" in text.
+        dep = dict(FakePaxyo.DEPOSIT)
+        dep.update({"id": "dep-9", "amount": 100, "status": "completed"})
+        fake = FakePaxyo(balance=1010.0, deposits=[dep])
+        query = FakeQuery("checkdep:", message_text="deposit page")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update, None)
+        self.assertEqual(
+            query.edited,
+            ["Yes — your 100.00 ETB deposit went through. "
+             "Your balance is now 1,010.00 ETB."],
+        )
+        self.assertEqual(fake.deposit_status_checked, ["dep-9"])
 
 
 class TestDepositStatus(unittest.IsolatedAsyncioTestCase):

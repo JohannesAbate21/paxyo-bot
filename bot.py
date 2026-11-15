@@ -59,7 +59,7 @@ from typing import Optional
 import httpx
 import tornado.web
 from tornado.httpserver import HTTPServer
-from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -449,6 +449,24 @@ never a direct translation feel from English. The voice and the language togethe
 MINIAPP_URL = "https://miniapp-one-1.onrender.com/"
 CHANNEL_URL = "https://t.me/paxyo251"
 
+# Embedded deposit (owner, 15 Nov 2026): the Paxyo deposit page opens
+# INSIDE Telegram as a Web App, so the chat never closes when a user
+# deposits. paxyo.et allows framing (verified live 15 Nov 2026:
+# Content-Security-Policy: frame-ancestors * and X-Frame-Options:
+# ALLOWALL). The deposit page itself sits behind login and has no
+# public deep-link, so the default is the login entry — the same URL
+# the site's own "Start now" button uses (https://paxyo.et/?login).
+# Override with PAXYO_DEPOSIT_URL when the dashboard gains a direct
+# deposit link. Chapa's own checkout-page framing is UNVERIFIED (its
+# per-transaction checkout URL cannot be fetched without a real
+# transaction); if Chapa blocks framing, Telegram opens the checkout
+# in the in-app browser as a layer on top — the user still stays in
+# Telegram and comes back to the chat after paying.
+DEPOSIT_WEBAPP_URL = os.environ.get(
+    "PAXYO_DEPOSIT_URL", "https://paxyo.et/?login"
+)
+PAXYO_SITE_URL = "https://paxyo.et/"
+
 # ------------------------------------------------------------ replies ------
 # Short replies in both languages. Amharic is written in Ethiopic fidels
 # mixed with English, never Latin-letter Amharic.
@@ -788,6 +806,42 @@ TEXT = {
     "deposit_failed": {
         "am": "Deposit መጀመር አልቻልኩም። እባክዎ እንደገና ይሞክሩ ወይም በpaxyo.et deposit ያድርጉ።",
         "en": "I couldn't start the deposit. Please try again or deposit at paxyo.et.",
+    },
+    # Embedded deposit (owner, 15 Nov 2026): the USSD push could not
+    # be sent (Chapa Direct Charge is off for this account), so the
+    # user deposits on the Paxyo page inside Telegram instead. The
+    # button opens the page as a Web App — the chat never closes.
+    # The second button is the plain external link, for clients where
+    # the Web App cannot open; the third rechecks the deposit just
+    # paid (same recheck as "I paid").
+    "deposit_webapp": {
+        "am": (
+            "የክፍያ ጥያቄ መላክ አልተቻለም — depositዎን በTelegram ውስጥ ያድርጉ። "
+            "ከታች ይጫኑ፤ የPaxyo deposit ገጽ chatዎን ሳይዘጋ ይከፈታል። "
+            "ከከፈሉ በኋላ “ከፍዬአለሁ — ይፈትሹ” ይጫኑ።"
+        ),
+        "en": (
+            "The payment prompt couldn't be sent — deposit inside "
+            "Telegram instead. Tap below and the Paxyo deposit page "
+            "opens without closing this chat. When you've paid, tap "
+            "“I paid — check it”."
+        ),
+    },
+    "deposit_webapp_button": {
+        "am": "💳 {amount} ETB deposit ያድርጉ",
+        "en": "💳 Deposit {amount} ETB",
+    },
+    "deposit_webapp_button_plain": {
+        "am": "💳 በTelegram deposit ያድርጉ",
+        "en": "💳 Deposit in Telegram",
+    },
+    "deposit_webapp_fallback": {
+        "am": "🌐 paxyo.et ይክፈቱ",
+        "en": "🌐 Open paxyo.et",
+    },
+    "deposit_paid_button": {
+        "am": "✅ ከፍዬአለሁ — ይፈትሹ",
+        "en": "✅ I paid — check it",
     },
     # Deposit recheck ("did my deposit go through?"): the server
     # re-verifies with Chapa before answering, so the bot only
@@ -8250,7 +8304,8 @@ async def send_order_result(message, lang: str, pending, user_id: int):
                     lang,
                     balance=format_money(error[1]),
                     total=format_money(error[2]),
-                )
+                ),
+                reply_markup=deposit_webapp_keyboard(lang),
             )
         else:
             await message.reply_text(t(key, lang))
@@ -8536,8 +8591,10 @@ async def start_deposit(draft, user_id: int):
     "pay_to","status"} — pushed/auth_type "ussd" means a USSD prompt
     was sent to the user's phone, no link needed),
     error is None on success, "deposit_not_ready" when the endpoint
-    is not live yet (404), a server message string when the API
-    rejected it (e.g. amount below the minimum), or "deposit_failed".
+    is not live yet (404), "deposit_unavailable" when the payment
+    service itself failed (5xx, e.g. Chapa refusing Direct Charge),
+    a server message string when the API rejected it (e.g. amount
+    below the minimum), or "deposit_failed".
     """
     try:
         result = await paxyo.create_deposit(
@@ -8545,6 +8602,12 @@ async def start_deposit(draft, user_id: int):
         )
     except httpx.HTTPStatusError as exc:
         log.warning("create_deposit rejected: %s", exc.response.status_code)
+        if exc.response.status_code >= 500:
+            # The payment service itself failed (Chapa refusing
+            # Direct Charge answers 502): the deposit never started,
+            # so the caller offers the embedded deposit page instead
+            # of showing the provider's raw refusal in the chat.
+            return None, "deposit_unavailable"
         try:
             data = exc.response.json()
         except Exception:
@@ -8598,6 +8661,34 @@ def deposit_instructions_text(result, amount, method, lang: str) -> str:
         method=METHOD_LABELS.get(method, method),
         steps="\n".join(steps),
     )
+
+
+def deposit_webapp_keyboard(lang: str, amount=None) -> InlineKeyboardMarkup:
+    """Embedded deposit (owner, 15 Nov 2026): open the Paxyo deposit
+    page INSIDE Telegram as a Web App, so the chat never closes while
+    the user pays. Row 2 is the plain external link, for clients where
+    the Web App cannot open; row 3 rechecks the deposit just paid —
+    the same deposit_status_text the "I paid" text and the receipt
+    button use (the server re-verifies with Chapa and credits once).
+    With an amount the button names it ("Deposit 100.00 ETB"); without
+    one it is generic (the insufficient-balance nudge, where the user
+    may want to deposit more than the shortfall)."""
+    if amount is not None:
+        label = t("deposit_webapp_button", lang, amount=format_money(amount))
+    else:
+        label = t("deposit_webapp_button_plain", lang)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, web_app=WebAppInfo(url=DEPOSIT_WEBAPP_URL))],
+        [InlineKeyboardButton(t("deposit_webapp_fallback", lang), url=PAXYO_SITE_URL)],
+        [InlineKeyboardButton(t("deposit_paid_button", lang), callback_data="checkdep:")],
+    ])
+
+
+def deposit_webapp_message(amount, lang: str):
+    """(text, keyboard) for the embedded-deposit fallback, shown when
+    the USSD push could not be sent: the user deposits on the Paxyo
+    page inside Telegram instead of leaving for the website."""
+    return t("deposit_webapp", lang), deposit_webapp_keyboard(lang, amount=amount)
 
 
 # Bare "I paid" / "I approved it" (text is already normalised).
@@ -10850,8 +10941,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             PENDING_DEPOSIT.pop(dep_id, None)
             result, error = await start_deposit(dep_draft, user.id)
             if error:
-                if error in ("deposit_not_ready", "deposit_failed"):
-                    await update.message.reply_text(t(error, lang))
+                if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
+                    # The push could not be sent: offer the deposit
+                    # page embedded in Telegram instead of a bare
+                    # paxyo.et text.
+                    text, markup = deposit_webapp_message(dep_draft["amount"], lang)
+                    await update.message.reply_text(text, reply_markup=markup)
                 else:
                     await update.message.reply_text(error)
                 return
@@ -10876,7 +10971,8 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             lang,
                             balance=format_money(error[1]),
                             total=format_money(error[2]),
-                        )
+                        ),
+                        reply_markup=deposit_webapp_keyboard(lang),
                     )
                 else:
                     await update.message.reply_text(t(key, lang))
@@ -12876,7 +12972,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         lang,
                         balance=format_money(error[1]),
                         total=format_money(error[2]),
-                    )
+                    ),
+                    reply_markup=deposit_webapp_keyboard(lang),
                 )
             else:
                 await query.edit_message_text(t(key, lang))
@@ -12957,8 +13054,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # user must read).
         result, error = await start_deposit(dep_draft, user.id)
         if error:
-            if error in ("deposit_not_ready", "deposit_failed"):
-                await query.edit_message_text(t(error, lang))
+            if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
+                # The push could not be sent: offer the deposit page
+                # embedded in Telegram instead of a bare paxyo.et text.
+                text, markup = deposit_webapp_message(dep_draft["amount"], lang)
+                await query.edit_message_text(text, reply_markup=markup)
             else:
                 await query.edit_message_text(error)
             return
@@ -12989,7 +13089,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         lang,
                         balance=format_money(error[1]),
                         total=format_money(error[2]),
-                    )
+                    ),
+                    reply_markup=deposit_webapp_keyboard(lang),
                 )
             else:
                 await query.edit_message_text(t(key, lang))
