@@ -59,7 +59,7 @@ from typing import Optional
 import httpx
 import tornado.web
 from tornado.httpserver import HTTPServer
-from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -290,6 +290,7 @@ Rules:
   - "how_to": asks how to do something needed to order or use a platform — how to get a post or comment link, how to make an account public, how to copy a link, how to find a username. Answer from general knowledge; never deflect.
   - "miniapp": asks for the mini app.
   - "social": asks for Paxyo's social media or channel.
+  - "invite": asks for their invite link or code ("my invite link", "referral code").
   - "greeting": greeting or small talk.
   - "paxyo_info": question about Paxyo itself — what it is, its services, prices, how it works, delivery times, support.
   - "source_question": asks where Paxyo's services come from, who supplies them, whether Paxyo resells, what Paxyo pays, or whether Paxyo is a panel ("who is your provider?", "how much do you buy followers for?").
@@ -466,6 +467,39 @@ DEPOSIT_WEBAPP_URL = os.environ.get(
     "PAXYO_DEPOSIT_URL", "https://paxyo.et/?login"
 )
 PAXYO_SITE_URL = "https://paxyo.et/"
+
+# Invite link (owner, 14 Nov 2026): the first-deposit bonus code is
+# REF3723FB335 (20% on the first deposit). The invite link is a
+# Telegram deep link to this bot carrying that code — no new bonus,
+# no new referral accounting; the code itself is the existing
+# referral mechanic.
+INVITE_CODE = "REF3723FB335"
+INVITE_LINK = f"https://t.me/paxorder_bot?start={INVITE_CODE}"
+
+
+def _admin_ids_from_env():
+    """Telegram user ids allowed to see the daily digest, from the
+    ADMIN_TELEGRAM_IDS env var (comma-separated). Empty by default:
+    nobody sees it until William's id is configured."""
+    raw = os.environ.get("ADMIN_TELEGRAM_IDS", "") or ""
+    ids = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.add(int(part))
+    return ids
+
+
+ADMIN_TELEGRAM_IDS = _admin_ids_from_env()
+
+
+def is_admin_user(user_id: int) -> bool:
+    """True when this Telegram user may see owner-only stats
+    (the daily digest)."""
+    try:
+        return int(user_id) in ADMIN_TELEGRAM_IDS
+    except (TypeError, ValueError):
+        return False
 
 # ------------------------------------------------------------ replies ------
 # Short replies in both languages. Amharic is written in Ethiopic fidels
@@ -1744,6 +1778,129 @@ TEXT = {
         "am": "Ordersዎ:",
         "en": "Your orders:",
     },
+    # Ideas batch (owner, 15 Nov 2026): proactive delivery updates,
+    # cross-sell after delivery, stuck-order watch, invite link,
+    # one-tap reorder, first-order nudge, deposit retry, daily
+    # digest. All deterministic — prices and times come from the
+    # catalogue and the Paxyo API, never from the AI.
+    "order_delivered": {
+        "am": (
+            "✅ Orderዎ ደርሷል — {quantity} {service}, order #{order_id}. "
+            "ከPaxyo ጋር ስለዘዙ እናመሰግናለን! 🎉"
+        ),
+        "en": (
+            "✅ Your order is delivered — {quantity} {service}, "
+            "order #{order_id}. Thank you for ordering with Paxyo! 🎉"
+        ),
+    },
+    "order_delivered_crosssell": {
+        "am": (
+            "በዚሁ post ላይ likes ይፈልጋሉ? {service} ከ{price} ETB/1000 "
+            "ጀምሮ — “likes” ብለው ይላኩልኝ።"
+        ),
+        "en": (
+            "Want likes on the same post too? {service} from "
+            "{price} ETB/1000 — just say \"likes\"."
+        ),
+    },
+    "order_stuck": {
+        "am": (
+            "⏳ Order #{order_id} ({service} ×{quantity}) ከተለመደው "
+            "ጊዜ በላይ እየወሰደ ነው — አብዛኛውን ጊዜ {avg} ይወስዳል፣ "
+            "አሁን {elapsed} ሆኗል። አሁንም እየተሰራበት ነው። ከቀጠለ "
+            "support ያነጋግሩ: t.me/paxyo"
+        ),
+        "en": (
+            "⏳ Your order #{order_id} ({service} ×{quantity}) is "
+            "taking longer than usual — it usually takes about "
+            "{avg}, and it has been {elapsed}. It is still being "
+            "worked on. If it stays stuck, talk to support: "
+            "t.me/paxyo"
+        ),
+    },
+    "invite_link": {
+        "am": (
+            "🎉 ጓደኞችዎን ወደ Paxyo ይጋብዙ! ይህን link ያጋሩ:\n{link}\n"
+            "በመጀመሪያ depositቸው invite code {code} ሲጠቀሙ 20% "
+            "bonus ያገኛሉ።"
+        ),
+        "en": (
+            "🎉 Invite your friends to Paxyo! Share this link:\n"
+            "{link}\nWhen they make their first deposit with "
+            "invite code {code}, they get a 20% bonus."
+        ),
+    },
+    "reorder_not_found": {
+        "am": "ይቅርታ — ያ order ማግኘት አልቻልኩም፣ ምናልባት በጣም የቆየ ነው። service እና link እንደገና ይላኩልኝ።",
+        "en": "Sorry — I couldn't find that order, it may be too old. Tell me the service and link again and I'll build it.",
+    },
+    "order_done_hint": {
+        "am": "ተጠናቋል! ለቀጣዩ እርምጃ ከታች ያሉትን አዝራሮች ይጠቀሙ።",
+        "en": "Done! Use the buttons below for your next step.",
+    },
+    "first_order_offer": {
+        "am": (
+            "🎁 አዲስ ነዎት? በትንሽ test order Paxyo ይሞክሩ — "
+            "{quantity} {service} በ{total} ETB ብቻ። “🎁 Test order "
+            "ጀምር” ይጫኑ፣ linkዎን ይላኩልኝ እና እዘዝዎታለሁ!"
+        ),
+        "en": (
+            "🎁 New here? Try Paxyo with a small test order — "
+            "{quantity} {service} for just {total} ETB. Tap "
+            "“🎁 Start a test order”, send me your link, and I'll "
+            "order it for you!"
+        ),
+    },
+    "first_order_button": {
+        "am": "🎁 Test order ጀምር",
+        "en": "🎁 Start a test order",
+    },
+    "first_order_link": {
+        "am": (
+            "👍 {service} ×{quantity} — {total} ETB። Linkዎን "
+            "ይላኩልኝ እና Confirm card አሳይዎታለሁ።"
+        ),
+        "en": (
+            "👍 {service} ×{quantity} — {total} ETB. Send me your "
+            "link and I'll show you the Confirm card."
+        ),
+    },
+    "first_order_gone": {
+        "am": "ይቅርታ — ያ test service አሁን የለም። “views እፈልጋለሁ” ብለው link ይላኩልኝ።",
+        "en": "Sorry — that test service is no longer available. Send me your link with \"I want views\" and I'll build it.",
+    },
+    "deposit_retry_button": {
+        "am": "🔁 እንደገና ሞክር",
+        "en": "🔁 Try again",
+    },
+    "daily_digest": {
+        "am": (
+            "📊 Paxyo — {date}\n"
+            "Orders: {orders} ({completed} completed)\n"
+            "Revenue: {revenue} ETB\n"
+            "New users: {new_users}"
+            "{top_line}"
+        ),
+        "en": (
+            "📊 Paxyo — {date}\n"
+            "Orders: {orders} ({completed} completed)\n"
+            "Revenue: {revenue} ETB\n"
+            "New users: {new_users}"
+            "{top_line}"
+        ),
+    },
+    "digest_top_line": {
+        "am": "\nTop service: {service} ×{quantity}",
+        "en": "\nTop service: {service} ×{quantity}",
+    },
+    "digest_not_admin": {
+        "am": "ይቅርታ — daily digest ለPaxyo owner ብቻ ነው።",
+        "en": "Sorry — the daily digest is only for the Paxyo owner.",
+    },
+    "digest_not_ready": {
+        "am": "Daily digest ገና አልተገናኘም — server stats የሉም። Owner እንዲያጠናቅቅ ይጠይቁ።",
+        "en": "The daily digest is not connected yet — the server stats are not available. Ask the owner to finish the setup.",
+    },
 }
 
 
@@ -2840,6 +2997,22 @@ class PaxyoClient:
         else:
             orders = data
         return orders if isinstance(orders, list) else []
+
+    async def admin_stats(self):
+        """GET /admin/stats — the daily digest numbers (orders,
+        revenue, new users) for the Paxyo owner. Server endpoint
+        still to build (15 Nov 2026): until it exists the call 404s
+        and this returns None, so /digest answers honestly that the
+        digest is not connected yet. A 404 means "not live yet" —
+        returns None."""
+        try:
+            data = await self._send(build_api_request("GET", "/admin/stats"))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /admin/stats returned 404 (endpoint not live yet)")
+                return None
+            raise
+        return data if isinstance(data, dict) else None
 
     # --------------------------------------------- recurring orders ----
     # Contract (server side, built in parallel): a recurring_orders
@@ -4562,6 +4735,13 @@ def local_intent(text: str) -> dict:
         intent["intent"] = "usual"
     elif "mini app" in s or "miniapp" in s:
         intent["intent"] = "miniapp"
+    elif any(
+        p in s for p in (
+            "invite", "referral", "refer a friend", "refer friends",
+            "invite link", "invite code", "my invite",
+        )
+    ):
+        intent["intent"] = "invite"
     elif "social" in s:
         intent["intent"] = "social"
     elif any(
@@ -4693,7 +4873,7 @@ VALID_INTENTS = frozenset((
     "split_payment", "max_for_balance", "discount", "safety",
     "refund_policy", "geo_target", "free_sample", "price_pushback",
     "content_help", "support_issue", "cancel", "off_topic",
-    "unclear",
+    "unclear", "invite",
 ))
 
 
@@ -4760,7 +4940,7 @@ async def extract_intent(text: str, user_id: int = None,
     source_question, reseller, contact, paused_services, usual, goal, budget, batch,
     change_order, refill, split_payment, max_for_balance, discount,
     safety, refund_policy, geo_target, free_sample, price_pushback,
-    content_help, support_issue, cancel, off_topic, unclear — or
+    content_help, support_issue, cancel, off_topic, unclear, invite — or
     None when the model output had no usable JSON.
     """
     prompt = build_classify_prompt(text, services=services,
@@ -5184,6 +5364,33 @@ PENDING_DEPOSIT = {}
 # endpoint is the fallback, so "did my deposit go through?" still
 # works. Set in start_deposit on success.
 LAST_DEPOSIT = {}
+# Ideas batch (owner, 15 Nov 2026): delivery watch — orders the bot
+# placed and is watching for completion or trouble. order_id ->
+# {"user_id", "service", "quantity", "link", "placed_at" (epoch
+# seconds), "avg_minutes", "warned"}. One delivered message and at
+# most one stuck warning per order; entries are dropped once the
+# order completes, fails, or is cancelled. In-memory only: a bot
+# restart loses the watch (the user can still ask "where is my
+# order" — last_order_status_text reads the server).
+WATCHED_ORDERS = {}
+# First-order nudge (owner, 15 Nov 2026): users already offered the
+# cheapest test order, so it is offered once and never repeated —
+# including after a decline. In-memory only, like the other
+# one-shot flags; a restart may re-offer it once.
+FIRST_ORDER_NUDGE_DONE = set()
+# The test order the nudge started: telegram_id -> service id of
+# the cheapest views service, so the Confirm card pins that service
+# instead of the fastest pick. One-shot: consumed by the next
+# complete_order call, and only when that order is for the same
+# platform and metric — an abandoned nudge never hijacks a
+# different order.
+NUDGE_SERVICE = {}
+# A deposit that failed after Confirm: telegram_id -> the confirmed
+# draft {"amount", "method", "phone"}, so the one-tap "Try again"
+# button can restart the same deposit without asking for the
+# details again. Cleared when a new deposit Confirm card is built
+# or the retry succeeds.
+FAILED_DEPOSIT = {}
 # A payment receipt the user sent as a photo and was offered a
 # recheck for: telegram_id -> {"amount", "tx_ref"}. A bare "yes" (or
 # the "Yes, check it" button) rechecks the most recent deposit;
@@ -6924,9 +7131,20 @@ def cheapest_service(services, platform=None, service_hint=None):
 
     Used when the user haggles, wants a free sample, or asks what
     their money buys: the answer is always a real service at its
-    real Paxyo price — never a negotiated number."""
+    real Paxyo price — never a negotiated number. The cheapest
+    ranking is forced here (15 Nov 2026): pick_services ranks
+    fastest-first by default and only returns `limit` services, so
+    taking the min over its top-100 fastest picks missed a cheap
+    service ranked 101st by speed — the live quote of 1.51 ETB/1000
+    for TikTok views came from that truncated pool, while the
+    snapshot's true cheapest is #5535 at 1.26 ETB/1000. With
+    "cheapest" in the hint the pool is ranked by price first, so
+    the min over it IS the global cheapest."""
+    hint = (service_hint or "").strip()
+    if "cheapest" not in hint.lower().split():
+        hint = ("cheapest " + hint).strip()
     picks = pick_services(services, platform=platform,
-                          service_hint=service_hint, limit=100)
+                          service_hint=hint, limit=100)
     if not picks:
         return None
     return min(picks, key=lambda s: float(s.get("rate_etb_per_1000", 0) or 0))
@@ -7566,6 +7784,232 @@ def start_order_keyboard(lang: str) -> InlineKeyboardMarkup:
     )
 
 
+# Ideas batch (owner, 15 Nov 2026): persistent quick-reply buttons.
+# A Telegram reply keyboard (not inline): once shown it stays under
+# the chat until replaced, so the user always has one-tap Order /
+# Balance / My orders / Deposit / Support. Shown after greetings and
+# after completed flows. The labels are English + emoji in every
+# language — reply keyboards are never translated (same rule as
+# Confirm cards), and the tap handler matches the label with or
+# without the emoji.
+QUICK_REPLY_LABELS = (
+    "🛒 Order", "💰 Balance", "📦 My orders", "💳 Deposit", "🆘 Support",
+)
+
+
+def quick_reply_keyboard() -> ReplyKeyboardMarkup:
+    """The persistent quick-reply keyboard, two buttons a row."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("🛒 Order"), KeyboardButton("💰 Balance")],
+            [KeyboardButton("📦 My orders"), KeyboardButton("💳 Deposit")],
+            [KeyboardButton("🆘 Support")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def quick_reply_action(text: str):
+    """The quick-reply action for a message ("order", "balance",
+    "orders", "deposit", "support"), or None. Matches the button
+    label with or without its emoji, case-insensitive — a typed
+    "Balance" does the same thing as tapping 💰 Balance."""
+    s = " ".join((text or "").strip().lower().split())
+    for label in QUICK_REPLY_LABELS:
+        plain = label.split(" ", 1)[-1].strip().lower()
+        if s == label.lower() or s == plain:
+            return {
+                "order": "order", "balance": "balance",
+                "my orders": "orders", "deposit": "deposit",
+                "support": "support",
+            }[plain]
+    return None
+
+
+def reorder_keyboard(orders) -> InlineKeyboardMarkup:
+    """One "🔁 Order again" button per order (at most 5, newest
+    first): the same service, quantity and link as a new draft,
+    shown as a Confirm card. Callback data "reorder:<order_id>"."""
+    buttons = []
+    for o in list(orders or [])[:5]:
+        order_id = o.get("id") or o.get("order_id")
+        if order_id is None:
+            continue
+        name = short_service_name(o.get("service_name") or "") or f"service {o.get('service_id')}"
+        label = f"🔁 #{order_id} {name} ×{int(o.get('quantity') or 0)}"
+        buttons.append([
+            InlineKeyboardButton(label, callback_data=f"reorder:{order_id}")
+        ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_digest_text(stats, lang: str) -> str:
+    """The daily digest for William (owner, 15 Nov 2026): one short
+    text with yesterday's/today's orders, revenue and new users.
+    Pure formatting — the numbers come from the server's
+    /admin/stats; nothing here invents a figure. `stats` is the
+    server record: {"date", "orders", "completed", "revenue_etb",
+    "new_users", "top_service", "top_quantity"}. Missing keys read
+    as zero / empty, never as an invented number."""
+    stats = stats or {}
+    top_service = stats.get("top_service")
+    top_line = ""
+    if top_service:
+        top_line = t(
+            "digest_top_line", lang, service=top_service,
+            quantity=int(stats.get("top_quantity") or 0),
+        )
+    return t(
+        "daily_digest", lang,
+        date=str(stats.get("date") or "today"),
+        orders=int(stats.get("orders") or 0),
+        completed=int(stats.get("completed") or 0),
+        revenue=format_money(stats.get("revenue_etb") or 0),
+        new_users=int(stats.get("new_users") or 0),
+        top_line=top_line,
+    )
+
+
+def is_order_stuck(placed_at: float, avg_minutes, now: float) -> bool:
+    """True when an in-flight order has run far past its claimed
+    average time: at least 3× the average AND at least 15 minutes
+    overdue. No average time means never stuck — the bot never
+    invents a time. Pure predicate, so the rule is testable
+    without the scheduler."""
+    if avg_minutes is None:
+        return False
+    try:
+        avg = float(avg_minutes)
+    except (TypeError, ValueError):
+        return False
+    if avg <= 0:
+        return False
+    elapsed_min = (now - placed_at) / 60.0
+    return elapsed_min >= 3 * avg and elapsed_min - avg >= 15
+
+
+def watch_order(user_id: int, order_id, service, quantity, link):
+    """Start watching a placed order for its delivery update and
+    stuck warning (ideas batch, 15 Nov 2026). Only orders placed
+    through the bot are watched — one delivered message and at most
+    one stuck warning per order. `service` is the catalogue dict
+    (its average_time is the claimed time); a missing order id is
+    never watched."""
+    if order_id is None or str(order_id) in ("", "?"):
+        return
+    avg = None
+    if isinstance(service, dict):
+        avg = parse_average_time(service.get("average_time"))
+    import time
+
+    WATCHED_ORDERS[str(order_id)] = {
+        "user_id": user_id,
+        "service": service if isinstance(service, dict) else {},
+        "quantity": quantity,
+        "link": link,
+        "placed_at": time.time(),
+        "avg_minutes": avg,
+        "warned": False,
+    }
+
+
+def _crosssell_line(services, service):
+    """One cross-sell line for a delivered VIEWS order, or "".
+
+    Only when a likes service exists for the same platform — the
+    cheapest-fastest likes pick, priced from the catalogue. A
+    non-views order, or a platform with no likes service, gets no
+    line at all."""
+    name = str((service or {}).get("name") or "")
+    if "views" not in _name_kinds(name):
+        return ""
+    platform, _hint = _platform_hint_of_service(service or {})
+    if not platform:
+        return ""
+    picks = pick_services(
+        services, platform=platform,
+        service_hint=f"{platform} likes", limit=1,
+    )
+    if not picks:
+        return ""
+    like = picks[0]
+    return "\n" + t(
+        "order_delivered_crosssell", "en",
+        service=short_service_name(like.get("name")),
+        price=format_money(like.get("rate_etb_per_1000", 0)),
+    )
+
+
+async def run_delivery_watch_cycle(app, now=None):
+    """One pass over the watched orders (ideas batch, 15 Nov 2026):
+    a completed order gets its delivery message once (plus the
+    cross-sell line for a views order); an order far past its
+    claimed average time gets one honest stuck warning with the
+    support link; a failed/cancelled/refunded order is dropped
+    silently. Never raises — one bad order must not stop the rest.
+    Called from the 60-second scheduler loop."""
+    import time
+
+    if now is None:
+        now = time.time()
+    if not WATCHED_ORDERS:
+        return
+    services = None
+    for order_id, watched in list(WATCHED_ORDERS.items()):
+        user_id = watched.get("user_id")
+        try:
+            data = await paxyo.order_status(order_id, user_id)
+        except Exception as exc:
+            log.warning("delivery watch %s failed: %s", order_id, exc)
+            continue
+        status = str(
+            (data or {}).get("status")
+            or (data or {}).get("order", {}).get("status", "")
+        ).strip().lower()
+        if status in ("completed", "success", "paid"):
+            service = watched.get("service") or {}
+            text = t(
+                "order_delivered", "en",
+                quantity=int(watched.get("quantity") or 0),
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                order_id=order_id,
+            )
+            if services is None:
+                try:
+                    services = await paxyo.services()
+                except Exception as exc:
+                    log.warning("delivery watch services failed: %s", exc)
+                    services = []
+            text += _crosssell_line(services or [], service)
+            await notify_user(app, user_id, text)
+            WATCHED_ORDERS.pop(order_id, None)
+        elif status in ("pending", "in_progress", "processing"):
+            if not watched.get("warned") and is_order_stuck(
+                watched.get("placed_at") or now,
+                watched.get("avg_minutes"), now,
+            ):
+                service = watched.get("service") or {}
+                avg = service.get("average_time") or "?"
+                elapsed_min = max(0, int((now - watched.get("placed_at", now)) / 60))
+                await notify_user(
+                    app, user_id,
+                    t(
+                        "order_stuck", "en",
+                        order_id=order_id,
+                        service=short_service_name(service.get("name"))
+                        or f"service {service.get('service')}",
+                        quantity=int(watched.get("quantity") or 0),
+                        avg=avg,
+                        elapsed=f"{elapsed_min} minutes",
+                    ),
+                )
+                watched["warned"] = True
+        elif status in ("cancelled", "canceled", "failed", "refunded"):
+            WATCHED_ORDERS.pop(order_id, None)
+        # Any other status: keep watching; the next cycle retries.
+
+
 # ------------------------------------------------- conversation (round 8) ---
 
 # Round 8, 14 Nov 2026 — the bot talks like a normal AI mid-order.
@@ -8004,6 +8448,57 @@ async def conversation_reply(update, text: str, lang: str, voice: bool = False) 
 
 # ------------------------------------------------------------- handlers ---
 
+async def maybe_first_order_nudge(user_id: int, lang: str):
+    """The first-order nudge (ideas batch, 15 Nov 2026): for a
+    brand-new user (no orders yet) offer the cheapest test order —
+    1000 of the cheapest views service, one tap to start. Returns
+    (text, keyboard) or None. Offered ONCE per user (also after a
+    decline): FIRST_ORDER_NUDGE_DONE is marked as soon as the offer
+    is shown. The cheapest service is pinned only when the user
+    taps the button (see the "firstorder" callback) — merely
+    seeing the offer never changes a later order's service."""
+    if user_id in FIRST_ORDER_NUDGE_DONE:
+        return None
+    try:
+        orders = await paxyo.recent_orders(user_id)
+    except Exception as exc:
+        log.warning("nudge orders check failed: %s", exc)
+        return None
+    if orders:
+        FIRST_ORDER_NUDGE_DONE.add(user_id)
+        return None
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("nudge services failed: %s", exc)
+        return None
+    service = cheapest_service(
+        services or [], platform="tiktok", service_hint="tiktok views"
+    )
+    if service is None:
+        return None
+    FIRST_ORDER_NUDGE_DONE.add(user_id)
+    quantity = 1000
+    total = estimated_total_etb(
+        float(service.get("rate_etb_per_1000", 0)), quantity
+    )
+    text = t(
+        "first_order_offer", lang,
+        quantity=quantity,
+        service=short_service_name(service.get("name")),
+        total=format_money(total),
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            t("first_order_button", lang),
+            # The service id rides in the button, so the tap knows
+            # which service to pin — the offer itself pins nothing.
+            callback_data=f"firstorder:{int(service.get('service'))}",
+        )
+    ]])
+    return text, keyboard
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # A redelivered /start (same update id, seen 14 Nov 2026: the
     # greeting went out twice at 07:26) must not greet twice.
@@ -8017,8 +8512,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as exc:  # account creation must never block /start
         log.warning("create_user failed (continuing): %s", exc)
-    await update.message.reply_text(t("greeting", lang))
+    # Ideas batch (15 Nov 2026): the quick-reply keyboard stays
+    # under the chat from here on; a brand-new user also gets the
+    # one-time cheapest-test offer as a second message.
+    await update.message.reply_text(
+        t("greeting", lang), reply_markup=quick_reply_keyboard()
+    )
     record_exchange(user.id, update.message.text or "/start", t("greeting", lang))
+    nudge = await maybe_first_order_nudge(user.id, lang)
+    if nudge is not None:
+        text, keyboard = nudge
+        await update.message.reply_text(text, reply_markup=keyboard)
 
 
 async def balance_text(user_id: int, lang: str) -> str:
@@ -8086,12 +8590,46 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ALL of the user's orders as a table (owner, 13 Nov 2026)."""
+    """ALL of the user's orders as a table (owner, 13 Nov 2026).
+    Ideas batch (15 Nov 2026): one "🔁 Order again" button per
+    recent order under the table."""
     user = update.effective_user
     lang = lang_of("", user.language_code)
     text = await orders_history_text(user.id, lang)
-    await update.message.reply_text(text)
+    markup = None
+    try:
+        orders = await paxyo.recent_orders(user.id)
+        if orders:
+            markup = reorder_keyboard(orders)
+    except Exception as exc:
+        log.warning("orders_cmd reorder keyboard failed: %s", exc)
+    await update.message.reply_text(text, reply_markup=markup)
     record_exchange(user.id, update.message.text or "/orders", text)
+
+
+async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The daily digest (ideas batch, 15 Nov 2026): one short text
+    with orders, revenue and new users — for William only. The
+    numbers come from the server's /admin/stats (admin_stats); until
+    that endpoint exists the bot answers honestly that the digest
+    is not connected yet. No scheduler is wired: /digest is
+    on-demand, and nothing is sent anywhere by this command."""
+    user = update.effective_user
+    lang = lang_of("", user.language_code)
+    if not is_admin_user(user.id):
+        await update.message.reply_text(t("digest_not_admin", lang))
+        return
+    try:
+        stats = await paxyo.admin_stats()
+    except Exception as exc:
+        log.warning("admin_stats failed: %s", exc)
+        stats = None
+    if stats is None:
+        await update.message.reply_text(t("digest_not_ready", lang))
+        return
+    text = build_digest_text(stats, lang)
+    await update.message.reply_text(text)
+    record_exchange(user.id, update.message.text or "/digest", text)
 
 
 async def schedules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8276,6 +8814,9 @@ async def place_pending_order(pending, user_id: int):
     order_id = order.get("id") or order.get("order_id") or "?"
     status = order.get("status", "pending")
     LAST_ORDER[user_id] = order_id
+    # Ideas batch (15 Nov 2026): watch this order for its delivery
+    # message and stuck warning — one of each, from the scheduler.
+    watch_order(user_id, order_id, service, quantity, pending["link"])
     return {
         "order_id": order_id,
         "status": status,
@@ -8320,7 +8861,26 @@ async def send_order_result(message, lang: str, pending, user_id: int):
         order_id=result["order_id"],
         status=result["status"],
     )
-    await message.reply_text(summary + "\n" + humor_line(user_id, lang))
+    # Ideas batch (15 Nov 2026): one-tap reorder under the summary,
+    # and the quick-reply keyboard stays under the chat after a
+    # completed flow. (The Confirm-tap path shows the same summary
+    # by editing the card in place — inline buttons cannot ride on
+    # it, and the reply keyboard is already under the chat.)
+    markup = None
+    if result.get("order_id") not in (None, "?"):
+        markup = reorder_keyboard([{
+            "id": result["order_id"],
+            "service_name": result["service"],
+            "quantity": result["quantity"],
+        }])
+    await message.reply_text(
+        summary + "\n" + humor_line(user_id, lang),
+        reply_markup=markup,
+    )
+    await message.reply_text(
+        t("order_done_hint", lang),
+        reply_markup=quick_reply_keyboard(),
+    )
     _record_bot_reply(summary)
 
 
@@ -8663,7 +9223,8 @@ def deposit_instructions_text(result, amount, method, lang: str) -> str:
     )
 
 
-def deposit_webapp_keyboard(lang: str, amount=None) -> InlineKeyboardMarkup:
+def deposit_webapp_keyboard(lang: str, amount=None, allow_retry: bool = False,
+                            user_id: int = None) -> InlineKeyboardMarkup:
     """Embedded deposit (owner, 15 Nov 2026): open the Paxyo deposit
     page INSIDE Telegram as a Web App, so the chat never closes while
     the user pays. Row 2 is the plain external link, for clients where
@@ -8672,23 +9233,41 @@ def deposit_webapp_keyboard(lang: str, amount=None) -> InlineKeyboardMarkup:
     button use (the server re-verifies with Chapa and credits once).
     With an amount the button names it ("Deposit 100.00 ETB"); without
     one it is generic (the insufficient-balance nudge, where the user
-    may want to deposit more than the shortfall)."""
+    may want to deposit more than the shortfall). Ideas batch (15 Nov
+    2026): when a deposit just failed and `allow_retry` is set, a
+    fourth row offers "🔁 Try again" — it restarts the same deposit
+    (amount/method/phone kept) instead of making the user retype
+    everything."""
     if amount is not None:
         label = t("deposit_webapp_button", lang, amount=format_money(amount))
     else:
         label = t("deposit_webapp_button_plain", lang)
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton(label, web_app=WebAppInfo(url=DEPOSIT_WEBAPP_URL))],
         [InlineKeyboardButton(t("deposit_webapp_fallback", lang), url=PAXYO_SITE_URL)],
         [InlineKeyboardButton(t("deposit_paid_button", lang), callback_data="checkdep:")],
-    ])
+    ]
+    if allow_retry and user_id is not None and user_id in FAILED_DEPOSIT:
+        rows.append([
+            InlineKeyboardButton(
+                t("deposit_retry_button", lang), callback_data="retrydep"
+            )
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
-def deposit_webapp_message(amount, lang: str):
+def deposit_webapp_message(amount, lang: str, allow_retry: bool = False,
+                           user_id: int = None):
     """(text, keyboard) for the embedded-deposit fallback, shown when
     the USSD push could not be sent: the user deposits on the Paxyo
-    page inside Telegram instead of leaving for the website."""
-    return t("deposit_webapp", lang), deposit_webapp_keyboard(lang, amount=amount)
+    page inside Telegram instead of leaving for the website. The
+    keyboard may gain the "Try again" row (ideas batch, 15 Nov 2026)."""
+    return (
+        t("deposit_webapp", lang),
+        deposit_webapp_keyboard(
+            lang, amount=amount, allow_retry=allow_retry, user_id=user_id,
+        ),
+    )
 
 
 # Bare "I paid" / "I approved it" (text is already normalised).
@@ -9442,6 +10021,32 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 reply_markup=fastest_fallback_keyboard(token, lang),
             )
             return False
+    # First-order nudge pin (ideas batch, 15 Nov 2026): the user
+    # tapped "Start a test order", so THIS order pins the cheapest
+    # views service instead of the fastest pick. One-shot, and only
+    # when this order is for the same platform and metric as the
+    # nudge, the service is still active and not blacklisted, and
+    # the user did not name a service by ID — an abandoned nudge
+    # never hijacks a different order. Consumed here either way.
+    pinned = NUDGE_SERVICE.pop(user_id, None)
+    if pinned is not None and service is None and named_service_id is None:
+        pin = find_service_by_id(services, pinned)
+        if pin is not None and pin.get("active", True):
+            try:
+                usable = int(pin.get("service", 0)) not in BLACKLISTED_SERVICES
+            except (TypeError, ValueError):
+                usable = False
+            if usable:
+                pin_platform, _ = _platform_hint_of_service(pin)
+                pin_metric = _primary_metric(
+                    " ".join(_name_kinds(pin.get("name")))
+                )
+                if (
+                    pin_platform == merged.get("platform")
+                    and pin_metric is not None
+                    and pin_metric in _name_kinds(merged.get("service_hint") or "")
+                ):
+                    service = pin
     if (
         service is None
         and last_service_id is not None
@@ -10677,6 +11282,51 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # the API, so a restart or redeploy does not wipe the chat.
     await restore_session(user.id)
 
+    # Persistent quick-reply buttons (ideas batch, 15 Nov 2026):
+    # a tap is a deterministic shortcut, handled before the
+    # classifier — never fed to the AI. A typed label does the
+    # same thing. "Order" starts a fresh order; the rest reuse
+    # the existing intent handlers' replies.
+    quick = quick_reply_action(text)
+    if quick is not None:
+        if quick == "order":
+            PARTIAL.pop(user.id, None)
+            RECURRING_DRAFT.pop(user.id, None)
+            DELAYED_DRAFT.pop(user.id, None)
+            await reply_message(
+                update.message, t("ask_platform", lang), lang, voice=voice,
+            )
+            return
+        if quick == "balance":
+            await reply_message(
+                update.message, await balance_text(user.id, lang),
+                lang, voice=voice,
+            )
+            return
+        if quick == "orders":
+            markup = None
+            try:
+                orders = await paxyo.recent_orders(user.id)
+                if orders:
+                    markup = reorder_keyboard(orders)
+            except Exception as exc:
+                log.warning("quick orders keyboard failed: %s", exc)
+            await reply_message(
+                update.message, await orders_history_text(user.id, lang),
+                lang, voice=voice, reply_markup=markup,
+            )
+            return
+        if quick == "deposit":
+            await handle_deposit_text(update, text, {}, lang, voice=voice)
+            return
+        if quick == "support":
+            await reply_message(
+                update.message,
+                with_pending_note(user.id, lang, t("contact_owner", lang)),
+                lang, voice=voice,
+            )
+            return
+
     # Arabic-script text (owner, 14 Nov 2026): the bot has no
     # Arabic templates and must never mirror Arabic back. It can
     # only arrive from a mis-transcribed voice note (Whisper
@@ -10944,8 +11594,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
                     # The push could not be sent: offer the deposit
                     # page embedded in Telegram instead of a bare
-                    # paxyo.et text.
-                    text, markup = deposit_webapp_message(dep_draft["amount"], lang)
+                    # paxyo.et text. Keep the failed draft so the
+                    # "Try again" button can restart it (ideas
+                    # batch, 15 Nov 2026).
+                    FAILED_DEPOSIT[user.id] = dict(dep_draft)
+                    text, markup = deposit_webapp_message(
+                        dep_draft["amount"], lang,
+                        allow_retry=True, user_id=user.id,
+                    )
                     await update.message.reply_text(text, reply_markup=markup)
                 else:
                     await update.message.reply_text(error)
@@ -11555,8 +12211,21 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if intent_type == "social":
         await reply_message(update.message, t("social", lang), lang, voice=voice)
         return
+    if intent_type == "invite":
+        # Invite link (ideas batch, 15 Nov 2026): the user's own
+        # link + the existing REF3723FB335 first-deposit bonus.
+        # Deterministic text — the AI never invents a code.
+        await reply_message(
+            update.message,
+            t("invite_link", lang, link=INVITE_LINK, code=INVITE_CODE),
+            lang, voice=voice,
+        )
+        return
     if intent_type == "greeting":
-        await reply_message(update.message, t("greeting", lang), lang, voice=voice)
+        await reply_message(
+            update.message, t("greeting", lang), lang, voice=voice,
+            reply_markup=quick_reply_keyboard(),
+        )
         return
     if intent_type == "source_question":
         await reply_message(update.message, t("source_question", lang), lang, voice=voice)
@@ -12880,6 +13549,136 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              ask_metric=False)
         return
 
+    if action == "retrydep":
+        # One-tap deposit retry (ideas batch, 15 Nov 2026): restart
+        # the same deposit draft (amount/method/phone kept) after a
+        # failed push. The draft is consumed here — a retry that
+        # fails again re-saves it through start_deposit's failure
+        # path, so the button stays usable.
+        draft = FAILED_DEPOSIT.pop(user.id, None)
+        if draft is None:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        result, error = await start_deposit(draft, user.id)
+        if error:
+            if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
+                FAILED_DEPOSIT[user.id] = dict(draft)
+                text, markup = deposit_webapp_message(
+                    draft["amount"], lang,
+                    allow_retry=True, user_id=user.id,
+                )
+                await query.edit_message_text(text, reply_markup=markup)
+            else:
+                await query.edit_message_text(error)
+            return
+        await query.edit_message_text(
+            deposit_instructions_text(
+                result, draft["amount"], draft["method"], lang
+            )
+        )
+        return
+
+    if action == "reorder":
+        # One-tap reorder (ideas batch, 15 Nov 2026): rebuild the
+        # same service/quantity/link as a new draft and show the
+        # Confirm card. The order comes from the server's list, so
+        # a reorder after a restart still works.
+        try:
+            orders = await paxyo.recent_orders(user.id)
+        except Exception as exc:
+            log.warning("reorder list failed: %s", exc)
+            await query.edit_message_text(t("not_understood", lang))
+            return
+        order = next(
+            (o for o in orders if str(o.get("id") or o.get("order_id")) == arg),
+            None,
+        )
+        if order is None:
+            await query.edit_message_text(t("reorder_not_found", lang))
+            return
+        try:
+            services = await paxyo.services()
+        except Exception:
+            services = []
+        service = None
+        for s in services or []:
+            try:
+                if int(s.get("service")) == int(order.get("service_id") or 0):
+                    service = s
+                    break
+            except (TypeError, ValueError):
+                continue
+        platform = None
+        hint = None
+        if service is not None:
+            platform, _hint = _platform_hint_of_service(service)
+            metric = _primary_metric(" ".join(_name_kinds(service.get("name"))))
+            if metric:
+                hint = f"{platform} {metric}" if platform else metric
+        merged = {
+            "platform": platform,
+            "service_hint": hint,
+            "link": order.get("link"),
+            "quantity": order.get("quantity"),
+        }
+        named = None
+        try:
+            named = int(order.get("service_id") or 0) or None
+        except (TypeError, ValueError):
+            named = None
+        await complete_order(
+            query.message, user.id, merged, lang,
+            named_service_id=named, ask_metric=False,
+        )
+        return
+
+    if action == "firstorder":
+        # First-order nudge (ideas batch, 15 Nov 2026): the user
+        # tapped "Start a test order" on the cheapest-test offer.
+        # The service id rides in the button ("firstorder:5535"),
+        # so merely seeing the offer never pins anything — the
+        # cheapest views service is pinned for this one order only
+        # once the user taps (NUDGE_SERVICE, consumed by
+        # complete_order); the user sends the link next and the
+        # Confirm card shows it.
+        try:
+            service_id = int(arg or 0) or None
+        except (TypeError, ValueError):
+            service_id = None
+        if service_id is None:
+            await query.edit_message_text(t("first_order_gone", lang))
+            return
+        try:
+            services = await paxyo.services()
+        except Exception:
+            services = []
+        service = find_service_by_id(services or [], service_id)
+        if service is None:
+            await query.edit_message_text(t("first_order_gone", lang))
+            return
+        platform, _hint = _platform_hint_of_service(service)
+        metric = _primary_metric(" ".join(_name_kinds(service.get("name"))))
+        quantity = 1000
+        PARTIAL[user.id] = {
+            "platform": platform,
+            "service_hint": f"{platform} {metric}" if platform and metric else metric,
+            "link": None,
+            "quantity": quantity,
+        }
+        # Pin the cheapest service for the order this nudge builds.
+        NUDGE_SERVICE[user.id] = int(service.get("service"))
+        total = estimated_total_etb(
+            float(service.get("rate_etb_per_1000", 0)), quantity
+        )
+        await query.edit_message_text(
+            t(
+                "first_order_link", lang,
+                service=short_service_name(service.get("name")),
+                quantity=quantity, total=format_money(total),
+            )
+        )
+        return
+
     if action == "stoprec":
         # Stop one repeating order from a button.
         try:
@@ -13057,7 +13856,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
                 # The push could not be sent: offer the deposit page
                 # embedded in Telegram instead of a bare paxyo.et text.
-                text, markup = deposit_webapp_message(dep_draft["amount"], lang)
+                # Keep the failed draft so the "Try again" button can
+                # restart it (ideas batch, 15 Nov 2026).
+                FAILED_DEPOSIT[user.id] = dict(dep_draft)
+                text, markup = deposit_webapp_message(
+                    dep_draft["amount"], lang,
+                    allow_retry=True, user_id=user.id,
+                )
                 await query.edit_message_text(text, reply_markup=markup)
             else:
                 await query.edit_message_text(error)
@@ -13190,6 +13995,8 @@ async def run_one_schedule(app, sched, services_by_id):
         # means a retry next cycle returns the same order, not a
         # second charge. Log and move on.
         log.warning("recurring %s: mark_ran failed: %s", schedule_id, exc)
+    # Ideas batch (15 Nov 2026): watch for delivery/stuck updates.
+    watch_order(user_id, order_id, service, quantity, sched.get("link"))
     await notify_user(
         app, user_id,
         t(
@@ -13315,6 +14122,8 @@ async def run_one_delayed(app, item, services_by_id):
     order_id = order.get("id") or order.get("order_id") or "?"
     status = order.get("status", "pending")
     await delayed_store_finish(item, "placed", order_id=order_id)
+    # Ideas batch (15 Nov 2026): watch for delivery/stuck updates.
+    watch_order(user_id, order_id, service, quantity, item.get("link"))
     await notify_user(
         app, user_id,
         t(
@@ -13380,6 +14189,10 @@ async def run_scheduler_cycle(app):
                 continue
             await run_one_schedule(app, sched, by_id)
     await run_delayed_cycle(app)
+    # Ideas batch (15 Nov 2026): delivery updates + stuck warnings
+    # for orders the bot placed. Same 60-second cadence as the
+    # schedules above, same tolerance for the free tier sleeping.
+    await run_delivery_watch_cycle(app)
 
 
 async def scheduler_loop(app):
@@ -13434,6 +14247,9 @@ def build_application():
     app.add_handler(CommandHandler("orders", orders_cmd))
     app.add_handler(CommandHandler("schedules", schedules_cmd))
     app.add_handler(CommandHandler("delayed", delayed_cmd))
+    # Ideas batch (15 Nov 2026): /digest is on-demand only — no
+    # scheduler is wired, nothing is sent anywhere by this command.
+    app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
