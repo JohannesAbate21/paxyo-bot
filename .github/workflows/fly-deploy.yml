@@ -1,10 +1,8 @@
-# Step 1: create the Fly.io app in the johannes-abate organisation.
-# The Fly dashboard would only offer the "Personal" organisation, so
-# the app is created here instead, with the FLY_API_TOKEN org token
-# (repo secret, already saved). No code is deployed by this workflow.
-# Once the app exists, the bot's secrets are set in the Fly dashboard
-# (copied from the Render service env vars), and a later push of the
-# deploy workflow runs the real deploy.
+# Diagnostic: list the Fly.io organisations and apps the saved
+# FLY_API_TOKEN can actually see. The create step failed with
+# "organization johannes-abate not found", so the real org slug
+# must be read from flyctl itself before creating the app.
+# No app is created and nothing is deployed by this workflow.
 name: Create Fly.io app
 
 on:
@@ -20,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl apps create paxorder-bot --org johannes-abate || echo "app may already exist"
+      - run: flyctl orgs list
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - run: flyctl apps list
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
