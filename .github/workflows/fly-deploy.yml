@@ -1,8 +1,9 @@
-# Diagnostic: list the Fly.io organisations and apps the saved
-# FLY_API_TOKEN can actually see. The create step failed with
-# "organization johannes-abate not found", so the real org slug
-# must be read from flyctl itself before creating the app.
-# No app is created and nothing is deployed by this workflow.
+# Step 1: create the Fly.io app in the personal organisation.
+# Diagnostic run #2 proved the token sees exactly one org:
+# name "Johannes Abate", slug "personal" — NOT "johannes-abate".
+# No code is deployed by this workflow. Once the app exists, the
+# bot's secrets are set in the Fly dashboard (copied from Render),
+# and a later push of the deploy workflow runs the real deploy.
 name: Create Fly.io app
 
 on:
@@ -18,9 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl orgs list
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - run: flyctl apps list
+      - run: flyctl apps create paxorder-bot --org personal
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
