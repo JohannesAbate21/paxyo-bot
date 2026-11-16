@@ -499,6 +499,17 @@ function bot_dep_status($deposit_id) {
             return;
         }
     }
+    // Referral-bonus notice data (16 Nov 2026): the bot messages
+    // both sides when a first-deposit bonus lands. Attached on every
+    // read of the deposit, paid/notified flags gated on THIS deposit
+    // id (see ref_bonus_for_deposit in api-referrals.php) — the bot
+    // notifies a side only when paid and not yet notified, then acks
+    // it (POST /referrals/notify-ack). Guarded: this file works
+    // standalone without the referrals file.
+    if (function_exists('ref_bonus_for_deposit')) {
+        $rb = ref_bonus_for_deposit($db, $telegram_id, $deposit_id);
+        if ($rb !== null) $record['referral_bonus'] = $rb;
+    }
     bot_ok(['deposit' => $record]);
 }
 
