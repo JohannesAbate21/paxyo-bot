@@ -497,13 +497,18 @@ class TestPrompt(unittest.TestCase):
 
 class FakeMessageBot:
     """Stand-in for telegram.Bot as seen from a message, recording
-    deleted messages."""
+    deleted messages. Referral notices (16 Nov 2026) also send
+    through it: sent records (chat_id, text)."""
 
     def __init__(self):
         self.deleted = []
+        self.sent = []
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
+
+    async def send_message(self, chat_id, text, reply_markup=None):
+        self.sent.append((chat_id, text))
 
 
 class FakeSentMessage:
@@ -722,6 +727,7 @@ class FakePaxyo:
                  my_referral=None, referral_error=None,
                  referral_error_status=400, referral_none=False,
                  referral_rows=None, balances=None,
+                 ack_raise=False, ack_none=False,
                  cancel_refund_result=None, cancel_refund_error=None,
                  cancel_refund_results=None,
                  fail_refund_result=None, fail_refund_error=None,
@@ -764,6 +770,13 @@ class FakePaxyo:
         self._referrer_bonus_paid = set()
         self._invitee_bonus_paid = set()
         self.referrals_recorded = []
+        # Referral-bonus notify acks (16 Nov 2026): every
+        # ack_referral_bonus call is recorded; ack_raise makes it
+        # raise (server error), ack_none returns None (404: old
+        # server without the endpoint).
+        self.referral_bonus_acks = []
+        self._ack_raise = ack_raise
+        self._ack_none = ack_none
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
         self.order_keys = []
@@ -1444,6 +1457,22 @@ class FakePaxyo:
             "ok": True, "referrer_telegram_id": referrer,
             "code_used": code, "already_recorded": False,
         }
+
+    async def ack_referral_bonus(self, telegram_id, deposit_id, side):
+        """Mirror POST /referrals/notify-ack (16 Nov 2026): marks
+        one side's bonus message as sent. ack_raise=True raises
+        (server error); ack_none=True returns None (404: old server
+        without the endpoint)."""
+        if self._ack_raise:
+            raise RuntimeError("ack failed")
+        if self._ack_none:
+            return None
+        self.referral_bonus_acks.append({
+            "telegram_id": telegram_id,
+            "deposit_id": deposit_id,
+            "side": side,
+        })
+        return {"ok": True, "side": side, "notified": True}
 
     def credit_first_deposit(self, telegram_id, amount):
         """Mirror the deposit-credit + ref_maybe_credit_bonus hook
@@ -6158,6 +6187,261 @@ class TestInviteCodeEntry(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["referrer_paid"])
         self.assertEqual(fake.balances[1], 120.0)
         self.assertEqual(fake.balances[123456789], 520.0)
+
+
+class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
+    """Referral notices (William, 16 Nov 2026): when someone uses a
+    code, the code giver gets a message; when they make their first
+    deposit, BOTH sides hear their 20% bonus landed. Exactly once
+    per bonus: a second recheck of the same deposit never re-sends
+    (server-side notified flags, acked by the bot)."""
+
+    FRIEND_CODE = "REF21I3V91B"  # owner 123456789
+    REFERRER = 123456789
+    WILLIAM = 779060335
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.DEPOSIT_DRAFT,
+            bot.PENDING_DEPOSIT, bot.VALIDATED_PROMO,
+            bot.PROMO_DEPOSIT, bot.PROMO_OFFER,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+        bot.LAST_DEPOSIT.clear()
+        bot.BIG_DEPOSIT_ALERTED.clear()
+        bot.LAST_LANG.clear()
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.DEPOSIT_DRAFT,
+            bot.PENDING_DEPOSIT, bot.VALIDATED_PROMO,
+            bot.PROMO_DEPOSIT, bot.PROMO_OFFER, bot.CHAT_HISTORY,
+            bot.LAST_DEPOSIT, bot.BIG_DEPOSIT_ALERTED,
+            bot.LAST_LANG,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns if intent is not None]
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(side_effect=intents),
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch(
+            "bot.speak_reply"
+        ):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    def _start_context(self, *args):
+        context = mock.Mock()
+        context.args = list(args)
+        context.bot = FakeBot()
+        return context
+
+    async def _run_start(self, fake, context, user=None):
+        msg = FakeMessage("/start")
+        update = FakeUpdate(msg, user=user or FakeUser())
+        update.update_id = 910102
+        with mock.patch("bot.paxyo", fake):
+            await bot.start(update, context)
+        return msg
+
+    def _bonus_deposit(self, **overrides):
+        dep = dict(FakePaxyo.DEPOSIT)
+        dep.update({
+            "id": "dep-1", "amount": 100, "status": "completed",
+            "referral_bonus": {
+                "referrer": self.REFERRER,
+                "invitee_paid": True, "referrer_paid": True,
+                "invitee_bonus": 20.0, "referrer_bonus": 20.0,
+                "invitee_notified": False, "referrer_notified": False,
+            },
+        })
+        dep.update(overrides)
+        return dep
+
+    async def _recheck(self, fake, app=None):
+        bot.LAST_DEPOSIT[1] = "dep-1"
+        with mock.patch("bot.paxyo", fake):
+            return await bot.deposit_status_text(1, "en", app=app)
+
+    # --- registration notice ---
+
+    async def test_fresh_registration_notifies_referrer(self):
+        msg, fake = await self._turns([(self.FRIEND_CODE, None)])
+        self.assertIn("You're in!", msg.text_sent[0])
+        self.assertEqual(msg.bot.sent, [(
+            self.REFERRER,
+            "Someone joined Paxyo with your invite code! When they "
+            "make their first deposit, you both get a 20% bonus.",
+        )])
+
+    async def test_shared_code_notifies_nobody(self):
+        msg, _ = await self._turns([("REF3723FB335", None)])
+        self.assertIn("You're in!", msg.text_sent[0])
+        self.assertEqual(msg.bot.sent, [])
+
+    async def test_already_recorded_notifies_nobody(self):
+        other = bot.user_invite_code(987654321)
+        fake = FakePaxyo(referral_rows={
+            1: {"referrer": self.REFERRER, "code": self.FRIEND_CODE},
+        })
+        msg, _ = await self._turns([(other, None)], paxyo=fake)
+        self.assertEqual(
+            msg.text_sent,
+            ["You already have a referrer — this code can't be used."],
+        )
+        self.assertEqual(msg.bot.sent, [])
+
+    async def test_own_code_notifies_nobody(self):
+        msg, _ = await self._turns(
+            [("REFCVTYSVA3", None)],
+            user=FakeUser(user_id=self.WILLIAM),
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["That's your own code — share it with a friend instead."],
+        )
+        self.assertEqual(msg.bot.sent, [])
+
+    async def test_endpoint_not_live_notifies_nobody(self):
+        fake = FakePaxyo(referral_none=True)
+        msg, _ = await self._turns(
+            [(self.FRIEND_CODE, None)], paxyo=fake)
+        self.assertEqual(
+            msg.text_sent,
+            ["I couldn't save that code right now — please try "
+             "again later."],
+        )
+        self.assertEqual(msg.bot.sent, [])
+
+    async def test_deep_link_notifies_referrer(self):
+        fake = FakePaxyo()
+        context = self._start_context(self.FRIEND_CODE)
+        msg = await self._run_start(fake, context)
+        self.assertEqual(len(msg.text_sent), 1)  # greeting only
+        self.assertEqual(context.bot.sent, [(
+            self.REFERRER,
+            "Someone joined Paxyo with your invite code! When they "
+            "make their first deposit, you both get a 20% bonus.",
+        )])
+
+    async def test_deep_link_shared_code_notifies_nobody(self):
+        fake = FakePaxyo()
+        context = self._start_context("REF3723FB335")
+        await self._run_start(fake, context)
+        self.assertEqual(context.bot.sent, [])
+
+    # --- first-deposit bonus notice (both sides) ---
+
+    async def test_first_deposit_notifies_both_once(self):
+        fake = FakePaxyo(
+            balance=1120.0, deposits=[self._bonus_deposit()])
+        app = FakeApp()
+        text = await self._recheck(fake, app=app)
+        self.assertIn(
+            "Yes — your 100.00 ETB deposit went through.", text)
+        self.assertIn(
+            "Your 20% referral bonus landed — 20.00 ETB added to "
+            "your balance.", text)
+        self.assertEqual(app.bot.sent, [(
+            self.REFERRER,
+            "Your friend made their first deposit — your 20% bonus "
+            "landed: 20.00 ETB.",
+        )])
+        self.assertEqual(fake.referral_bonus_acks, [
+            {"telegram_id": 1, "deposit_id": "dep-1", "side": "invitee"},
+            {"telegram_id": 1, "deposit_id": "dep-1", "side": "referrer"},
+        ])
+
+    async def test_second_recheck_does_not_repeat(self):
+        bonus = self._bonus_deposit()
+        bonus["referral_bonus"]["invitee_notified"] = True
+        bonus["referral_bonus"]["referrer_notified"] = True
+        fake = FakePaxyo(balance=1120.0, deposits=[bonus])
+        app = FakeApp()
+        text = await self._recheck(fake, app=app)
+        self.assertNotIn("referral bonus landed", text)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.referral_bonus_acks, [])
+
+    async def test_deposit_without_bonus_notifies_nobody(self):
+        dep = dict(FakePaxyo.DEPOSIT)
+        dep.update({"id": "dep-1", "amount": 100, "status": "completed"})
+        fake = FakePaxyo(balance=1100.0, deposits=[dep])
+        app = FakeApp()
+        text = await self._recheck(fake, app=app)
+        self.assertIn(
+            "Yes — your 100.00 ETB deposit went through.", text)
+        self.assertNotIn("referral bonus landed", text)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.referral_bonus_acks, [])
+
+    async def test_referrer_skipped_without_app(self):
+        # No Application (offline tests call it that way): the
+        # invitee still hears about their bonus, the referrer side
+        # is skipped this time — its flag stays 0, so a later
+        # recheck with app picks it up.
+        fake = FakePaxyo(
+            balance=1120.0, deposits=[self._bonus_deposit()])
+        text = await self._recheck(fake, app=None)
+        self.assertIn(
+            "Your 20% referral bonus landed — 20.00 ETB added to "
+            "your balance.", text)
+        self.assertEqual(fake.referral_bonus_acks, [
+            {"telegram_id": 1, "deposit_id": "dep-1", "side": "invitee"},
+        ])
+
+    async def test_ack_failure_does_not_block_reply(self):
+        fake = FakePaxyo(
+            balance=1120.0, deposits=[self._bonus_deposit()],
+            ack_raise=True)
+        app = FakeApp()
+        text = await self._recheck(fake, app=app)
+        self.assertIn(
+            "Your 20% referral bonus landed — 20.00 ETB added to "
+            "your balance.", text)
+        self.assertEqual(app.bot.sent, [(
+            self.REFERRER,
+            "Your friend made their first deposit — your 20% bonus "
+            "landed: 20.00 ETB.",
+        )])
+        self.assertEqual(fake.referral_bonus_acks, [])
+
+    async def test_referrer_message_uses_their_language(self):
+        bot.LAST_LANG[self.REFERRER] = "am"
+        fake = FakePaxyo(
+            balance=1120.0, deposits=[self._bonus_deposit()])
+        app = FakeApp()
+        await self._recheck(fake, app=app)
+        self.assertEqual(app.bot.sent, [(
+            self.REFERRER,
+            "ጓደኛህ የመጀመሪያ depositውን አድርጓል — የ20% bonusህ "
+            "ደርሷል: 20.00 ETB።",
+        )])
+
+    async def test_invitee_only_bonus_for_shared_code(self):
+        bonus = self._bonus_deposit()
+        bonus["referral_bonus"].update({
+            "referrer": 0, "referrer_paid": False,
+            "referrer_bonus": 0.0,
+        })
+        fake = FakePaxyo(balance=1120.0, deposits=[bonus])
+        app = FakeApp()
+        text = await self._recheck(fake, app=app)
+        self.assertIn(
+            "Your 20% referral bonus landed — 20.00 ETB added to "
+            "your balance.", text)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.referral_bonus_acks, [
+            {"telegram_id": 1, "deposit_id": "dep-1", "side": "invitee"},
+        ])
 
 
 class TestQuoteMatchesOrder(unittest.IsolatedAsyncioTestCase):

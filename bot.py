@@ -2742,6 +2742,29 @@ TEXT = {
         "am": "ይህን code አሁን ማስቀመጥ አልቻልኩም — ቆይተህ እንደገና ሞክር።",
         "en": "I couldn't save that code right now — please try again later.",
     },
+    # Referral notices (William, 16 Nov 2026): when someone joins
+    # with a code, the code giver hears about it; when their first
+    # deposit lands, BOTH sides hear their 20% bonus landed. The
+    # new user is never named to the referrer — only that someone
+    # joined. Amharic is first-pass, unreviewed.
+    "referral_joined": {
+        "am": (
+            "አንድ ሰው በinvite codeህ Paxyo ተቀላቅሏል! የመጀመሪያ "
+            "depositቸውን ሲያደርጉ፣ ሁለታችሁም 20% bonus ታገኛላችሁ።"
+        ),
+        "en": (
+            "Someone joined Paxyo with your invite code! When they "
+            "make their first deposit, you both get a 20% bonus."
+        ),
+    },
+    "referral_bonus_invitee": {
+        "am": "የ20% referral bonusህ ደርሷል — {amount} ETB ወደ balanceህ ታክሏል።",
+        "en": "Your 20% referral bonus landed — {amount} ETB added to your balance.",
+    },
+    "referral_bonus_referrer": {
+        "am": "ጓደኛህ የመጀመሪያ depositውን አድርጓል — የ20% bonusህ ደርሷል: {amount} ETB።",
+        "en": "Your friend made their first deposit — your 20% bonus landed: {amount} ETB.",
+    },
     # Promo codes (ideas batch 2, feature 1, 15 Nov 2026): a code
     # never discounts an order price — it only adds a bonus on a
     # real deposit, once per user, once per deposit. The server
@@ -5388,6 +5411,33 @@ class PaxyoClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 log.warning("POST /referrals returned 404 (endpoint not live yet)")
+                return None
+            raise
+
+    async def ack_referral_bonus(self, telegram_id: int, deposit_id, side: str):
+        """POST /referrals/notify-ack {telegram_id, deposit_id, side}
+        — marks one side's referral-bonus message as sent, so a
+        later recheck of the same deposit never re-sends it (the
+        server only sets the flag when that side's bonus was really
+        paid for this deposit). Returns the parsed reply, or None
+        on 404 (old server without the endpoint — the caller then
+        retries the notice on the next recheck). Other failures
+        raise, so the caller can log and retry later."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST",
+                    "/referrals/notify-ack",
+                    {
+                        "telegram_id": telegram_id,
+                        "deposit_id": deposit_id,
+                        "side": side,
+                    },
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /referrals/notify-ack returned 404 (endpoint not live yet)")
                 return None
             raise
 
@@ -19281,9 +19331,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _owner = invite_code_owner(_code)
         if _code == INVITE_CODE or (_owner is not None and _owner != user.id):
             try:
-                await paxyo.record_referral(user.id, _code)
+                _ref_result = await paxyo.record_referral(user.id, _code)
             except Exception as exc:  # referral must never block /start
                 log.warning("record_referral failed (continuing): %s", exc)
+            else:
+                # Registration notice (William, 16 Nov 2026): the code
+                # giver hears someone joined with their code — fresh
+                # registration only, real referrer only (the shared
+                # code maps to referrer 0, already-recorded means the
+                # user joined before). Best-effort, never blocks /start.
+                if (
+                    isinstance(_ref_result, dict)
+                    and not _ref_result.get("already_recorded")
+                    and (_ref_result.get("referrer_telegram_id") or 0) > 0
+                ):
+                    await _notify_referrer_joined(
+                        getattr(context, "bot", None),
+                        _ref_result["referrer_telegram_id"],
+                    )
     # Ideas batch (15 Nov 2026): the quick-reply keyboard stays
     # under the chat from here on; a brand-new user also gets the
     # one-time cheapest-test offer as a second message.
@@ -21108,6 +21173,33 @@ def extract_invite_code(text: str):
     return None
 
 
+async def _notify_referrer_joined(bot, referrer_id: int) -> bool:
+    """Tell a referrer someone joined with their code (William,
+    16 Nov 2026): the code giver hears about it the moment a new
+    user registers with their code. Best-effort and never raises —
+    a failed send must not break the registration reply (or
+    /start). Returns True when the message was sent. The new user
+    is never named — only that someone joined. Language is the
+    referrer's last seen language (LAST_LANG), English when the
+    referrer never chatted with the bot."""
+    try:
+        referrer_id = int(referrer_id)
+    except (TypeError, ValueError):
+        return False
+    if referrer_id <= 0 or bot is None:
+        return False
+    try:
+        await bot.send_message(
+            chat_id=referrer_id,
+            text=t("referral_joined", LAST_LANG.get(referrer_id, "en")),
+            reply_markup=hide_reply_keyboard(),
+        )
+    except Exception as exc:
+        log.warning("referral-joined notify failed: %s", exc)
+        return False
+    return True
+
+
 async def handle_invite_code_text(update, text: str, lang: str, voice=False) -> bool:
     """In-chat invite codes (both-sides referral bonus, 16 Nov
     2026): a user types a friend's invite code in the chat. True
@@ -21211,6 +21303,17 @@ async def handle_invite_code_text(update, text: str, lang: str, voice=False) -> 
     await reply_message(
         update.message, t(key, lang), lang, voice=voice,
     )
+    if referrer:
+        # Registration notice (William, 16 Nov 2026): the code giver
+        # hears someone joined with their code. After the user's own
+        # reply above, and best-effort — a failed notify never
+        # changes that reply. Shared code records referrer 0, so no
+        # message goes out for it.
+        try:
+            _bot = update.message.get_bot()
+        except Exception:
+            _bot = None
+        await _notify_referrer_joined(_bot, referrer)
     return True
 
 
@@ -21717,6 +21820,74 @@ async def _maybe_big_deposit_alert(app, deposit, user_id: int,
     await notify_admins(app, text)
 
 
+async def _referral_bonus_lines(user_id: int, deposit, lang: str, app=None) -> list:
+    """Referral-bonus notices for a completed first deposit (William,
+    16 Nov 2026). The server's deposit record carries referral_bonus
+    {referrer, invitee_paid, referrer_paid, invitee_bonus,
+    referrer_bonus, invitee_notified, referrer_notified} — paid /
+    notified flags from bot_referrals, gated on THIS deposit id (see
+    server/api-referrals.php ref_bonus_for_deposit). A side is
+    messaged only when paid AND not yet notified; the notify-ack call
+    then marks it sent server-side, so a second recheck — even after
+    a bot restart — never re-sends it. The invitee's line is returned
+    (appended to the recheck reply); the referrer's is sent directly
+    (needs app — without it the side is skipped this time and picked
+    up on a later recheck, the flag stays 0). Never raises: a failed
+    send or ack only logs, and the reply still stands."""
+    bonus = (deposit or {}).get("referral_bonus")
+    if not isinstance(bonus, dict):
+        return []
+    dep_id = deposit.get("id")
+    lines = []
+    # Invitee side: this user, this deposit.
+    if bonus.get("invitee_paid") and not bonus.get("invitee_notified"):
+        try:
+            amount = float(bonus.get("invitee_bonus") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount > 0:
+            lines.append(
+                t("referral_bonus_invitee", lang, amount=format_money(amount))
+            )
+            try:
+                await paxyo.ack_referral_bonus(user_id, dep_id, "invitee")
+            except Exception as exc:
+                log.warning("referral bonus ack (invitee) failed: %s", exc)
+    # Referrer side: a different user, so it is sent directly.
+    referrer = bonus.get("referrer") or 0
+    if (
+        bonus.get("referrer_paid")
+        and not bonus.get("referrer_notified")
+        and referrer
+        and app is not None
+    ):
+        try:
+            referrer = int(referrer)
+            amount = float(bonus.get("referrer_bonus") or 0)
+        except (TypeError, ValueError):
+            referrer = 0
+            amount = 0.0
+        if referrer > 0 and amount > 0:
+            try:
+                await app.bot.send_message(
+                    chat_id=referrer,
+                    text=t(
+                        "referral_bonus_referrer",
+                        LAST_LANG.get(referrer, "en"),
+                        amount=format_money(amount),
+                    ),
+                    reply_markup=hide_reply_keyboard(),
+                )
+            except Exception as exc:
+                log.warning("referral bonus notify (referrer) failed: %s", exc)
+            else:
+                try:
+                    await paxyo.ack_referral_bonus(user_id, dep_id, "referrer")
+                except Exception as exc:
+                    log.warning("referral bonus ack (referrer) failed: %s", exc)
+    return lines
+
+
 async def deposit_status_text(user_id: int, lang: str, app=None,
                               username=None) -> str:
     """Recheck the user's most recent deposit and say what happened,
@@ -21801,8 +21972,14 @@ async def deposit_status_text(user_id: int, lang: str, app=None,
             schedule_traits_save(
                 user_id, {"last_deposit_method": _method}
             )
+        extra_lines = []
         if promo_line:
-            return base + "\n" + promo_line
+            extra_lines.append(promo_line)
+        extra_lines.extend(
+            await _referral_bonus_lines(user_id, deposit, lang, app)
+        )
+        if extra_lines:
+            return base + "\n" + "\n".join(extra_lines)
         return base
     if status in ("failed", "cancelled", "canceled", "expired", "rejected"):
         reason = (
