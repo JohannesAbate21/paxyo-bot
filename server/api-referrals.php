@@ -336,6 +336,8 @@ function ref_ensure_tables($db) {
         invitee_bonus_amount DECIMAL(12,2) NULL,
         invitee_bonus_deposit_id INT NULL,
         invitee_bonus_paid_at TIMESTAMP NULL,
+        invitee_bonus_notified TINYINT(1) NOT NULL DEFAULT 0,
+        referrer_bonus_notified TINYINT(1) NOT NULL DEFAULT 0,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uq_ref_referred (referred_telegram_id),
         INDEX idx_ref_referrer (referrer_telegram_id)
@@ -364,6 +366,15 @@ function ref_ensure_tables($db) {
     if (empty($have['invitee_bonus_paid_at'])) {
         $db->query('ALTER TABLE bot_referrals ADD COLUMN invitee_bonus_paid_at TIMESTAMP NULL');
     }
+    // Bonus notices (16 Nov 2026): the bot messages each side once
+    // when their first-deposit bonus lands — the notified flags are
+    // the exactly-once gate (see ref_bonus_for_deposit).
+    if (empty($have['invitee_bonus_notified'])) {
+        $db->query('ALTER TABLE bot_referrals ADD COLUMN invitee_bonus_notified TINYINT(1) NOT NULL DEFAULT 0');
+    }
+    if (empty($have['referrer_bonus_notified'])) {
+        $db->query('ALTER TABLE bot_referrals ADD COLUMN referrer_bonus_notified TINYINT(1) NOT NULL DEFAULT 0');
+    }
 }
 
 function ref_row($row) {
@@ -387,6 +398,41 @@ function ref_load_by_referred($db, $telegram_id) {
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     return $row ?: null;
+}
+
+// --- Referral-bonus block for one deposit ---------------------------------
+// Bonus notices (16 Nov 2026): the bot messages both sides when a
+// first-deposit bonus lands. Returns the referral_bonus block for
+// the deposit record, or null when this deposit paid no referral
+// bonus. Each side counts only when its paid flag is set AND its
+// bonus deposit id is THIS deposit — an earlier bonus never leaks
+// into a later deposit's record. The notified flags are the
+// exactly-once gate: the bot messages a side only when paid and not
+// yet notified, then acks it (bot_ref_notify_ack), so a second
+// recheck — even after a bot restart — never re-sends it. Runs
+// ref_ensure_tables first so a table created by the older file gains
+// the notified columns before the row is read.
+function ref_bonus_for_deposit($db, $telegram_id, $deposit_id) {
+    $telegram_id = (int)$telegram_id;
+    $deposit_id = (int)$deposit_id;
+    if ($telegram_id <= 0 || $deposit_id <= 0) return null;
+    ref_ensure_tables($db);
+    $ref = ref_load_by_referred($db, $telegram_id);
+    if (!$ref) return null;
+    $invitee_paid = ((int)($ref['invitee_bonus_paid'] ?? 0) === 1)
+        && (int)($ref['invitee_bonus_deposit_id'] ?? 0) === $deposit_id;
+    $referrer_paid = ((int)($ref['bonus_paid'] ?? 0) === 1)
+        && (int)($ref['bonus_deposit_id'] ?? 0) === $deposit_id;
+    if (!$invitee_paid && !$referrer_paid) return null;
+    return [
+        'referrer' => (int)$ref['referrer_telegram_id'],
+        'invitee_paid' => $invitee_paid,
+        'referrer_paid' => $referrer_paid,
+        'invitee_bonus' => $invitee_paid ? (float)$ref['invitee_bonus_amount'] : 0.0,
+        'referrer_bonus' => $referrer_paid ? (float)$ref['bonus_amount'] : 0.0,
+        'invitee_notified' => ((int)($ref['invitee_bonus_notified'] ?? 0) === 1),
+        'referrer_notified' => ((int)($ref['referrer_bonus_notified'] ?? 0) === 1),
+    ];
 }
 
 // --- POST /api/bot/referrals ------------------------------------------------
@@ -500,6 +546,45 @@ function bot_ref_stats() {
         'bonus_earned' => (float)($row['earned'] ?? 0),
         'bonus_pending' => (int)($row['pending'] ?? 0),
     ]);
+}
+
+// --- POST /api/bot/referrals/notify-ack --------------------------------------
+// Body: {"telegram_id": <invitee>, "deposit_id": <id>, "side":
+// "invitee"|"referrer"}. Marks one side's bonus message as sent, so
+// a later recheck of the same deposit never re-sends it. The server
+// only sets the flag when that side's bonus was really paid for this
+// deposit (paid flag set AND bonus deposit id matches) — the bot
+// cannot mark a bonus notified that was never paid. Idempotent:
+// acking twice is a no-op success. Called by the bot AFTER it sends
+// (invitee) or appends (referrer) the bonus message.
+function bot_ref_notify_ack() {
+    $in = ref_json_body();
+    $telegram_id = (int)($in['telegram_id'] ?? 0);
+    $deposit_id = (int)($in['deposit_id'] ?? 0);
+    $side = strtolower(trim((string)($in['side'] ?? '')));
+    if ($telegram_id <= 0 || $deposit_id <= 0) ref_fail(400, 'telegram_id and deposit_id are required.');
+    if ($side !== 'invitee' && $side !== 'referrer') ref_fail(400, 'side must be invitee or referrer.');
+    $db = ref_db();
+    if ($db === null) ref_fail(500, 'Database is not available.');
+    ref_ensure_tables($db);
+    $ref = ref_load_by_referred($db, $telegram_id);
+    if (!$ref) ref_fail(404, 'No referral recorded.');
+    if ($side === 'invitee') {
+        $paid = ((int)($ref['invitee_bonus_paid'] ?? 0) === 1);
+        $paid_dep = (int)($ref['invitee_bonus_deposit_id'] ?? 0);
+        $col = 'invitee_bonus_notified';
+    } else {
+        $paid = ((int)($ref['bonus_paid'] ?? 0) === 1);
+        $paid_dep = (int)($ref['bonus_deposit_id'] ?? 0);
+        $col = 'referrer_bonus_notified';
+    }
+    if (!$paid || $paid_dep !== $deposit_id) ref_fail(409, 'No bonus was paid for this deposit.');
+    // $col is an internal constant from the branch above, never user input.
+    $stmt = $db->prepare("UPDATE bot_referrals SET $col = 1 WHERE referred_telegram_id = ?");
+    $stmt->bind_param('i', $telegram_id);
+    $stmt->execute();
+    $stmt->close();
+    bot_ok(['ok' => true, 'side' => $side, 'notified' => true]);
 }
 
 // --- Bonus hook: call from the first-deposit credit point -------------------
@@ -658,6 +743,7 @@ function ref_maybe_credit_bonus($db, $telegram_id, $deposit_id, $amount) {
 //   $bp = $_GET['bot_path'] ?? '';
 //   if ($bp === 'referrals' && $_SERVER['REQUEST_METHOD'] === 'POST') { bot_ref_record(); }
 //   if ($bp === 'referrals' && $_SERVER['REQUEST_METHOD'] === 'GET') { bot_ref_stats(); }
+//   if ($bp === 'referrals/notify-ack' && $_SERVER['REQUEST_METHOD'] === 'POST') { bot_ref_notify_ack(); }
 // (Add the same bot_rate_limit(...) call the other user endpoints use
 //  to both lines — copy the exact call from the orders handler.)
 //
