@@ -57,6 +57,7 @@ import re
 import shutil
 import signal
 import tempfile
+import urllib.parse
 import uuid
 from typing import Optional
 
@@ -483,6 +484,16 @@ DEPOSIT_WEBAPP_URL = os.environ.get(
     "PAXYO_DEPOSIT_URL", "https://paxyo.et/?login"
 )
 PAXYO_SITE_URL = "https://paxyo.et/"
+
+# Deposit popup (owner, 16 Nov 2026): the pre-filled deposit page the
+# bot opens as a Web App after a deposit is confirmed in chat
+# (server/deposit-app.html, installed at public_html/deposit-app.html).
+# It receives deposit_id + checkout_url + amount + method + phone in
+# the query — no website login, no secret, no API key anywhere in it.
+# Override with PAXYO_DEPOSIT_POPUP_URL when the page moves.
+DEPOSIT_POPUP_URL = os.environ.get(
+    "PAXYO_DEPOSIT_POPUP_URL", "https://paxyo.et/deposit-app.html"
+)
 
 # Shared invite code (owner, 14 Nov 2026): REF3723FB335 gives 20%
 # on the first deposit. It is the FALLBACK code now: a /start with
@@ -1057,6 +1068,20 @@ TEXT = {
     "deposit_paid_button": {
         "am": "✅ ከፍዬአለሁ — ይፈትሹ",
         "en": "✅ I paid — check it",
+    },
+    # Deposit popup (owner, 16 Nov 2026): the pre-filled deposit page
+    # opens as a Web App after Confirm, when the server returned a
+    # checkout URL. Row 1 opens the popup (everything already filled
+    # in); row 2 is the plain checkout link, for clients where the
+    # Web App cannot open; row 3 rechecks ("I paid"). en + first-pass
+    # am, unreviewed.
+    "deposit_popup_button": {
+        "am": "💳 {amount} ETB ይክፈሉ",
+        "en": "💳 Pay {amount} ETB",
+    },
+    "deposit_popup_open": {
+        "am": "🌐 የክፍያ ገጽ ይክፈቱ",
+        "en": "🌐 Open payment page",
     },
     # Deposit recheck ("did my deposit go through?"): the server
     # re-verifies with Chapa before answering, so the bot only
@@ -3465,7 +3490,10 @@ TYPO_MAP = {
 }
 
 # Payment method display names (same in both languages: brand names).
-METHOD_LABELS = {"telebirr": "Telebirr", "cbe": "CBE Birr"}
+METHOD_LABELS = {
+    "telebirr": "Telebirr", "cbe": "CBE Birr",
+    "cbebirr": "CBE Birr", "mpesa": "M-Pesa",
+}
 
 
 def normalize_text(text: str) -> str:
@@ -20470,6 +20498,72 @@ def deposit_webapp_keyboard(lang: str, amount=None, allow_retry: bool = False,
     return InlineKeyboardMarkup(rows)
 
 
+def deposit_popup_url(result, amount, method, phone):
+    """Web App URL for the pre-filled deposit popup (owner, 16 Nov
+    2026): DEPOSIT_POPUP_URL with deposit_id + checkout_url + amount
+    + method + phone in the query, so the page shows everything the
+    user already typed in chat and the "Proceed to payment" button
+    opens the server's checkout URL. None when the server returned
+    no usable checkout URL — the caller then sends the plain
+    instructions (or the old Web App fallback on error). The URL
+    carries no secret: checkout_url is the per-transaction Chapa
+    link, deposit_id is the public deposit number."""
+    url = (result or {}).get("checkout_url")
+    if not url or not str(url).strip().startswith(("http://", "https://")):
+        return None
+    params = {
+        "deposit_id": str(result.get("deposit_id") or ""),
+        "checkout_url": str(url).strip(),
+        "amount": format_money(amount),
+        "method": str(method or ""),
+        "phone": str(phone or ""),
+    }
+    return DEPOSIT_POPUP_URL + "?" + urllib.parse.urlencode(params)
+
+
+def deposit_popup_keyboard(result, draft, lang: str):
+    """Inline keyboard for a deposit that has a checkout URL: row 1
+    opens the pre-filled popup as a Web App, row 2 is the plain
+    checkout link, row 3 rechecks ("I paid"). None when there is no
+    checkout URL — a USSD push needs no button at all."""
+    url = deposit_popup_url(
+        result, draft["amount"], draft["method"], draft["phone"]
+    )
+    if url is None:
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            t("deposit_popup_button", lang,
+              amount=format_money(draft["amount"])),
+            web_app=WebAppInfo(url=url),
+        )],
+        [InlineKeyboardButton(
+            t("deposit_popup_open", lang),
+            url=str(result.get("checkout_url")).strip(),
+        )],
+        [InlineKeyboardButton(
+            t("deposit_paid_button", lang), callback_data="checkdep:"
+        )],
+    ])
+
+
+def deposit_success_markup(result, draft, lang: str):
+    """Keyboard for a started deposit. A checkout URL gets the popup
+    keyboard; anything else gets just the "I paid" recheck button —
+    which also replaces the Confirm/Cancel buttons on the edited
+    card (edit_message_text with no markup would leave them there,
+    and a user could tap Confirm twice). Never None on success: the
+    caller always passes the returned markup."""
+    popup = deposit_popup_keyboard(result, draft, lang)
+    if popup is not None:
+        return popup
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            t("deposit_paid_button", lang), callback_data="checkdep:"
+        )
+    ]])
+
+
 def deposit_webapp_message(amount, lang: str, allow_retry: bool = False,
                            user_id: int = None):
     """(text, keyboard) for the embedded-deposit fallback, shown when
@@ -26147,7 +26241,8 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await update.message.reply_text(
                 deposit_instructions_text(
                     result, dep_draft["amount"], dep_draft["method"], lang
-                )
+                ),
+                reply_markup=deposit_success_markup(result, dep_draft, lang),
             )
             await maybe_send_deposit_qr(update.message, result, lang)
             return
@@ -29043,7 +29138,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             deposit_instructions_text(
                 result, draft["amount"], draft["method"], lang
-            )
+            ),
+            reply_markup=deposit_success_markup(result, draft, lang),
         )
         await maybe_send_deposit_qr(query.message, result, lang)
         return
@@ -29728,7 +29824,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             deposit_instructions_text(
                 result, dep_draft["amount"], dep_draft["method"], lang
-            )
+            ),
+            reply_markup=deposit_success_markup(result, dep_draft, lang),
         )
         await maybe_send_deposit_qr(query.message, result, lang)
         return
