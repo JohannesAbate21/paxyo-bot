@@ -120,6 +120,248 @@ class TestPickServices(unittest.TestCase):
         self.assertTrue(all("followers" in s["name"].lower() for s in picks))
 
 
+class TestCancelCuttingRanking(unittest.TestCase):
+    """Cancel-cutting items 1 + 2 + 8 + 12 (16 Nov 2026): one merged
+    ranking — trusted first, then reliable-fastest; unreliable and
+    paused skipped; a nearly-empty provider skipped unless it is
+    the only option. Pure helpers, no network."""
+
+    UNRELIABLE = {
+        "orders": 10, "completed": 8, "cancelled": 2, "failed": 0,
+        "cancel_rate": 0.2, "clean_streak": 0,
+    }
+    PROVEN = {
+        "orders": 20, "completed": 20, "cancelled": 0, "failed": 0,
+        "cancel_rate": 0.0, "clean_streak": 5,
+    }
+    TRUSTED = {
+        "orders": 12, "completed": 12, "cancelled": 0, "failed": 0,
+        "cancel_rate": 0.0, "clean_streak": 10,
+    }
+    TRUSTED_OLD_CANCEL = {
+        "orders": 15, "completed": 13, "cancelled": 2, "failed": 0,
+        "cancel_rate": 0.14, "clean_streak": 10,
+    }
+
+    def _smm(self):
+        return {
+            "service": 874, "name": "Instagram Followers | SMM",
+            "category": "Instagram Followers", "type": "Default",
+            "rate_etb_per_1000": 50.0, "min": 10, "max": 10000,
+            "average_time": "5 minutes", "active": True,
+            "provider": "smm", "provider_service_id": 874,
+        }
+
+    def test_unreliable_fastest_excluded_when_reliable_exists(self):
+        reliability = {"gop:1001": self.UNRELIABLE,
+                       "gop:1002": self.PROVEN}
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            reliability=reliability, quantity=100)
+        ids = [s["service"] for s in picks]
+        self.assertNotIn(1001, ids)
+        self.assertEqual(ids[0], 1002)
+
+    def test_all_unreliable_falls_back_to_fastest(self):
+        # Direct: every candidate unreliable — fastest kept anyway.
+        ranked = bot.apply_trust_reliability_ranking(
+            SAMPLE_SERVICES[:2],
+            {"gop:1001": self.UNRELIABLE,
+             "gop:1002": self.UNRELIABLE}, quantity=100)
+        self.assertEqual([s["service"] for s in ranked], [1001, 1002])
+        # End to end: all three unreliable — fastest first, nothing said.
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            reliability={"gop:1001": self.UNRELIABLE,
+                         "gop:1002": self.UNRELIABLE,
+                         "gop:1003": self.UNRELIABLE},
+            quantity=100)
+        self.assertEqual(
+            [s["service"] for s in picks], [1001, 1002, 1003])
+
+    def test_trusted_slower_ranks_first(self):
+        reliability = {"gop:1001": self.PROVEN,
+                       "gop:1002": self.TRUSTED}
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            reliability=reliability, quantity=100)
+        self.assertEqual(
+            [s["service"] for s in picks], [1002, 1001, 1003])
+
+    def test_trusted_beats_old_cancel_rate(self):
+        # 10 clean completions in a row outrank an older cancel rate.
+        reliability = {"gop:1001": self.TRUSTED_OLD_CANCEL,
+                       "gop:1002": self.PROVEN}
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            reliability=reliability, quantity=100)
+        self.assertEqual([s["service"] for s in picks][0], 1001)
+
+    def test_unproven_big_order_excluded_when_proven_exists(self):
+        reliability = {"gop:1002": self.PROVEN}
+        big = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            reliability=reliability, quantity=10000)
+        self.assertEqual([s["service"] for s in big], [1002])
+        small = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            reliability=reliability, quantity=100)
+        self.assertIn(1001, [s["service"] for s in small])
+
+    def test_reliability_none_leaves_order_unchanged(self):
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram", reliability=None)
+        self.assertEqual(
+            [s["service"] for s in picks], [1001, 1002, 1003])
+
+    def test_unreliable_thresholds(self):
+        self.assertFalse(bot._service_is_unreliable({}))
+        self.assertFalse(bot._service_is_unreliable(
+            {"orders": 4, "cancel_rate": 0.5}))
+        self.assertFalse(bot._service_is_unreliable(
+            {"orders": 5, "cancel_rate": 0.09}))
+        self.assertTrue(bot._service_is_unreliable(
+            {"orders": 5, "cancel_rate": 0.10}))
+        self.assertFalse(bot._service_is_trusted({"clean_streak": 9}))
+        self.assertTrue(bot._service_is_trusted({"clean_streak": 10}))
+        self.assertFalse(bot._service_is_proven({"completed": 9}))
+        self.assertTrue(bot._service_is_proven({"completed": 10}))
+
+    def test_paused_services_skipped_everywhere(self):
+        pool = bot._filter_pick_candidates(
+            SAMPLE_SERVICES[:2], paused={"gop:1001"})
+        self.assertEqual([s["service"] for s in pool], [1002])
+        self.assertEqual(
+            bot._filter_pick_candidates(
+                SAMPLE_SERVICES[:2], paused={"gop:1001", "gop:1002"}),
+            [])
+        self.assertEqual(
+            bot._filter_pick_candidates(SAMPLE_SERVICES[:2], paused=None),
+            SAMPLE_SERVICES[:2])
+        # Fastest-first pick skips the paused fastest service.
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            paused={"gop:1001"})
+        self.assertEqual([s["service"] for s in picks][0], 1002)
+        # Cheapest pick skips a paused cheapest service too.
+        cheap = bot.pick_services(
+            SAMPLE_SERVICES, platform="instagram",
+            service_hint="cheapest instagram followers",
+            paused={"gop:1002"})
+        self.assertEqual([s["service"] for s in cheap][0], 1003)
+
+    def test_balance_guard_prefers_healthy_provider(self):
+        services = [SAMPLE_SERVICES[0], self._smm()]
+        # SMM is faster (5 min vs 12 min) but its balance is low.
+        picks = bot.pick_services(
+            services, platform="instagram",
+            balance_health={"gop": True, "smm": False})
+        self.assertEqual([s["service"] for s in picks], [1001])
+        # The other way round: GOP low, SMM healthy.
+        picks = bot.pick_services(
+            services, platform="instagram",
+            balance_health={"gop": False, "smm": True})
+        self.assertEqual([s["service"] for s in picks], [874])
+        # Only the low provider can serve it: never blocked.
+        picks = bot.pick_services(
+            [self._smm()], platform="instagram",
+            balance_health={"gop": True, "smm": False})
+        self.assertEqual([s["service"] for s in picks], [874])
+        # Unknown balance: fastest wins, as today.
+        picks = bot.pick_services(
+            services, platform="instagram", balance_health=None)
+        self.assertEqual([s["service"] for s in picks][0], 874)
+
+    def test_drop_risky_never_empties_cheapest_pick(self):
+        kept = bot._drop_risky_candidates(
+            SAMPLE_SERVICES[:2],
+            {"gop:1001": self.UNRELIABLE,
+             "gop:1002": self.UNRELIABLE}, quantity=100)
+        self.assertEqual(
+            [s["service"] for s in kept], [1001, 1002])
+
+
+class TestLinkCheckBeforePaying(unittest.IsolatedAsyncioTestCase):
+    """Link check before paying (cancel-cutting item 5, 16 Nov 2026):
+    the link's domain must match the service's platform and the
+    link type must match the metric — before any money moves. A
+    mismatch refuses the placement, never places on the wrong link."""
+
+    VIEWS = {
+        "service": 2001, "name": "TikTok Video Views | Fast",
+        "category": "TikTok Video Views", "type": "Default",
+        "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
+        "average_time": "5 minutes", "active": True,
+        "provider_service_id": 2001,
+    }
+
+    def setUp(self):
+        bot.WATCHED_ORDERS.clear()
+
+    def tearDown(self):
+        bot.WATCHED_ORDERS.clear()
+
+    def test_validate_order_link(self):
+        followers = SAMPLE_SERVICES[0]  # Instagram Followers
+        self.assertEqual(
+            bot.validate_order_link(
+                "https://instagram.com/p/x", followers),
+            "link_type")
+        self.assertIsNone(bot.validate_order_link(
+            "https://instagram.com/someuser", followers))
+        self.assertIsNone(bot.validate_order_link(
+            "https://tiktok.com/@x/video/1", self.VIEWS))
+        self.assertEqual(
+            bot.validate_order_link(
+                "https://tiktok.com/@x", self.VIEWS),
+            "link_type")
+        self.assertEqual(
+            bot.validate_order_link(
+                "https://tiktok.com/@x/video/1", followers),
+            "platform")
+        self.assertEqual(
+            bot.validate_order_link(
+                "tg://openmessage?chat_id=1&message_id=2", followers),
+            "link_type")
+        # Conservative: an unknown shape never blocks an order.
+        weird = dict(followers, name="Something Weird",
+                     category="Something Weird")
+        self.assertIsNone(bot.validate_order_link(
+            "https://example.com/x", weird))
+        self.assertIsNone(bot.validate_order_link(None, followers))
+
+    async def test_place_pending_order_refuses_bad_link(self):
+        pending = make_pending()
+        pending["link"] = "https://instagram.com/p/x"
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(pending, 1)
+        self.assertIsNone(result)
+        self.assertEqual(error, ("bad_link", "link_type"))
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_place_pending_order_places_good_link(self):
+        pending = make_pending()
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(pending, 1)
+        self.assertIsNone(error)
+        self.assertIsNotNone(result)
+        self.assertEqual(fake.orders_created, [
+            (1001, "https://instagram.com/someuser", 1000),
+        ])
+
+    async def test_place_pending_order_refuses_bad_quantity(self):
+        pending = make_pending()
+        pending["quantity"] = 5  # below the service minimum of 10
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(pending, 1)
+        self.assertIsNone(result)
+        self.assertEqual(error, ("bad_quantity",))
+        self.assertEqual(fake.orders_created, [])
+
+
 class TestQuantity(unittest.TestCase):
     def test_ok(self):
         self.assertIsNone(bot.validate_quantity(1000, SAMPLE_SERVICES[0]))
@@ -246,6 +488,7 @@ class FakeMessage:
         self.text = text
         self.text_sent = []
         self.voice_sent = []
+        self.photos_sent = []
         self.markups = []
         self.chat_id = 1
         self.bot = FakeMessageBot()
@@ -264,6 +507,48 @@ class FakeMessage:
         self.voice_sent.append(voice)
         self._next_message_id += 1
         return FakeSentMessage(self._next_message_id)
+
+    async def reply_photo(self, photo, caption=None):
+        self.photos_sent.append((photo, caption))
+        self._next_message_id += 1
+        return FakeSentMessage(self._next_message_id)
+
+
+class FakeAnimationFile:
+    """Stand-in for a downloaded Telegram file (animation/sticker)."""
+
+    def __init__(self, data=b"fake-media-bytes"):
+        self._data = data
+
+    async def download_as_bytearray(self):
+        return bytearray(self._data)
+
+
+class FakeAnimation:
+    """Stand-in for a telegram.Animation (a GIF is an MP4)."""
+
+    def __init__(self, data=b"fake-mp4-bytes", file_size=100):
+        self._data = data
+        self.file_size = file_size
+
+    async def get_file(self):
+        return FakeAnimationFile(self._data)
+
+
+class FakeSticker:
+    """Stand-in for a telegram.Sticker: static webp by default,
+    video (.webm) when is_video, animated (.tgs) when is_animated."""
+
+    def __init__(self, emoji=None, data=b"fake-webp-bytes",
+                 file_size=100, is_video=False, is_animated=False):
+        self.emoji = emoji
+        self._data = data
+        self.file_size = file_size
+        self.is_video = is_video
+        self.is_animated = is_animated
+
+    async def get_file(self):
+        return FakeAnimationFile(self._data)
 
 
 class TestVoiceStyle(unittest.TestCase):
@@ -403,6 +688,8 @@ class FakePaxyo:
                  delayed_none=False, claim_ok=True,
                  services=None, status_by_order=None, admin_stats=None,
                  my_referral=None, referral_error=None,
+                 referral_error_status=400, referral_none=False,
+                 referral_rows=None, balances=None,
                  cancel_refund_result=None, cancel_refund_error=None,
                  cancel_refund_results=None,
                  fail_refund_result=None, fail_refund_error=None,
@@ -425,7 +712,8 @@ class FakePaxyo:
                  fraud_flags=None, fraud_none=False,
                  order_records=None, order_status_none=False,
                  split_cover_live=False, dripfeed_live=False,
-                 prefs=None):
+                 prefs=None, reliability=None, pauses=None,
+                 pause_result=None):
         self._balance = balance
         self._status = status
         self._status_by_order = dict(status_by_order or {})
@@ -433,6 +721,16 @@ class FakePaxyo:
         self.admin_stats_calls = 0
         self._my_referral = my_referral
         self._referral_error = referral_error
+        self._referral_error_status = referral_error_status
+        self._referral_none = referral_none
+        # Referral rows the fake already holds: {telegram_id:
+        # {"referrer": int, "code": str}} — first-wins, like the
+        # server. Per-user balances for the deposit-bonus mirror.
+        self._referral_rows = dict(referral_rows or {})
+        self.balances = dict(balances or {})
+        self._deposits_completed = set()
+        self._referrer_bonus_paid = set()
+        self._invitee_bonus_paid = set()
         self.referrals_recorded = []
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
@@ -512,6 +810,18 @@ class FakePaxyo:
         # bot persists what the customer set.
         self._prefs = dict(prefs) if prefs is not None else None
         self.prefs_saved = []
+        # Cancel-cutting (16 Nov 2026): the reliability map (GET
+        # /service-reliability), the active pauses (GET
+        # /service-pauses?active=1) and the pause-record reply
+        # (POST /service-pause). All None by default — the
+        # endpoints are not live yet, so the real client returns
+        # None on their 404.
+        self._reliability = (
+            dict(reliability) if reliability is not None else None
+        )
+        self._pauses = list(pauses) if pauses is not None else None
+        self._pause_result = pause_result
+        self.record_service_cancel_calls = []
         self._services = list(services) if services is not None else SAMPLE_SERVICES
         self.orders_created = []
         self.order_keys = []
@@ -911,6 +1221,32 @@ class FakePaxyo:
         self.admin_stats_calls += 1
         return self._admin_stats
 
+    async def service_reliability(self):
+        """Mirror GET /service-reliability (cancel-cutting item 1,
+        16 Nov 2026). None by default (404: endpoint not live
+        yet); a seeded dict is returned as a copy."""
+        if self._reliability is None:
+            return None
+        return dict(self._reliability)
+
+    async def service_pauses(self):
+        """Mirror GET /service-pauses?active=1 (cancel-cutting
+        item 2). None by default (404); a seeded list is returned
+        as a copy."""
+        if self._pauses is None:
+            return None
+        return list(self._pauses)
+
+    async def record_service_cancel(self, provider, service_id,
+                                    order_id=None):
+        """Mirror POST /service-pause (cancel-cutting item 2).
+        Records the call and returns the seeded reply (None by
+        default — 404: endpoint not live yet)."""
+        self.record_service_cancel_calls.append(
+            (provider, service_id, order_id)
+        )
+        return self._pause_result
+
     async def get_price_snapshot(self):
         """Mirror GET /price-watch/snapshot (feature 6, 15 Nov
         2026). Returns a copy of the seeded snapshot ({} when
@@ -1011,26 +1347,116 @@ class FakePaxyo:
 
     async def record_referral(self, telegram_id, code):
         """Mirror POST /referrals (per-user invite codes, 15 Nov
-        2026). referral_error=<message> raises the HTTP error the
-        real client raises when the server rejects the referral
-        (400 invalid/own code, 409 already deposited)."""
+        2026; both-sides bonus, 16 Nov 2026). Resolves the referrer
+        from the code with the real derivation (shared code -> 0),
+        first-wins, 409 when the user already deposited, 400
+        (referral_error, referral_error_status) on a server
+        rejection, None when referral_none (404: endpoint not live
+        yet). Records the row, so a later credit_first_deposit can
+        pay the bonus for it."""
+        if self._referral_none:
+            return None
         if self._referral_error is not None:
             req = bot.httpx.Request(
                 "POST", "https://paxyo.et/api/bot/referrals"
             )
             resp = bot.httpx.Response(
-                400, json={"error": self._referral_error}, request=req
+                self._referral_error_status,
+                json={"error": self._referral_error}, request=req
             )
             raise bot.httpx.HTTPStatusError(
-                "bad request", request=req, response=resp
+                "referral rejected", request=req, response=resp
             )
+        code = str(code or "").strip().upper()
+
+        def _reject(status, message):
+            req = bot.httpx.Request(
+                "POST", "https://paxyo.et/api/bot/referrals"
+            )
+            resp = bot.httpx.Response(
+                status, json={"error": message}, request=req
+            )
+            raise bot.httpx.HTTPStatusError(
+                "referral rejected", request=req, response=resp
+            )
+
+        if code == bot.INVITE_CODE:
+            referrer = 0
+        else:
+            referrer = bot.invite_code_owner(code)
+            if referrer is None:
+                _reject(400, "Invite code is not valid.")
+            if referrer == telegram_id:
+                _reject(400, "You cannot use your own invite code.")
+        existing = self._referral_rows.get(telegram_id)
+        if existing:
+            return {
+                "ok": True,
+                "referrer_telegram_id": existing["referrer"],
+                "code_used": existing["code"],
+                "already_recorded": True,
+            }
+        if telegram_id in self._deposits_completed:
+            _reject(
+                409,
+                "User already deposited; a referral cannot be "
+                "recorded afterwards.",
+            )
+        self._referral_rows[telegram_id] = {
+            "referrer": referrer, "code": code,
+        }
         self.referrals_recorded.append({
             "telegram_id": telegram_id, "code": code,
         })
         return {
-            "ok": True, "referrer_telegram_id": 123456789,
+            "ok": True, "referrer_telegram_id": referrer,
             "code_used": code, "already_recorded": False,
         }
+
+    def credit_first_deposit(self, telegram_id, amount):
+        """Mirror the deposit-credit + ref_maybe_credit_bonus hook
+        (server/api-referrals.php, both-sides bonus, 16 Nov 2026):
+        credits the deposit to the user's balance, then — ONLY on
+        their first completed deposit — credits +20% to the invitee
+        AND +20% to the referrer (shared code: invitee only). Each
+        side is guarded by its own paid-set, so a second deposit (or
+        a retry) pays nothing twice. Returns the hook's result dict.
+        The PHP file is the source of truth; this fake mirrors its
+        contract for the offline tests."""
+        amount = round(float(amount), 2)
+        self.balances[telegram_id] = round(
+            self.balances.get(telegram_id, 0.0) + amount, 2)
+        out = {
+            "referrer_paid": False, "referrer_bonus": 0.0,
+            "referrer": 0, "invitee_paid": False,
+            "invitee_bonus": 0.0, "reason": "not the first deposit",
+        }
+        if telegram_id in self._deposits_completed:
+            return out
+        self._deposits_completed.add(telegram_id)
+        row = self._referral_rows.get(telegram_id)
+        if not row:
+            out["reason"] = "no referral recorded"
+            return out
+        bonus = round(amount * 0.20, 2)
+        if bonus <= 0:
+            out["reason"] = "bonus rounds to zero"
+            return out
+        out["referrer"] = row["referrer"]
+        out["reason"] = "ok"
+        if telegram_id not in self._invitee_bonus_paid:
+            self.balances[telegram_id] = round(
+                self.balances[telegram_id] + bonus, 2)
+            self._invitee_bonus_paid.add(telegram_id)
+            out["invitee_paid"] = True
+            out["invitee_bonus"] = bonus
+        if row["referrer"] > 0 and telegram_id not in self._referrer_bonus_paid:
+            self.balances[row["referrer"]] = round(
+                self.balances.get(row["referrer"], 0.0) + bonus, 2)
+            self._referrer_bonus_paid.add(telegram_id)
+            out["referrer_paid"] = True
+            out["referrer_bonus"] = bonus
+        return out
 
     async def my_referral(self, telegram_id):
         """Mirror GET /referrals — the seeded record, or None when
@@ -1408,7 +1834,10 @@ def make_pending(user_id=1):
     return {
         "user_id": user_id,
         "service": SAMPLE_SERVICES[0],
-        "link": "https://instagram.com/p/x",
+        # A profile link: the link check (16 Nov 2026) refuses a
+        # followers order to a post link, so the pending fixture
+        # must be a profile link for placement to succeed.
+        "link": "https://instagram.com/someuser",
         "quantity": 1000,
         "total": 42.0,
     }
@@ -1527,17 +1956,17 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
         summary = msg.text_sent[0]
         for fragment in (
             "Order ተፈጽሟል", "Instagram Followers", "1000",
-            "https://instagram.com/p/x", "42.00", "1827", "pending",
+            "https://instagram.com/someuser", "42.00", "1827", "pending",
         ):
             self.assertIn(fragment, summary)
         self.assertEqual(
             msg.markups[0].inline_keyboard[0][0].callback_data,
             "reorder:1827",
         )
-        # The hint is in Amharic for this user, with the quick
-        # keyboard under it.
+        # The hint is in Amharic for this user; the quick keyboard
+        # under it is hidden now (16 Nov 2026).
         self.assertIn("ተጠናቋል", msg.text_sent[1])
-        self.assertTrue(hasattr(msg.markups[1], "keyboard"))
+        self.assertIsInstance(msg.markups[1], bot.ReplyKeyboardRemove)
         self.assertEqual(bot.PENDING, {})
         self.assertEqual(bot.LAST_ORDER[1], 1827)
         self.assertEqual(len(fake_paxyo.orders_created), 1)
@@ -1561,7 +1990,10 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
             msg.markups[0].inline_keyboard[0][0].callback_data,
             "reorder:1827",
         )
-        self.assertIn("buttons below", msg.text_sent[1])
+        # The hint no longer names buttons (16 Nov 2026 triage):
+        # the reply keyboard was hidden.
+        self.assertIn(
+            "Tell me what you'd like to do next", msg.text_sent[1])
 
     async def test_acceptance_without_pending_is_not_an_order(self):
         msg = FakeMessage()
@@ -1585,7 +2017,7 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
         summary = query.edited[0]
         for fragment in (
             "Order placed!", "Instagram Followers", "1000",
-            "https://instagram.com/p/x", "42.00", "1827", "pending",
+            "https://instagram.com/someuser", "42.00", "1827", "pending",
         ):
             self.assertIn(fragment, summary)
         self.assertEqual(bot.PENDING, {})
@@ -4196,6 +4628,108 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.deposit_status_checked, ["dep-9"])
 
 
+class NoCheckoutUrlPaxyo(FakePaxyo):
+    """A deposit record with no checkout URL — the server path
+    when Chapa answers with a USSD push only (or Direct Charge is
+    off and the record carries no link)."""
+
+    async def create_deposit(self, telegram_id, amount, method, phone,
+                             promo_code=None):
+        record = await super().create_deposit(
+            telegram_id, amount, method, phone, promo_code=promo_code
+        )
+        record.pop("checkout_url", None)
+        return record
+
+
+class TestDepositQr(unittest.IsolatedAsyncioTestCase):
+    """Deposit by QR (ideas batch 1 #9, 16 Nov 2026): when the
+    server actually returns a checkout URL for the deposit, the
+    bot sends a QR photo of it alongside the instructions; with
+    no checkout URL there is no photo and nothing is invented."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.PENDING_REFILL, bot.USER_TRAITS,
+            bot.USUAL_SERVICE, bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.CANCELLED_DRAFT, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+        ):
+            store.clear()
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING_DEPOSIT, bot.DEPOSIT_DRAFT, bot.LAST_DEPOSIT,
+        ):
+            store.clear()
+
+    async def _confirm(self, fake):
+        # The full-sentence deposit, then the Confirm tap.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "deposit", amount=10, method="telebirr",
+                phone="099387383",
+            )),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None,
+                "let me deposit 10 br by telebirr and my phone "
+                "number is 099387383",
+            )
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        query = FakeQuery(
+            f"confirm:{confirm_id}", message_text="Please confirm:")
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        return query
+
+    def test_make_deposit_qr_png_valid_url(self):
+        png = bot.make_deposit_qr_png(
+            "https://checkout.chapa.co/pay/dep-1")
+        self.assertIsNotNone(png)
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertGreater(len(png), 100)
+
+    def test_make_deposit_qr_png_rejects_non_url(self):
+        for bad in (None, "", "not a url", "ftp://example.com/x"):
+            self.assertIsNone(bot.make_deposit_qr_png(bad))
+
+    async def test_confirm_sends_qr_photo_when_checkout_url(self):
+        query = await self._confirm(FakePaxyo())
+        self.assertIn(
+            "Open: https://checkout.chapa.co/pay/dep-1",
+            query.edited[0],
+        )
+        self.assertEqual(len(query.message.photos_sent), 1)
+        photo, caption = query.message.photos_sent[0]
+        self.assertEqual(photo.filename, "deposit-qr.png")
+        self.assertTrue(
+            photo.input_file_content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(
+            caption, "Scan this code with your phone camera to pay.")
+
+    async def test_confirm_sends_no_qr_without_checkout_url(self):
+        query = await self._confirm(NoCheckoutUrlPaxyo())
+        self.assertNotIn("Open:", query.edited[0])
+        self.assertEqual(query.message.photos_sent, [])
+
+    async def test_qr_failure_never_breaks_deposit(self):
+        fake = FakePaxyo()
+        with mock.patch(
+            "bot.make_deposit_qr_png", side_effect=RuntimeError("boom")
+        ):
+            query = await self._confirm(fake)
+        self.assertEqual(len(fake.deposits_created), 1)
+        self.assertIn("10.00 ETB", query.edited[0])
+        self.assertEqual(query.message.photos_sent, [])
+
+
 class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
     """Deposit recheck (owner, 13 Nov 2026): "did my deposit go
     through?" / "I paid" must recheck with Chapa and say what
@@ -4915,14 +5449,21 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.promo_validates, [])
         self.assertEqual(bot.PROMO_OFFER, {})
 
-    async def test_invite_code_gets_invite_reply_not_promo(self):
-        # The shared invite code is a real invite code, not a promo
-        # code: the user gets their invite link, never a "does not
-        # exist" from the promo endpoint.
+    async def test_invite_code_gets_registered_not_invite_card(self):
+        # Both-sides referral bonus (16 Nov 2026): typing a code
+        # registers the referrer — it must NEVER show the
+        # invite-friends card (that card is only for "my invite
+        # link" requests; the old reply was the live bug, 19:27 EAT
+        # 16 Nov 2026). The shared code registers referrer 0 and
+        # still confirms the invitee's own 20%.
         msg, fake = await self._turns([("REF3723FB335", None)])
         self.assertEqual(fake.promo_validates, [])
-        self.assertIn("Invite your friends", msg.text_sent[0])
-        self.assertIn("t.me/paxorder_bot?start=", msg.text_sent[0])
+        self.assertIn("You're in!", msg.text_sent[0])
+        self.assertIn("20% bonus", msg.text_sent[0])
+        self.assertNotIn("Invite your friends", msg.text_sent[0])
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": "REF3723FB335"},
+        ])
         self.assertEqual(bot.VALIDATED_PROMO, {})
 
     async def test_deposit_confirm_card_shows_code(self):
@@ -5119,6 +5660,392 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
             bot._promo_failure_text({"ok": False}, "en"),
             "That promo code isn't valid.",
         )
+
+
+class TestInviteCodeEntry(unittest.IsolatedAsyncioTestCase):
+    """In-chat invite codes + both-sides referral bonus (William,
+    19:27 EAT 16 Nov 2026): a new user types a friend's REF code in
+    the chat and the referrer is registered; on the new user's FIRST
+    deposit, the new user gets +20% AND the code owner gets +20%.
+    The invite-friends card is only for "my invite link" requests —
+    typing a code must never show it (live bug, 19:27 EAT)."""
+
+    FRIEND_CODE = "REF21I3V91B"  # owner 123456789
+    WILLIAM = 779060335
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.DEPOSIT_DRAFT,
+            bot.PENDING_DEPOSIT, bot.VALIDATED_PROMO,
+            bot.PROMO_DEPOSIT, bot.PROMO_OFFER,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.DEPOSIT_DRAFT,
+            bot.PENDING_DEPOSIT, bot.VALIDATED_PROMO,
+            bot.PROMO_DEPOSIT, bot.PROMO_OFFER, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns if intent is not None]
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(side_effect=intents),
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch(
+            "bot.speak_reply"
+        ):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    def _start_context(self, *args):
+        context = mock.Mock()
+        context.args = list(args)
+        return context
+
+    async def _run_start(self, fake, context, user=None, update_id=910101):
+        msg = FakeMessage("/start")
+        update = FakeUpdate(msg, user=user or FakeUser())
+        update.update_id = update_id
+        with mock.patch("bot.paxyo", fake):
+            await bot.start(update, context)
+        return msg
+
+    async def test_bare_code_registers_referrer(self):
+        msg, fake = await self._turns([(self.FRIEND_CODE, None)])
+        self.assertIn("You're in!", msg.text_sent[0])
+        self.assertIn("20% bonus", msg.text_sent[0])
+        self.assertIn("friend who shared the code", msg.text_sent[0])
+        self.assertNotIn("Invite your friends", msg.text_sent[0])
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": self.FRIEND_CODE},
+        ])
+        self.assertEqual(
+            fake._referral_rows[1]["referrer"], 123456789)
+
+    async def test_my_code_is_phrasing_registers(self):
+        msg, fake = await self._turns([
+            ("my code is " + self.FRIEND_CODE, None),
+        ])
+        self.assertIn("You're in!", msg.text_sent[0])
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": self.FRIEND_CODE},
+        ])
+
+    async def test_own_code_rejected(self):
+        # William types his own code REFCVTYSVA3: never a
+        # self-referral, and no server call at all.
+        msg, fake = await self._turns(
+            [("REFCVTYSVA3", None)],
+            user=FakeUser(user_id=self.WILLIAM),
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["That's your own code — share it with a friend instead."],
+        )
+        self.assertEqual(fake.referrals_recorded, [])
+
+    async def test_invalid_code_rejected(self):
+        # Last char changed: the checksum fails locally.
+        msg, fake = await self._turns([("REF21I3V91C", None)])
+        self.assertEqual(
+            msg.text_sent,
+            ["I don't recognise that code — check it and try again."],
+        )
+        self.assertEqual(fake.referrals_recorded, [])
+
+    async def test_shared_code_registers_invitee_only(self):
+        msg, fake = await self._turns([("REF3723FB335", None)])
+        self.assertIn("You're in!", msg.text_sent[0])
+        self.assertIn("20% bonus", msg.text_sent[0])
+        self.assertNotIn("friend who shared the code", msg.text_sent[0])
+        self.assertEqual(fake._referral_rows[1]["referrer"], 0)
+
+    async def test_already_referred_rejected(self):
+        other = bot.user_invite_code(987654321)
+        fake = FakePaxyo(referral_rows={
+            1: {"referrer": 123456789, "code": self.FRIEND_CODE},
+        })
+        msg, fake = await self._turns([(other, None)], paxyo=fake)
+        self.assertEqual(
+            msg.text_sent,
+            ["You already have a referrer — this code can't be used."],
+        )
+        self.assertEqual(fake.referrals_recorded, [])
+
+    async def test_already_deposited_rejected(self):
+        fake = FakePaxyo()
+        fake.credit_first_deposit(1, 100)
+        msg, fake = await self._turns(
+            [(self.FRIEND_CODE, None)], paxyo=fake)
+        self.assertEqual(
+            msg.text_sent,
+            ["You've already made your first deposit, so this code "
+             "can't be used now."],
+        )
+        self.assertEqual(fake.referrals_recorded, [])
+
+    async def test_endpoint_not_live_says_so(self):
+        fake = FakePaxyo(referral_none=True)
+        msg, fake = await self._turns(
+            [(self.FRIEND_CODE, None)], paxyo=fake)
+        self.assertEqual(
+            msg.text_sent,
+            ["I couldn't save that code right now — please try "
+             "again later."],
+        )
+        self.assertEqual(fake.referrals_recorded, [])
+
+    async def test_invite_card_says_both_get_20(self):
+        msg, _ = await self._turns(
+            [("my invite link", intent_of("invite"))])
+        self.assertIn("REF163", msg.text_sent[0])
+        self.assertIn(
+            "https://t.me/paxorder_bot?start=REF163", msg.text_sent[0])
+        self.assertIn("they get a 20% bonus — and so do you",
+                      msg.text_sent[0])
+
+    async def test_first_deposit_credits_both_once(self):
+        fake = FakePaxyo(balances={1: 0.0, 123456789: 500.0})
+        await fake.record_referral(1, self.FRIEND_CODE)
+        result = fake.credit_first_deposit(1, 100)
+        self.assertTrue(result["invitee_paid"])
+        self.assertTrue(result["referrer_paid"])
+        self.assertEqual(result["invitee_bonus"], 20.0)
+        self.assertEqual(result["referrer_bonus"], 20.0)
+        self.assertEqual(fake.balances[1], 120.0)
+        self.assertEqual(fake.balances[123456789], 520.0)
+        # Second deposit: the deposit itself lands, no bonus either side.
+        result2 = fake.credit_first_deposit(1, 50)
+        self.assertFalse(result2["invitee_paid"])
+        self.assertFalse(result2["referrer_paid"])
+        self.assertEqual(fake.balances[1], 170.0)
+        self.assertEqual(fake.balances[123456789], 520.0)
+
+    async def test_shared_code_first_deposit_pays_invitee_only(self):
+        fake = FakePaxyo(balances={1: 0.0})
+        await fake.record_referral(1, "REF3723FB335")
+        result = fake.credit_first_deposit(1, 100)
+        self.assertTrue(result["invitee_paid"])
+        self.assertFalse(result["referrer_paid"])
+        self.assertEqual(result["referrer"], 0)
+        self.assertEqual(fake.balances[1], 120.0)
+
+    async def test_no_referral_no_bonus(self):
+        fake = FakePaxyo(balances={1: 0.0})
+        result = fake.credit_first_deposit(1, 100)
+        self.assertFalse(result["invitee_paid"])
+        self.assertFalse(result["referrer_paid"])
+        self.assertEqual(fake.balances[1], 100.0)
+
+    async def test_deep_link_path_credits_both(self):
+        # ?start= deep link: /start records the referrer, and the
+        # first deposit after it credits both sides 20%.
+        fake = FakePaxyo(balances={1: 0.0, 123456789: 500.0})
+        msg = await self._run_start(
+            fake, self._start_context(self.FRIEND_CODE))
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": self.FRIEND_CODE},
+        ])
+        self.assertEqual(len(msg.text_sent), 1)  # greeting only
+        result = fake.credit_first_deposit(1, 100)
+        self.assertTrue(result["invitee_paid"])
+        self.assertTrue(result["referrer_paid"])
+        self.assertEqual(fake.balances[1], 120.0)
+        self.assertEqual(fake.balances[123456789], 520.0)
+
+
+class TestQuoteMatchesOrder(unittest.IsolatedAsyncioTestCase):
+    """Quoted price vs order price (William, 19:28 EAT 16 Nov 2026):
+    the bot quoted 1.6 ETB for 1,000 views and then handed the user
+    "Israel Traffic from iPhone Devices" at 1,118.04 ETB. The
+    Confirm card must show the service whose price was quoted, at
+    that price. A plain views request must pick a SOCIAL views
+    service — never a website-traffic service or a geo-targeted
+    service unless the user names the country."""
+
+    LINK = "https://www.tiktok.com/@someone/video/123"
+
+    def _catalogue(self):
+        return [
+            {"service": 1861, "name": "TikTok Video Views | Cheapest",
+             "category": "TikTok", "rate_etb_per_1000": 1.51,
+             "average_time": "30 minutes", "min": 100, "max": 100000},
+            {"service": 1862, "name": "TikTok Video Views | Fast",
+             "category": "TikTok", "rate_etb_per_1000": 1.60,
+             "average_time": "15 minutes", "min": 10, "max": 100000},
+            {"service": 9001,
+             "name": "Israel Traffic from iPhone Devices",
+             "category": "Website Traffic",
+             "rate_etb_per_1000": 1118.04,
+             "average_time": "5 minutes", "min": 100, "max": 100000},
+            {"service": 9002, "name": "USA Instagram Followers | Real",
+             "category": "Instagram", "rate_etb_per_1000": 50.00,
+             "average_time": "10 minutes", "min": 100, "max": 100000},
+            {"service": 9003, "name": "Instagram Followers | Fast",
+             "category": "Instagram", "rate_etb_per_1000": 21.00,
+             "average_time": "20 minutes", "min": 100, "max": 100000},
+            {"service": 9004, "name": "Israel TikTok Views",
+             "category": "TikTok", "rate_etb_per_1000": 5.00,
+             "average_time": "10 minutes", "min": 100, "max": 100000},
+        ]
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.QUOTED_SERVICE,
+            bot.NUDGE_SERVICE, bot.USUAL_SERVICE,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.QUOTED_SERVICE,
+            bot.NUDGE_SERVICE, bot.USUAL_SERVICE, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo(services=self._catalogue())
+        intents = [intent for _, intent in turns if intent is not None]
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(side_effect=intents),
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch(
+            "bot.speak_reply"
+        ):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    def _names(self, picks):
+        return [s["name"] for s in picks]
+
+    def test_empty_hint_never_picks_traffic_or_geo(self):
+        picks = bot.pick_services(self._catalogue(), limit=10)
+        self.assertTrue(picks)
+        for name in self._names(picks):
+            self.assertNotIn("Traffic", name)
+            self.assertNotIn("Israel", name)
+            self.assertNotIn("USA", name)
+        self.assertEqual(picks[0]["service"], 1862)
+
+    def test_views_request_never_picks_traffic_or_geo(self):
+        picks = bot.pick_services(
+            self._catalogue(), service_hint="views", limit=10)
+        self.assertTrue(picks)
+        for name in self._names(picks):
+            self.assertNotIn("Traffic", name)
+            self.assertNotIn("Israel", name)
+        cheapest = bot.cheapest_service(
+            self._catalogue(), service_hint="views")
+        self.assertEqual(cheapest["service"], 1861)
+
+    def test_geo_service_only_when_country_named(self):
+        plain = bot.pick_services(
+            self._catalogue(), service_hint="tiktok followers",
+            limit=10)
+        self.assertNotIn(
+            "USA Instagram Followers | Real", self._names(plain))
+        named = bot.pick_services(
+            self._catalogue(), service_hint="usa tiktok followers",
+            limit=10)
+        self.assertEqual(
+            self._names(named), ["USA Instagram Followers | Real"])
+        israel = bot.pick_services(
+            self._catalogue(), service_hint="israel tiktok views",
+            limit=10)
+        self.assertIn("Israel TikTok Views", self._names(israel))
+        self.assertNotIn(
+            "Israel Traffic from iPhone Devices", self._names(israel))
+
+    def test_traffic_service_only_when_traffic_named(self):
+        plain = bot.pick_services(
+            self._catalogue(), service_hint="views", limit=10)
+        self.assertNotIn(
+            "Israel Traffic from iPhone Devices", self._names(plain))
+        asked = bot.pick_services(
+            self._catalogue(), platform="website-traffic",
+            service_hint="website traffic", limit=10)
+        self.assertIn(
+            "Israel Traffic from iPhone Devices", self._names(asked))
+        asked_hint = bot.pick_services(
+            self._catalogue(), service_hint="traffic", limit=10)
+        self.assertIn(
+            "Israel Traffic from iPhone Devices",
+            self._names(asked_hint))
+
+    async def test_cheapest_quote_then_order_same_service(self):
+        # The discriminating case: the cheapest quote (1.51) is NOT
+        # the fastest pick (1.60). Without the pin, the card would
+        # show the fastest; with it, the card shows the quoted
+        # service at the quoted price.
+        msg, _ = await self._turns([
+            ("what is the cheapest tiktok views", None),
+            ("order 1000 tiktok views " + self.LINK,
+             intent_of(
+                 "order", platform="tiktok",
+                 service_hint="tiktok views", link=self.LINK,
+                 quantity=1000,
+             )),
+        ])
+        self.assertIn("1.51", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1861)
+        self.assertEqual(pending["total"], 1.51)
+
+    async def test_fastest_quote_then_order_same_service(self):
+        # The screenshot's exact numbers: quoted 1.6, card 1.6 —
+        # never the 1,118.04 traffic service.
+        msg, _ = await self._turns([
+            ("how much are tiktok views", None),
+            ("order 1000 tiktok views " + self.LINK,
+             intent_of(
+                 "order", platform="tiktok",
+                 service_hint="tiktok views", link=self.LINK,
+                 quantity=1000,
+             )),
+        ])
+        self.assertIn("1.60", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1862)
+        self.assertEqual(pending["total"], 1.60)
+        self.assertNotIn("Traffic", msg.text_sent[1])
+
+    async def test_quoted_service_below_min_requotes_plainly(self):
+        # The quoted cheapest service needs min 100; the user orders
+        # 10. The card shows the next service that fits (1.60, min
+        # 10) and says plainly why the quoted one was not used.
+        msg, _ = await self._turns([
+            ("what is the cheapest tiktok views", None),
+            ("order 10 tiktok views " + self.LINK,
+             intent_of(
+                 "order", platform="tiktok",
+                 service_hint="tiktok views", link=self.LINK,
+                 quantity=10,
+             )),
+        ])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1862)
+        self.assertIn("Heads up", msg.text_sent[1])
+        self.assertIn("TikTok Video Views", msg.text_sent[1])
+        self.assertIn("needs a quantity between 100 and 100000",
+                      msg.text_sent[1])
+        self.assertIn("1.60", msg.text_sent[1])
 
 
 class TestReportProblemApiClient(unittest.IsolatedAsyncioTestCase):
@@ -5328,8 +6255,8 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
             "there's a problem with my order"))
         self.assertEqual(
             bot.extract_quoted_order_id(
-                "✅ Your order is delivered — 100 TikTok views, "
-                "order #1841. Thank you for ordering with Paxyo! 🎉"),
+                "Your order is delivered — 100 TikTok views, "
+                "order #1841. Thank you for ordering with Paxyo!"),
             1841)
         self.assertEqual(
             bot.extract_quoted_order_id(
@@ -5459,7 +6386,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
             [("there's a problem with my order", None)], paxyo=fake)
         self.assertIn("Which order is this about?", msg.text_sent[0])
         self.assertIn("order number", msg.text_sent[0])
-        self.assertIsNone(msg.markups[0])
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)  # no Confirm card — the reply keyboard is hidden
 
     async def test_typed_id_in_pick_step_accepted_then_filed(self):
         fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
@@ -5644,8 +6571,8 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         msg = FakeMessage()
         update = FakeUpdate(msg)
         fake = FakePaxyo()
-        quoted = ("✅ Your order is delivered — 100 TikTok views, "
-                  "order #1841. Thank you for ordering with Paxyo! 🎉")
+        quoted = ("Your order is delivered — 100 TikTok views, "
+                  "order #1841. Thank you for ordering with Paxyo!")
         with mock.patch(
             "bot.extract_intent", new=mock.AsyncMock(side_effect=[])
         ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
@@ -5667,8 +6594,8 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         msg = FakeMessage()
         update = FakeUpdate(msg)
         fake = FakePaxyo()
-        quoted = ("✅ Your order is delivered — 100 TikTok views, "
-                  "order #1841. Thank you for ordering with Paxyo! 🎉")
+        quoted = ("Your order is delivered — 100 TikTok views, "
+                  "order #1841. Thank you for ordering with Paxyo!")
         with mock.patch(
             "bot.extract_intent",
             new=mock.AsyncMock(
@@ -6182,6 +7109,97 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(msg.text_sent, ["How many? (for example 1000)"])
         self.assertEqual(bot.PARTIAL[1]["link"], "https://instagram.com/p/abc")
+
+    async def test_photo_link_with_metric_fills_hint(self):
+        # Ideas batch 1 #10 (16 Nov 2026): the metric vision saw
+        # in the screenshot rides into the draft with the link.
+        msg, _ = await self._send_photo(
+            self._vision(
+                summary="Screenshot of a TikTok video",
+                link="https://www.tiktok.com/@user/video/1234567890",
+                platform="tiktok", metric="views", want="order",
+            ),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(msg.text_sent, ["How many? (for example 1000)"])
+        self.assertEqual(
+            bot.PARTIAL[1]["link"],
+            "https://www.tiktok.com/@user/video/1234567890",
+        )
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+        self.assertIn("views", bot.PARTIAL[1]["service_hint"])
+
+    async def test_photo_link_platform_mismatch_link_wins(self):
+        # Vision's platform word disagrees with the link: the link
+        # decides, as in the text flow.
+        msg, _ = await self._send_photo(
+            self._vision(
+                summary="Screenshot of a TikTok video",
+                link="https://www.tiktok.com/@user/video/1234567890",
+                platform="instagram", metric="views", want="order",
+            ),
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(msg.text_sent, ["How many? (for example 1000)"])
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+
+    async def test_photo_scheme_less_link_normalized(self):
+        msg, _ = await self._send_photo(
+            self._vision(
+                summary="Screenshot of Instagram profile @someone",
+                link="instagram.com/someone", username="someone",
+                platform="instagram", metric="followers", want="order",
+            )
+        )
+        self.assertEqual(msg.text_sent, ["How many? (for example 1000)"])
+        self.assertEqual(
+            bot.PARTIAL[1]["link"], "https://instagram.com/someone")
+
+    async def test_photo_broken_link_never_injected(self):
+        # Vision read something that is not a usable post/profile
+        # URL: no draft with a broken link — the per-type link
+        # question instead, with the platform/metric kept.
+        msg, _ = await self._send_photo(
+            self._vision(
+                summary="Screenshot of an Instagram profile",
+                link="not a link at all",
+                platform="instagram", metric="followers", want="order",
+            )
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["Please send your Instagram profile link."],
+        )
+        self.assertNotIn("link", bot.PARTIAL[1])
+        self.assertEqual(bot.PARTIAL[1]["platform"], "instagram")
+        self.assertIn("followers", bot.PARTIAL[1]["service_hint"])
+
+    async def test_photo_no_link_with_platform_metric_seeds_draft(self):
+        # No link visible, but the picture shows a TikTok video:
+        # the draft keeps platform+metric and the bot asks for the
+        # link with the video question — never guessing a link.
+        msg, _ = await self._send_photo(
+            self._vision(
+                summary="Screenshot of a TikTok video, no URL visible",
+                platform="tiktok", metric="views", want="order",
+            )
+        )
+        self.assertEqual(
+            msg.text_sent, ["Please send the link of the video."])
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+        self.assertIn("views", bot.PARTIAL[1]["service_hint"])
+        self.assertNotIn("link", bot.PARTIAL[1])
+
+    async def test_photo_no_link_no_platform_still_unreadable(self):
+        msg, _ = await self._send_photo(
+            self._vision(summary="A blurry screenshot", want="order")
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["I couldn't read that picture — can you type what it "
+             "shows, or send a clearer screenshot?"],
+        )
+        self.assertEqual(bot.PARTIAL, {})
 
     async def test_username_only_asks_for_link(self):
         msg, _ = await self._send_photo(
@@ -7244,6 +8262,400 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
         )
 
 
+BUNDLE_SERVICES = [
+    {
+        "service": 6139, "name": "Telegram Post Views",
+        "category": "Telegram Post Views", "type": "Default",
+        "rate_etb_per_1000": 1.05, "min": 10, "max": 100000,
+        "average_time": "5 minutes", "active": True,
+        "provider_service_id": 6139,
+    },
+    {
+        "service": 6140, "name": "Telegram Post Likes",
+        "category": "Telegram Post Likes", "type": "Default",
+        "rate_etb_per_1000": 2.10, "min": 10, "max": 100000,
+        "average_time": "10 minutes", "active": True,
+        "provider_service_id": 6140,
+    },
+    {
+        "service": 6534,
+        "name": "Telegram Reactions + Free Views - Positive",
+        "category": "Telegram Reactions", "type": "Default",
+        "rate_etb_per_1000": 5.46, "min": 10, "max": 1000000,
+        "average_time": "25 minutes", "active": True,
+        "provider_service_id": 6534,
+    },
+]
+
+
+class BundlePaxyo(FakePaxyo):
+    """Telegram views + likes + reactions for a post bundle."""
+
+    async def services(self):
+        return [dict(s) for s in BUNDLE_SERVICES]
+
+
+class FailingLikesBundlePaxyo(BundlePaxyo):
+    """The likes leg fails at placement, the other two place."""
+
+    async def create_order(self, telegram_id, service_id, link, quantity,
+                           idempotency_key, **kwargs):
+        if service_id == 6140:
+            raise bot.httpx.HTTPStatusError(
+                "bad request",
+                request=bot.httpx.Request(
+                    "POST", "https://paxyo.et/api/bot/orders"),
+                response=bot.httpx.Response(
+                    400, json={"error": "no service"},
+                    request=bot.httpx.Request(
+                        "POST", "https://paxyo.et/api/bot/orders"),
+                ),
+            )
+        return await super().create_order(
+            telegram_id, service_id, link, quantity, idempotency_key,
+            **kwargs)
+
+
+class TestPostBundle(unittest.IsolatedAsyncioTestCase):
+    """Post bundle (ideas batch 1 #3, 16 Nov 2026): "Boost my new
+    post" orders views + likes + reactions for one post link — one
+    combined Confirm card, one grand total, three legs placed
+    sequentially, each watched so the normal rescue rules apply."""
+
+    LINK = "https://t.me/paxyo251/180"
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.PENDING_REFILL, bot.USER_TRAITS,
+            bot.USUAL_SERVICE, bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.CANCELLED_DRAFT, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.BUNDLE_DRAFT,
+            bot.PENDING_BUNDLE, bot.WATCHED_ORDERS,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PARTIAL, bot.PENDING_BATCH, bot.BUNDLE_DRAFT,
+            bot.PENDING_BUNDLE, bot.WATCHED_ORDERS, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or BundlePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _open_card(self, paxyo=None, quantities="1000"):
+        msg, fake = await self._turns([
+            ("Boost my new post", intent_of("unclear")),
+            (self.LINK, intent_of("unclear")),
+            (quantities, intent_of("unclear")),
+        ], paxyo=paxyo or BundlePaxyo())
+        self.assertIn("boost this post", msg.text_sent[2])
+        self.assertEqual(len(bot.PENDING_BUNDLE), 1)
+        return msg, fake
+
+    def test_bundle_detector(self):
+        self.assertTrue(bot.is_post_bundle_request("Boost my new post"))
+        self.assertTrue(bot.is_post_bundle_request("boost this post"))
+        self.assertTrue(bot.is_post_bundle_request("promote my latest post"))
+        self.assertFalse(
+            bot.is_post_bundle_request("boost my post with 1000 views"))
+        self.assertFalse(bot.is_post_bundle_request("boost my tiktok"))
+        self.assertFalse(bot.is_post_bundle_request("I want tiktok views"))
+
+    def test_bundle_quantities_parser(self):
+        self.assertEqual(
+            bot.bundle_quantities_from_text("1000"),
+            {"views": 1000, "likes": 1000, "reactions": 1000},
+        )
+        self.assertEqual(
+            bot.bundle_quantities_from_text(
+                "1000 views, 500 likes, 200 reactions"),
+            {"views": 1000, "likes": 500, "reactions": 200},
+        )
+        self.assertIsNone(
+            bot.bundle_quantities_from_text("1000 views, 500 likes"))
+        self.assertIsNone(bot.bundle_quantities_from_text("hello"))
+
+    async def test_bundle_asks_for_link_first(self):
+        msg, _ = await self._turns([
+            ("Boost my new post", intent_of("unclear")),
+        ])
+        self.assertEqual(
+            msg.text_sent,
+            ["Send the link of the post you want to boost."],
+        )
+        self.assertEqual(bot.BUNDLE_DRAFT[1]["quantities"], None)
+        self.assertEqual(bot.PENDING_BUNDLE, {})
+
+    async def test_bundle_link_then_asks_quantities(self):
+        msg, _ = await self._turns([
+            ("Boost my new post", intent_of("unclear")),
+            (self.LINK, intent_of("unclear")),
+        ])
+        self.assertIn(
+            "How many views, likes and reactions?",
+            msg.text_sent[1],
+        )
+        self.assertEqual(bot.BUNDLE_DRAFT[1]["link"], self.LINK)
+
+    async def test_bundle_full_flow_shows_combined_card(self):
+        msg, _ = await self._open_card()
+        card = msg.text_sent[2]
+        self.assertIn("Please confirm — boost this post:", card)
+        self.assertIn("Telegram Post Views", card)
+        self.assertIn("Telegram Post Likes", card)
+        self.assertIn("Telegram Reactions", card)
+        self.assertIn("×1000", card)
+        self.assertIn("Total: 8.61 ETB", card)
+        self.assertIsInstance(
+            msg.markups[2], bot.InlineKeyboardMarkup)
+        self.assertEqual(bot.BUNDLE_DRAFT, {})
+
+    async def test_bundle_per_leg_quantities(self):
+        msg, _ = await self._open_card(
+            quantities="1000 views, 500 likes, 200 reactions")
+        card = msg.text_sent[2]
+        self.assertIn("×1000", card)
+        self.assertIn("×500", card)
+        self.assertIn("×200", card)
+        self.assertIn("Total: 3.19 ETB", card)
+
+    async def test_bundle_confirm_button_places_three_legs_and_watches(self):
+        fake = BundlePaxyo(next_order_ids=[1901, 1902, 1903])
+        await self._open_card(paxyo=fake)
+        confirm_id = next(iter(bot.PENDING_BUNDLE))
+        query = FakeQuery(
+            f"confirm:{confirm_id}", message_text="Please confirm:")
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        self.assertEqual(len(fake.orders_created), 3)
+        self.assertEqual(len(set(fake.order_keys)), 3)
+        self.assertEqual(query.edited[0].count("✅"), 3)
+        self.assertEqual(bot.PENDING_BUNDLE, {})
+        # Every placed leg is watched, so the normal rescue rules
+        # apply per leg.
+        self.assertEqual(
+            set(bot.WATCHED_ORDERS), {"1901", "1902", "1903"})
+
+    async def test_bundle_yes_places_three_legs(self):
+        fake = BundlePaxyo(next_order_ids=[1901, 1902, 1903])
+        await self._open_card(paxyo=fake)
+        msg, _ = await self._turns(
+            [("yes", intent_of("unclear"))], paxyo=fake)
+        self.assertEqual(len(fake.orders_created), 3)
+        self.assertEqual(msg.text_sent[0].count("✅"), 3)
+
+    async def test_bundle_insufficient_balance_refuses_all(self):
+        fake = BundlePaxyo(balance=1.0)
+        await self._open_card(paxyo=fake)
+        confirm_id = next(iter(bot.PENDING_BUNDLE))
+        query = FakeQuery(
+            f"confirm:{confirm_id}", message_text="Please confirm:")
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        self.assertEqual(fake.orders_created, [])
+        self.assertIn("Not enough balance", query.edited[0])
+
+    async def test_bundle_failed_leg_reported_plainly(self):
+        fake = FailingLikesBundlePaxyo(
+            next_order_ids=[1901, 1902, 1903])
+        await self._open_card(paxyo=fake)
+        confirm_id = next(iter(bot.PENDING_BUNDLE))
+        query = FakeQuery(
+            f"confirm:{confirm_id}", message_text="Please confirm:")
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        self.assertEqual(len(fake.orders_created), 2)
+        self.assertEqual(query.edited[0].count("✅"), 2)
+        self.assertEqual(query.edited[0].count("❌"), 1)
+        self.assertIn("Likes", query.edited[0])
+
+    async def test_bundle_profile_link_refused(self):
+        msg, _ = await self._turns([
+            ("Boost my new post", intent_of("unclear")),
+            ("https://t.me/paxyo251", intent_of("unclear")),
+        ])
+        self.assertEqual(
+            msg.text_sent[1],
+            "Please send the link of the Telegram post.")
+        self.assertIsNone(bot.BUNDLE_DRAFT[1].get("link"))
+        self.assertEqual(bot.PENDING_BUNDLE, {})
+
+    async def test_bundle_draft_dropped_on_new_order(self):
+        msg, fake = await self._turns([
+            ("Boost my new post", intent_of("unclear")),
+            ("I want tiktok views",
+             intent_of("order", platform="tiktok",
+                       service_hint="tiktok views")),
+        ], paxyo=TikTokPaxyo())
+        self.assertEqual(bot.BUNDLE_DRAFT, {})
+        self.assertIn("link of the video", msg.text_sent[1])
+
+
+class TestCheckMyPost(unittest.IsolatedAsyncioTestCase):
+    """Check my post (ideas batch 2 #2, 16 Nov 2026): a link plus a
+    check word tells the user if the post is public, its current
+    views, and whether it is ready for an order. Counts come only
+    from the public Telegram page — never invented — and a check
+    never starts an order draft."""
+
+    LINK = "https://t.me/paxyo251/180"
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.BUNDLE_DRAFT,
+            bot.PENDING_BUNDLE, bot.PENDING_BATCH,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING, bot.PARTIAL, bot.BUNDLE_DRAFT,
+            bot.PENDING_BUNDLE, bot.PENDING_BATCH, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None, stats=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        patches = [
+            mock.patch(
+                "bot.extract_intent",
+                new=mock.AsyncMock(side_effect=intents),
+            ),
+            mock.patch("bot.paxyo", fake_paxyo),
+            mock.patch("bot.speak_reply"),
+        ]
+        if stats is not None:
+            patches.append(mock.patch(
+                "bot._fetch_telegram_post_stats",
+                new=mock.AsyncMock(return_value=stats),
+            ))
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    def test_check_detector(self):
+        self.assertTrue(bot.is_post_check_request(
+            "check my post " + self.LINK))
+        self.assertTrue(bot.is_post_check_request(
+            "is my post public? " + self.LINK))
+        self.assertTrue(bot.is_post_check_request(
+            "is this post ready for an order? " + self.LINK))
+        self.assertTrue(bot.is_post_check_request(
+            "how many views does this post have? " + self.LINK))
+        self.assertFalse(bot.is_post_check_request(self.LINK))
+        self.assertFalse(bot.is_post_check_request(
+            "I want 1000 views for " + self.LINK))
+        self.assertFalse(bot.is_post_check_request(
+            "how much are tiktok views?"))
+        self.assertFalse(bot.is_post_check_request("check my balance"))
+
+    def test_parse_telegram_post_html(self):
+        # The live markup (verified 16 Nov 2026): the count is
+        # reported exactly as the page shows it.
+        html = (
+            '<div class="tgme_widget_message_bubble">'
+            '<span class="tgme_widget_message_views">2.82M</span>'
+            '</div>'
+        )
+        self.assertEqual(
+            bot._parse_telegram_post_html(html), "2.82M")
+        self.assertIsNone(bot._parse_telegram_post_html(
+            '<div class="tgme_widget_message_bubble"></div>'))
+        self.assertIsNone(bot._parse_telegram_post_html(""))
+        self.assertIsNone(bot._parse_telegram_post_html(None))
+
+    async def test_public_post_with_views(self):
+        msg, _ = await self._turns([
+            ("check my post " + self.LINK, intent_of("unclear")),
+        ], stats={"public": True, "views": "2.82M"})
+        self.assertIn("public", msg.text_sent[0])
+        self.assertIn("2.82M views", msg.text_sent[0])
+        self.assertIn("ready for an order", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_public_post_without_views(self):
+        msg, _ = await self._turns([
+            ("check this post " + self.LINK, intent_of("unclear")),
+        ], stats={"public": True, "views": None})
+        self.assertIn("public", msg.text_sent[0])
+        self.assertIn("couldn't read", msg.text_sent[0])
+        self.assertIn("ready for an order", msg.text_sent[0])
+
+    async def test_private_post_says_so(self):
+        msg, _ = await self._turns([
+            ("check my post " + self.LINK, intent_of("unclear")),
+        ], stats={"public": False, "views": None})
+        self.assertIn("private or deleted", msg.text_sent[0])
+        self.assertIn("public post", msg.text_sent[0])
+
+    async def test_unreadable_page_says_so(self):
+        msg, _ = await self._turns([
+            ("check my post " + self.LINK, intent_of("unclear")),
+        ], stats={"public": None, "views": None})
+        self.assertIn("couldn't open", msg.text_sent[0])
+        self.assertNotIn("private or deleted", msg.text_sent[0])
+
+    async def test_profile_link_refused_plainly(self):
+        msg, _ = await self._turns([
+            ("check my post https://t.me/paxyo251",
+             intent_of("unclear")),
+        ], stats={"public": True, "views": "1K"})
+        self.assertIn("profile/channel link", msg.text_sent[0])
+        self.assertIn("Telegram", msg.text_sent[0])
+
+    async def test_unknown_link_refused_plainly(self):
+        msg, _ = await self._turns([
+            ("check my post https://example.com/some-post",
+             intent_of("unclear")),
+        ])
+        self.assertIn("can't check that link", msg.text_sent[0])
+
+    async def test_other_platform_counts_cannot_be_read(self):
+        msg, _ = await self._turns([
+            ("check my post https://instagram.com/p/abc",
+             intent_of("unclear")),
+        ])
+        self.assertIn("can't read its counts", msg.text_sent[0])
+        self.assertIn("Instagram", msg.text_sent[0])
+        self.assertIn("ready for an order", msg.text_sent[0])
+
+    async def test_bare_link_is_still_an_order(self):
+        msg, _ = await self._turns([
+            (self.LINK, intent_of(
+                "order", platform="telegram",
+                service_hint="telegram reactions", link=self.LINK,
+            )),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("How many?", msg.text_sent[0])
+        self.assertNotIn("public", msg.text_sent[0])
+
+
 class TestMidOrderChanges(unittest.IsolatedAsyncioTestCase):
     """Change / cancel / wait / refill while an order is in flight."""
 
@@ -7980,7 +9392,7 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
             "I want 1000 Instagram followers",
             intent_of("order", platform="instagram",
                       service_hint="followers",
-                      link="https://instagram.com/p/x", quantity=1000),
+                      link="https://instagram.com/someuser", quantity=1000),
             paxyo=paxyo,
         )
         await self._send(
@@ -8001,7 +9413,7 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
             "I want 1000 Instagram followers",
             intent_of("order", platform="instagram",
                       service_hint="followers",
-                      link="https://instagram.com/p/x", quantity=1000),
+                      link="https://instagram.com/someuser", quantity=1000),
             paxyo=paxyo,
         )
         confirm_id = next(iter(bot.PENDING))
@@ -9822,7 +11234,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("18.90", msg.text_sent[0])
         self.assertIn("per 1000", msg.text_sent[0])
         self.assertNotIn("Please send the link", msg.text_sent[0])
-        self.assertIsNone(msg.markups[0])  # no Confirm card
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)  # no Confirm card — the reply keyboard is hidden
 
     async def test_price_question_with_quantity_states_total(self):
         msg, _ = await self._turns([
@@ -9866,10 +11278,10 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
     async def test_reply_yes_to_confirm_card_places_order(self):
         fake_paxyo = FakePaxyo()
         await self._turns([
-            ("I want 1000 Instagram followers https://instagram.com/p/x",
+            ("I want 1000 Instagram followers https://instagram.com/someuser",
              intent_of("order", platform="instagram",
                        service_hint="followers",
-                       link="https://instagram.com/p/x", quantity=1000)),
+                       link="https://instagram.com/someuser", quantity=1000)),
         ], paxyo=fake_paxyo)
         self.assertEqual(len(bot.PENDING), 1)
         msg, _ = await self._on_text(
@@ -9921,6 +11333,44 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("9.45", table)
         self.assertIn("pending", table)
         self.assertIn("completed", table)
+
+    async def test_orders_by_platform_filters_to_tiktok(self):
+        # Ideas batch 1 #6 (16 Nov 2026): "Show my TikTok orders"
+        # lists only the TikTok orders, newest first.
+        second = dict(
+            FakePaxyo.RECENT_ORDER, id=1826, service_id=2001,
+            service_name="TikTok Video Views | Fast", quantity=500,
+            charge=9.45, status="completed",
+        )
+        msg, _ = await self._turns([
+            ("show my TikTok orders",
+             intent_of("orders", platform="tiktok")),
+        ], paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, second]))
+        table = msg.text_sent[0]
+        self.assertIn("Your TikTok orders:", table)
+        self.assertIn("1826", table)
+        self.assertNotIn("1827", table)
+        self.assertNotIn("Instagram Followers", table)
+
+    async def test_orders_by_platform_none_match_says_so_plainly(self):
+        msg, _ = await self._turns([
+            ("show my TikTok orders",
+             intent_of("orders", platform="tiktok")),
+        ], paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER]))
+        self.assertEqual(
+            msg.text_sent[0], "You have no TikTok orders yet.")
+
+    async def test_orders_unfiltered_still_lists_all(self):
+        second = dict(
+            FakePaxyo.RECENT_ORDER, id=1826, service_id=2001,
+            service_name="TikTok Video Views | Fast", quantity=500,
+            charge=9.45, status="completed",
+        )
+        msg, _ = await self._turns([
+            ("show my orders", intent_of("orders")),
+        ], paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, second]))
+        self.assertIn("1827", msg.text_sent[0])
+        self.assertIn("1826", msg.text_sent[0])
 
     # (8) no voice-order claims ------------------------------------------
 
@@ -9990,29 +11440,25 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
     # (10) GIFs and stickers ---------------------------------------------
 
     async def test_sticker_gets_reply(self):
-        # DeepSeek-first media replies (owner, 14 Nov 2026): the AI
-        # reacts first; with the AI down the deterministic fallback
-        # still answers — never silent.
+        # Vision-first media replies (owner, 16 Nov 2026): a
+        # sticker with no readable image gets the neutral rule-5
+        # line — never a "fun" guess, never silent.
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        with mock.patch(
-            "bot.ai_generate", new=mock.AsyncMock(return_value="")
-        ):
-            await bot.on_sticker(update, None)
+        await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("What would you like to order?", msg.text_sent[0])
+        self.assertIn("Got your message", msg.text_sent[0])
+        self.assertNotIn("fun", msg.text_sent[0].lower())
 
     async def test_gif_gets_reply(self):
         msg = FakeMessage()
         msg.caption = ""
         update = FakeUpdate(msg)
-        with mock.patch(
-            "bot.ai_generate", new=mock.AsyncMock(return_value="")
-        ):
-            await bot.on_animation(update, None)
+        await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("What would you like to order?", msg.text_sent[0])
+        self.assertIn("Got your message", msg.text_sent[0])
+        self.assertNotIn("fun", msg.text_sent[0].lower())
 
     async def test_captioned_gif_handled_from_caption(self):
         msg = FakeMessage()
@@ -10144,10 +11590,10 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
 
     async def test_humor_line_on_order_placed(self):
         msg, fake_paxyo = await self._turns([
-            ("I want 1000 Instagram followers https://instagram.com/p/x",
+            ("I want 1000 Instagram followers https://instagram.com/someuser",
              intent_of("order", platform="instagram",
                        service_hint="followers",
-                       link="https://instagram.com/p/x", quantity=1000)),
+                       link="https://instagram.com/someuser", quantity=1000)),
             ("yes", intent_of("unclear")),
         ])
         self.assertIn("Order placed!", msg.text_sent[1])
@@ -10286,10 +11732,10 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
     async def test_order_now_with_pending_card_places_it(self):
         fake_paxyo = FakePaxyo()
         await self._turns([
-            ("I want 1000 Instagram followers https://instagram.com/p/x",
+            ("I want 1000 Instagram followers https://instagram.com/someuser",
              intent_of("order", platform="instagram",
                        service_hint="followers",
-                       link="https://instagram.com/p/x", quantity=1000)),
+                       link="https://instagram.com/someuser", quantity=1000)),
         ], paxyo=fake_paxyo)
         self.assertEqual(len(bot.PENDING), 1)
         msg, _ = await self._turns([
@@ -13653,10 +15099,10 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
         # "please order now" with a Confirm card pending places the
         # order — it is never answered as chat.
         await self._send(
-            "I want 1000 Instagram followers https://instagram.com/p/x",
+            "I want 1000 Instagram followers https://instagram.com/someuser",
             intent_of("order", platform="instagram",
                       service_hint="followers",
-                      link="https://instagram.com/p/x", quantity=1000),
+                      link="https://instagram.com/someuser", quantity=1000),
         )
         self.assertEqual(len(bot.PENDING), 1)
         fake_paxyo = FakePaxyo()
@@ -16077,6 +17523,11 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
             bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
             bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
             bot.CANCELLED_DRAFT, bot.LAST_LANG,
+            # One-shot pins (16 Nov 2026 triage): a quote left by
+            # an earlier test pinned the wrong service into the
+            # link-platform test (#2001 Telegram members for a
+            # TikTok views quote).
+            bot.QUOTED_SERVICE, bot.NUDGE_SERVICE,
         ):
             store.clear()
         bot.CHAT_HISTORY.clear()
@@ -16107,6 +17558,7 @@ class _LanguageRoundBase(unittest.IsolatedAsyncioTestCase):
             bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
             bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
             bot.CANCELLED_DRAFT, bot.LAST_LANG,
+            bot.QUOTED_SERVICE, bot.NUDGE_SERVICE,
         ):
             store.clear()
         bot.CHAT_HISTORY.clear()
@@ -16403,6 +17855,67 @@ class TestPriceFastPath(_LanguageRoundBase):
         self.assertIn("18.90", reply)
         self.assertNotIn("Instagram", reply)
 
+    async def test_link_plus_price_word_answers_cheapest_for_link(self):
+        # Ideas batch 1 #2 (16 Nov 2026): a video link + "how much
+        # is the price" answers the cheapest VIEWS price for that
+        # link — not the fastest TikTok service of any metric (the
+        # Video Save service at 2.10, which the old code quoted).
+        # No draft is started and "How many?" is never asked.
+        msg = await self._send(
+            "https://www.tiktok.com/@user/video/1234567890 "
+            "how much is the price",
+            paxyo=TikTokPaxyo(),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("TikTok Video Views", reply)
+        self.assertIn("1.51 ETB per 1000", reply)
+        self.assertNotIn("2.10", reply)
+        self.assertNotIn("How many?", reply)
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_profile_link_plus_price_word_answers_followers(self):
+        # A profile link + a price word is about followers — the
+        # cheapest followers price, not the fastest (42.00).
+        msg = await self._send(
+            "https://instagram.com/someuser how much is the price",
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("Instagram Followers", reply)
+        self.assertIn("21.00 ETB per 1000", reply)
+        self.assertNotIn("42.00", reply)
+        self.assertEqual(bot.PARTIAL, {})
+
+    async def test_link_plus_price_word_named_metric_wins(self):
+        # A metric the message itself names ("likes") wins over
+        # the metric the link shape would imply (views).
+        msg = await self._send(
+            "https://www.tiktok.com/@user/video/1234567890 "
+            "how much are the likes",
+            paxyo=TikTokPaxyo(),
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("TikTok Likes", reply)
+        self.assertIn("10.00 ETB per 1000", reply)
+        self.assertNotIn("Views", reply)
+
+    async def test_bare_link_keeps_order_flow(self):
+        # A bare link with NO price word is still an order, not a
+        # price check: the bot asks "How many?" and quotes no price.
+        msg = await self._send(
+            "https://www.tiktok.com/@user/video/1234567890",
+            paxyo=TikTokPaxyo(),
+            intent=intent_of(
+                "order", platform="tiktok", service_hint="views",
+                link="https://www.tiktok.com/@user/video/1234567890",
+            ),
+        )
+        reply = msg.text_sent[-1]
+        self.assertIn("How many?", reply)
+        self.assertNotIn("ETB per 1000", reply)
+
     async def test_tiktok_likes_fastest_pick_matches_live_price(self):
         # The live 14 Nov 2026 figure (1,185.05 ETB for 5,000) is
         # the FASTEST TikTok Likes service (237.01/1000, "Instant
@@ -16418,6 +17931,184 @@ class TestPriceFastPath(_LanguageRoundBase):
         self.assertIn("1,185.05", reply)
         self.assertIn("5,000", reply)
         self.assertNotIn("31.50", reply)
+
+
+class StaleDraftPricePaxyo(FakePaxyo):
+    """TikTok views + Instagram views + the Telegram Reactions
+    Positive mix from William's 16 Nov 2026 screenshot (37.80
+    ETB/1000, min 50). Instagram views are faster AND cheaper than
+    TikTok views, so only the CURRENT draft can keep a bare price
+    question on TikTok — a stale reactions draft would answer
+    37.80."""
+
+    STALE_SERVICES = [
+        {
+            "service": 2001, "name": "TikTok Video Views | Fast",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 18.90, "min": 10, "max": 100000,
+            "average_time": "5 minutes", "active": True,
+        },
+        {
+            "service": 3001, "name": "Instagram Views | Fast",
+            "category": "Instagram Views", "type": "Default",
+            "rate_etb_per_1000": 9.00, "min": 10, "max": 100000,
+            "average_time": "1 minute", "active": True,
+        },
+        {
+            "service": 6534,
+            "name": "Telegram Reactions + Free Views — Positive - 👍❤️🔥🎉😄",
+            "category": "Telegram Reactions", "type": "Default",
+            "rate_etb_per_1000": 37.80, "min": 50, "max": 1000000,
+            "average_time": "10 minutes", "active": True,
+        },
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.fail_next_services = False
+
+    async def services(self):
+        if self.fail_next_services:
+            self.fail_next_services = False
+            raise RuntimeError("catalogue hiccup")
+        return list(self.STALE_SERVICES)
+
+
+class TestStaleDraftPrice(_LanguageRoundBase):
+    """Live bug, 16 Nov 2026 18:11 EAT (screenshot): the user said
+    \"Hi\", then \"I want tiktok views\" (bot asked for the video
+    link), then \"How much is the price\" — and the bot answered
+    with the OLD Telegram Reactions Positive price (37.80 ETB/1000)
+    from an earlier conversation instead of the TikTok views price.
+    A new order must replace a stale draft, and a price question
+    must be answered from the CURRENT draft — never from a stale
+    or previous one. With no draft at all, the bot asks which
+    service instead of guessing an old one."""
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", paxyo or StaleDraftPricePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg
+
+    def _seed_reactions_draft(self):
+        # The draft left over from the earlier conversation: a
+        # Telegram reactions order (link + quantity 10, which the
+        # bot had already rejected for being below the min 50).
+        bot.PARTIAL[1] = {
+            "platform": "telegram",
+            "service_hint": "telegram reactions",
+            "link": "https://t.me/kefayemikiragelglot/1689743",
+            "reaction_emoji": "👍",
+            "quantity": 10,
+        }
+
+    async def test_price_question_answers_current_draft_not_stale_one(self):
+        # The exact screenshot flow. The third turn's mocked
+        # classifier intent deliberately carries the STALE
+        # telegram/reactions hint forward (what the live AI did) —
+        # the price must still come from the TikTok views draft
+        # being built now.
+        self._seed_reactions_draft()
+        msg = await self._turns([
+            ("Hi", intent_of("greeting")),
+            ("I want tiktok views", intent_of(
+                "order", platform="tiktok",
+                service_hint="tiktok views",
+            )),
+            ("How much is the price", intent_of(
+                "price", platform="telegram",
+                service_hint="telegram reactions",
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 3)
+        self.assertIn("video", msg.text_sent[1].lower())
+        reply = msg.text_sent[2]
+        self.assertIn("TikTok", reply)
+        self.assertIn("18.90", reply)
+        self.assertNotIn("37.80", reply)
+        self.assertNotIn("Reactions", reply)
+
+    async def test_new_order_with_stale_classifier_hint_still_switches(self):
+        # Even when the classifier itself carries the old
+        # telegram/reactions hint forward for the NEW order
+        # message, the message's own words ("I want tiktok views")
+        # win: the draft switches platform, and the bot asks for
+        # the TikTok video link — never the old Telegram link.
+        self._seed_reactions_draft()
+        msg = await self._turns([
+            ("I want tiktok views", intent_of(
+                "order", platform="telegram",
+                service_hint="telegram reactions",
+            )),
+        ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("video", msg.text_sent[0].lower())
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
+        self.assertEqual(
+            bot.PARTIAL[1].get("service_hint"), "tiktok views"
+        )
+        self.assertIsNone(bot.PARTIAL[1].get("link"))
+
+    async def test_price_question_with_no_draft_asks_which_service(self):
+        # No draft, no service just discussed: ask which service
+        # instead of guessing an old one.
+        msg = await self._turns([
+            ("How much is the price", intent_of("price")),
+        ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Which service?", msg.text_sent[0])
+        self.assertNotIn("ETB per 1000", msg.text_sent[0])
+
+    async def test_price_fallthrough_ignores_stale_classifier_hint(self):
+        # The same price question, but the fast path fails (one
+        # catalogue hiccup), so the classifier runs and returns the
+        # stale telegram/reactions hint from history. The
+        # post-classification price branch must STILL answer from
+        # the TikTok views draft being built — never from the
+        # classifier's carried-forward hint.
+        self._seed_reactions_draft()
+        fake_paxyo = StaleDraftPricePaxyo()
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        intents = [
+            intent_of("greeting"),
+            intent_of(
+                "order", platform="tiktok",
+                service_hint="tiktok views",
+            ),
+            intent_of(
+                "price", platform="telegram",
+                service_hint="telegram reactions",
+            ),
+        ]
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(side_effect=intents),
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.handle_order_text(update, None, "Hi")
+            await bot.handle_order_text(
+                update, None, "I want tiktok views"
+            )
+            fake_paxyo.fail_next_services = True
+            await bot.handle_order_text(
+                update, None, "How much is the price"
+            )
+        self.assertEqual(len(msg.text_sent), 3)
+        reply = msg.text_sent[2]
+        self.assertIn("TikTok", reply)
+        self.assertIn("18.90", reply)
+        self.assertNotIn("37.80", reply)
+        self.assertNotIn("Reactions", reply)
 
 
 class TestWidenFreeAnswers(_LanguageRoundBase):
@@ -17474,54 +19165,60 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
     # the_draft).
 
     async def test_frustrated_gif_with_delayed_order_names_the_delay(self):
-        # DeepSeek-first (owner, 14 Nov 2026): the AI reacts first,
-        # naturally — then the delay line names the real delayed
-        # order. The AI text is the empathy; the line is the memory.
+        # Vision-first (owner, 16 Nov 2026): Gemini reads the GIF
+        # as angry, so the reply is the angry line — then the delay
+        # line names the real delayed order. The vision prompt
+        # carries no order info.
         recent = [dict(
             FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
             service_name="Instagram Followers | Fast", status="pending",
         )]
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg)
-        ai = mock.AsyncMock(return_value=(
-            "Oh no, I'm really sorry you're stuck waiting! 😤"
-        ))
         with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
-                mock.patch("bot.ai_generate", new=ai):
+                mock.patch(
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch(
+                    "bot.gemini_vision",
+                    new=mock.AsyncMock(return_value="angry"),
+                ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("Oh no, I'm really sorry", reply)
+        self.assertIn("I hear your frustration", reply)
+        self.assertNotIn("fun", reply.lower())
         self.assertIn("1836", reply)
         self.assertIn("pending", reply)
         self.assertIn("12 minutes", reply)  # real time, never "soon"
         self.assertNotIn("soon", reply.lower())
 
     async def test_happy_gif_after_completed_order_celebrates(self):
-        # DeepSeek-first (owner, 14 Nov 2026): a completed order is
-        # NOT a delay, so the reply is just the AI's celebration —
-        # no order mention at all. Updated deliberately: the old
-        # test asserted the order id was named.
+        # Vision-first (owner, 16 Nov 2026): a completed order is
+        # NOT a delay, so the reply is just the happy line — no
+        # order mention at all.
         recent = [dict(
             FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
             service_name="Instagram Followers | Fast", status="completed",
         )]
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg)
         with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
                 mock.patch(
-                    "bot.ai_generate",
-                    new=mock.AsyncMock(return_value=(
-                        "🎉 Yay, it worked — all done!"
-                    )),
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch(
+                    "bot.gemini_vision",
+                    new=mock.AsyncMock(return_value="happy"),
                 ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("🎉", reply)
-        self.assertIn("done", reply.lower())
+        self.assertIn("going smoothly", reply)
         self.assertNotIn("1836", reply)
 
     async def test_wave_emoji_gets_a_greeting_reply(self):
@@ -17535,24 +19232,21 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertNotIn("welcome", msg.text_sent[0].lower())
 
     async def test_frustrated_sticker_with_no_order_invents_none(self):
-        # A 😡 sticker with no order at all: the AI's natural reply
-        # only — no order is claimed, no delay line is appended.
-        # Updated deliberately for DeepSeek-first (owner, 14 Nov
-        # 2026): the old reply said "don't see an order"; the new
-        # reply simply never mentions one.
+        # A 😡 sticker with no order at all: vision reads it as
+        # angry, so the reply is the angry line only — no order is
+        # claimed, no delay line is appended.
         msg = FakeMessage()
         msg.caption = ""
-        msg.sticker = mock.Mock(emoji="😡")
+        msg.sticker = FakeSticker(emoji="😡")
         update = FakeUpdate(msg)
-        ai_text = "Oh no, that sounds rough! 😡"
         with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
                 mock.patch(
-                    "bot.ai_generate",
-                    new=mock.AsyncMock(return_value=ai_text),
+                    "bot.gemini_vision",
+                    new=mock.AsyncMock(return_value="angry"),
                 ):
             await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertEqual(msg.text_sent[0], ai_text)
+        self.assertIn("I hear your frustration", msg.text_sent[0])
         self.assertNotIn("1836", msg.text_sent[0])
 
     async def test_media_reply_never_clears_a_pending_confirm_card(self):
@@ -17789,20 +19483,22 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         )]
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg)
         with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
                 mock.patch(
-                    "bot.ai_generate",
-                    new=mock.AsyncMock(return_value=(
-                        "😄 Haha, love that GIF!"
-                    )),
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch(
+                    "bot.gemini_vision",
+                    new=mock.AsyncMock(return_value="happy"),
                 ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        # DeepSeek-first (owner, 14 Nov 2026): on track means NO
-        # order mention at all — the reply is just the AI's.
-        self.assertIn("😄 Haha, love that GIF!", reply)
+        # Vision-first (owner, 16 Nov 2026): on track means NO
+        # order mention at all — the reply is just the happy line.
+        self.assertIn("going smoothly", reply)
         self.assertNotIn("1837", reply)
         self.assertNotIn("pending", reply.lower())
         self.assertNotIn("sorry", reply.lower())
@@ -17817,16 +19513,20 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         )]
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg)
         with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
                 mock.patch(
-                    "bot.ai_generate",
-                    new=mock.AsyncMock(return_value="Oh no! 😟"),
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch(
+                    "bot.gemini_vision",
+                    new=mock.AsyncMock(return_value="angry"),
                 ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("Oh no!", reply)
+        self.assertIn("I hear your frustration", reply)
         self.assertIn("1836", reply)
         self.assertIn("didn't go through", reply)
         self.assertNotIn("soon", reply.lower())
@@ -17988,40 +19688,46 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
             "avg": "12 minutes", "total": 42.0,
         }
 
-    async def _gif(self, recent, ai_reply, user=None):
+    async def _gif(self, recent, mood="happy", user=None):
+        # Vision-first (owner, 16 Nov 2026): the GIF is watched by
+        # Gemini vision, which returns one mood word; the frame
+        # extractor is mocked (no ffmpeg in tests).
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg, user=user)
-        ai = mock.AsyncMock(return_value=ai_reply)
+        vision = mock.AsyncMock(return_value=mood)
         with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
-                mock.patch("bot.ai_generate", new=ai):
+                mock.patch(
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch("bot.gemini_vision", new=vision):
             await bot.on_animation(update, None)
-        return msg, ai
+        return msg, vision
 
     # The AI reply comes first; the delay line is appended --------
 
     async def test_gif_delayed_order_ai_first_then_delay_line(self):
-        # The core of the design: the AI's natural reaction, then
+        # The core of the design: the vision mood line first, then
         # ONE short line naming the real delayed order.
         recent = [dict(
             FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
             service_name="Instagram Followers | Fast",
             status="pending",
         )]
-        msg, ai = await self._gif(recent, "Haha, that GIF 😂")
+        msg, vision = await self._gif(recent, "angry")
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("Haha, that GIF 😂", reply)
+        self.assertIn("I hear your frustration", reply)
         self.assertIn("1836", reply)
         self.assertIn("pending", reply)
         self.assertIn("12 minutes", reply)  # real time, never "soon"
         self.assertNotIn("soon", reply.lower())
-        # The AI never sees the order: its prompt names the GIF
-        # only, and the system prompt names no order either.
-        prompt = ai.call_args[0][0]
-        self.assertIn("GIF", prompt)
+        # Vision never sees the order: its prompt is the fixed
+        # mood prompt, naming no order at all.
+        prompt = vision.call_args[1]["prompt"]
+        self.assertIn("angry", prompt)
         self.assertNotIn("1836", prompt)
-        self.assertNotIn("1836", ai.call_args[1]["system"])
 
     async def test_gif_on_track_order_no_order_mention(self):
         # No delay — even right after the order was placed — means
@@ -18033,19 +19739,23 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
             status="in_progress",
             created_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         )]
-        msg, _ = await self._gif(recent, "😄 Haha, love that GIF!")
+        msg, _ = await self._gif(recent, "happy")
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("😄 Haha, love that GIF!", reply)
+        self.assertIn("going smoothly", reply)
         self.assertNotIn("1837", reply)
         self.assertNotIn("pending", reply.lower())
         self.assertNotIn("sorry", reply.lower())
         self.assertNotIn("delay", reply.lower())
 
     async def test_gif_no_orders_no_order_mention(self):
-        msg, _ = await self._gif([], "Haha, love that one! 😂")
+        msg, _ = await self._gif([], "happy")
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertEqual(msg.text_sent[0], "Haha, love that one! 😂")
+        self.assertEqual(
+            msg.text_sent[0],
+            "Glad to see things are going smoothly! Let me know "
+            "if you need anything else.",
+        )
 
     async def test_frustrated_emoji_no_delay_no_order_mention(self):
         # Frustrated, but nothing is delayed: the reply is just
@@ -18060,19 +19770,20 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
         )
 
     async def test_wave_sticker_natural_greeting_no_order_mention(self):
+        # Vision-first (owner, 16 Nov 2026): the Mock sticker has
+        # no readable image, so the sticker's own 👋 emoji speaks —
+        # the deterministic greeting line, never a "fun" guess.
         msg = FakeMessage()
         msg.caption = ""
         msg.sticker = mock.Mock(emoji="👋")
         update = FakeUpdate(msg)
-        ai_text = "Hello! 👋 Great to see you!"
-        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
-                mock.patch(
-                    "bot.ai_generate",
-                    new=mock.AsyncMock(return_value=ai_text),
-                ):
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])):
             await bot.on_sticker(update, None)
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertEqual(msg.text_sent[0], ai_text)
+        self.assertEqual(
+            msg.text_sent[0],
+            "Hello! 👋 Great to see you — what would you like to order?",
+        )
 
     async def test_failed_order_gif_delay_line_present(self):
         recent = [dict(
@@ -18080,39 +19791,39 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
             service_name="Instagram Followers | Fast",
             status="failed",
         )]
-        msg, _ = await self._gif(recent, "Oh no! 😟")
+        msg, _ = await self._gif(recent, "angry")
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("Oh no!", reply)
+        self.assertIn("I hear your frustration", reply)
         self.assertIn("1836", reply)
         self.assertIn("didn't go through", reply)
         self.assertNotIn("soon", reply.lower())
 
     async def test_amharic_gif_delayed_order_amharic_delay_line(self):
-        # Amharic in, Amharic out: the AI prompt asks for Amharic
-        # and the delay line is the Amharic template.
+        # Amharic in, Amharic out: the vision mood line and the
+        # delay line are both the Amharic templates.
         recent = [dict(
             FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
             service_name="Instagram Followers | Fast",
             status="pending",
         )]
-        msg, ai = await self._gif(
-            recent, "😂 በጣም አዝናኝ ነው!",
+        msg, _ = await self._gif(
+            recent, "happy",
             user=FakeUser(language_code="am"),
         )
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("😂 በጣም አዝናኝ ነው!", reply)
+        self.assertIn("ደስ ብሎኛል", reply)
         self.assertIn("በነገራችን ላይ", reply)
         self.assertIn("1836", reply)
         self.assertIn("12 minutes", reply)
-        self.assertIn("Amharic", ai.call_args[1]["system"])
 
-    # The AI down: the fallback still answers ----------------------
+    # Vision down: the fallback still answers ----------------------
 
     async def test_ai_down_fallback_replies_and_delay_line_still_added(self):
-        # Every provider down: the bot never goes silent, and the
-        # delay line is still appended — it is code, not AI text.
+        # Gemini down: the bot never goes silent, and the delay
+        # line is still appended — it is code, not AI text. The
+        # fallback is the neutral rule-5 line, never "fun".
         recent = [dict(
             FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
             service_name="Instagram Followers | Fast",
@@ -18120,10 +19831,14 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
         )]
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg)
         with mock.patch("bot.paxyo", FakePaxyo(recent=recent)), \
                 mock.patch(
-                    "bot.ai_generate",
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch(
+                    "bot.gemini_vision",
                     new=mock.AsyncMock(
                         side_effect=Exception("all providers down")
                     ),
@@ -18131,24 +19846,29 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
         reply = msg.text_sent[0]
-        self.assertIn("😄 Haha, love it!", reply)
+        self.assertIn("Got your message", reply)
+        self.assertNotIn("fun", reply.lower())
         self.assertIn("1836", reply)
         self.assertIn("pending", reply)
 
     async def test_ai_down_no_orders_fallback_only(self):
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg)
         with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
                 mock.patch(
-                    "bot.ai_generate",
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch(
+                    "bot.gemini_vision",
                     new=mock.AsyncMock(
                         side_effect=Exception("all providers down")
                     ),
                 ):
             await bot.on_animation(update, None)
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("😄 Haha, love it!", msg.text_sent[0])
+        self.assertIn("Got your message", msg.text_sent[0])
         self.assertNotIn("By the way", msg.text_sent[0])
 
     def test_media_ai_fallback_is_mood_aware(self):
@@ -18212,21 +19932,1069 @@ class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
         bot.PENDING["abc123"] = make_pending()
         msg = FakeMessage()
         msg.caption = ""
+        msg.animation = FakeAnimation()
         update = FakeUpdate(msg)
         with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
                 mock.patch(
-                    "bot.ai_generate",
-                    new=mock.AsyncMock(
-                        return_value="Haha, nice one! 😂"
-                    ),
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch(
+                    "bot.gemini_vision",
+                    new=mock.AsyncMock(return_value="happy"),
                 ):
             await bot.on_animation(update, None)
         self.assertEqual(len(bot.PENDING), 1)
         self.assertEqual(
             bot.PENDING["abc123"]["service"]["service"], 1001
         )
-        self.assertEqual(msg.text_sent[0], "Haha, nice one! 😂")
+        self.assertEqual(
+            msg.text_sent[0],
+            "Glad to see things are going smoothly! Let me know "
+            "if you need anything else.",
+        )
         self.assertNotIn("Confirm", msg.text_sent[0])
+
+
+class TestGifMoodVision(_LanguageRoundBase):
+    """Media & GIF Reaction Handling (William, 16 Nov 2026): the bot
+    WATCHES a GIF/sticker with Gemini vision and replies to its
+    mood — angry, confused, happy, sad — and never a generic "fun"
+    line. Anything vision cannot read gets the neutral rule-5 line.
+    Vision is mocked here (the frame extractor too); the real
+    ffmpeg extraction is covered by _extract_gif_frame's own test
+    below, which runs only where ffmpeg exists."""
+
+    async def _gif(self, mood="happy", recent=None, vision=None):
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.animation = FakeAnimation()
+        update = FakeUpdate(msg)
+        vision_mock = mock.AsyncMock(
+            return_value=mood if vision is None else vision,
+        ) if not isinstance(vision, Exception) else mock.AsyncMock(
+            side_effect=vision
+        )
+        with mock.patch("bot.paxyo", FakePaxyo(recent=recent or [])), \
+                mock.patch(
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch("bot.gemini_vision", new=vision_mock):
+            await bot.on_animation(update, None)
+        return msg, vision_mock
+
+    async def _sticker(self, mood="happy", emoji=None, vision=None,
+                       is_video=False, is_animated=False):
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.sticker = FakeSticker(
+            emoji=emoji, is_video=is_video, is_animated=is_animated,
+        )
+        update = FakeUpdate(msg)
+        vision_mock = mock.AsyncMock(
+            return_value=mood if vision is None else vision,
+        ) if not isinstance(vision, Exception) else mock.AsyncMock(
+            side_effect=vision
+        )
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=b"fake-jpeg"),
+                ), mock.patch("bot.gemini_vision", new=vision_mock):
+            await bot.on_sticker(update, None)
+        return msg, vision_mock
+
+    async def test_angry_gif_gets_empathetic_reply_never_fun(self):
+        # The live bug: an angry GIF got "That's a fun one". Now
+        # vision says angry and the reply acknowledges it.
+        msg, _ = await self._gif("angry")
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("I hear your frustration", reply)
+        self.assertNotIn("fun", reply.lower())
+        self.assertNotIn("Haha", reply)
+        self.assertNotIn("love it", reply.lower())
+
+    async def test_confused_gif_gets_reassuring_reply(self):
+        msg, _ = await self._gif("confused")
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("waiting on an update", msg.text_sent[0])
+
+    async def test_happy_gif_gets_warm_reply(self):
+        msg, _ = await self._gif("happy")
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("going smoothly", msg.text_sent[0])
+
+    async def test_sad_gif_gets_supportive_reply(self):
+        msg, _ = await self._gif("sad")
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Sorry to see that", msg.text_sent[0])
+
+    async def test_unclear_gif_gets_neutral_reply(self):
+        msg, _ = await self._gif("unclear")
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Got your message", msg.text_sent[0])
+        self.assertNotIn("fun", msg.text_sent[0].lower())
+        self.assertNotIn("Haha", msg.text_sent[0])
+
+    async def test_vision_failure_falls_back_to_neutral(self):
+        # Gemini rate-limited / error: the neutral rule-5 line,
+        # never the old generic reply.
+        msg, _ = await self._gif(
+            vision=Exception("429 rate limited"),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Got your message", msg.text_sent[0])
+        self.assertNotIn("fun", msg.text_sent[0].lower())
+        self.assertNotIn("Haha, love it", msg.text_sent[0])
+
+    async def test_vision_empty_falls_back_to_neutral(self):
+        msg, _ = await self._gif("happy", vision="")
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Got your message", msg.text_sent[0])
+
+    async def test_frame_extraction_failure_falls_back_to_neutral(self):
+        # ffmpeg missing or the bytes unreadable: no frame, so no
+        # vision call at all — the neutral line, never a guess.
+        msg = FakeMessage()
+        msg.caption = ""
+        msg.animation = FakeAnimation()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.paxyo", FakePaxyo(recent=[])), \
+                mock.patch(
+                    "bot._extract_gif_frame",
+                    new=mock.AsyncMock(return_value=None),
+                ), mock.patch(
+                    "bot.gemini_vision",
+                    new=mock.AsyncMock(
+                        side_effect=AssertionError("vision must not run")
+                    ),
+                ):
+            await bot.on_animation(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Got your message", msg.text_sent[0])
+
+    async def test_angry_gif_with_failed_order_adds_failed_line(self):
+        # The screenshot case (order #1859): the angry line first,
+        # then the deterministic failed-order line — the order is
+        # mentioned ONLY because it actually failed.
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1859, service_id=1001,
+            service_name="Instagram Video Views", status="failed",
+        )]
+        msg, _ = await self._gif("angry", recent=recent)
+        self.assertEqual(len(msg.text_sent), 1)
+        reply = msg.text_sent[0]
+        self.assertIn("I hear your frustration", reply)
+        self.assertIn("1859", reply)
+        self.assertIn("didn't go through", reply)
+
+    async def test_vision_prompt_names_no_order(self):
+        # Vision never sees order info: its prompt is the fixed
+        # mood prompt, whatever the user's orders are.
+        recent = [dict(
+            FakePaxyo.RECENT_ORDER, id=1836, service_id=1001,
+            service_name="Instagram Followers | Fast",
+            status="pending",
+        )]
+        _, vision_mock = await self._gif("happy", recent=recent)
+        prompt = vision_mock.call_args[1]["prompt"]
+        self.assertIn("angry", prompt)
+        self.assertNotIn("1836", prompt)
+
+    async def test_sticker_vision_angry_gets_angry_reply(self):
+        msg, vision_mock = await self._sticker("angry", emoji="😡")
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("I hear your frustration", msg.text_sent[0])
+        # A static sticker is read as webp, not re-encoded.
+        self.assertEqual(
+            vision_mock.call_args[1]["mime_type"], "image/webp"
+        )
+
+    async def test_sticker_vision_failure_falls_back_to_emoji_mood(self):
+        # Vision down, but the sticker's own emoji still speaks: a
+        # 😡 sticker is frustration even when the image cannot be read.
+        msg, _ = await self._sticker(
+            emoji="😡", vision=Exception("vision down"),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("I hear you", msg.text_sent[0])
+
+    async def test_animated_sticker_without_vision_is_neutral(self):
+        # A .tgs sticker has no raster image to read: neutral, and
+        # vision is never called for it.
+        msg, vision_mock = await self._sticker(
+            emoji=None, is_animated=True,
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Got your message", msg.text_sent[0])
+        vision_mock.assert_not_called()
+
+    def test_parse_gif_mood(self):
+        self.assertEqual(bot._parse_gif_mood("angry"), "angry")
+        self.assertEqual(bot._parse_gif_mood("  Angry! "), "angry")
+        self.assertEqual(
+            bot._parse_gif_mood("The GIF shows a happy celebration"),
+            "happy",
+        )
+        self.assertEqual(bot._parse_gif_mood("confused"), "confused")
+        self.assertEqual(bot._parse_gif_mood("sad"), "sad")
+        self.assertEqual(bot._parse_gif_mood(""), "unclear")
+        self.assertEqual(bot._parse_gif_mood("a cat sitting"), "unclear")
+        self.assertEqual(bot._parse_gif_mood(None), "unclear")
+
+    def test_fallback_default_is_neutral_never_fun(self):
+        # The old "Haha, love it!" default is gone: an unreadable
+        # GIF with no emoji mood gets the neutral rule-5 line.
+        line = bot._media_ai_fallback(None, "en")
+        self.assertIn("Got your message", line)
+        self.assertNotIn("fun", line.lower())
+        self.assertNotIn("Haha", line)
+        # The emoji-mood fallbacks are unchanged.
+        self.assertIn("Hello", bot._media_ai_fallback("👋", "en"))
+        self.assertIn("I hear you", bot._media_ai_fallback("😤", "en"))
+
+    async def test_extract_gif_frame_without_ffmpeg_returns_none(self):
+        with mock.patch("bot.shutil.which", return_value=None):
+            frame = await bot._extract_gif_frame(b"fake-mp4")
+        self.assertIsNone(frame)
+
+
+def _emoji_count(text):
+    """Emoji codepoints in a string (variation selectors and ZWJ do
+    not count separately, so ❤️ counts as one and 👍❤️🔥🎉😁 as five;
+    arrows like → are math symbols, not emoji, and do not count)."""
+    import unicodedata
+
+    count = 0
+    for ch in text or "":
+        o = ord(ch)
+        if o > 0x2000 and (
+            unicodedata.category(ch) == "So"
+            or 0x1F000 <= o <= 0x1FAFF
+        ):
+            count += 1
+    return count
+
+
+class TestEmojiDiscipline(_LanguageRoundBase):
+    """Emoji rule, middle ground (William, 16 Nov 2026): emojis
+    SOMETIMES, sparingly — one in a few warm moments (greeting,
+    order-placed confirmation), most routine replies plain, never
+    more than one emoji per message except where the emoji IS the
+    content (a reaction mix, the 👍/👎 ask)."""
+
+    def test_greeting_may_carry_one_emoji(self):
+        for lang in ("en", "am"):
+            self.assertEqual(_emoji_count(bot.t("greeting", lang)), 1)
+
+    def test_order_confirmation_may_carry_one_emoji(self):
+        self.assertEqual(
+            _emoji_count(bot.t("tone_chatty_order", "en")), 1)
+        self.assertEqual(
+            _emoji_count(bot.t("tone_chatty_order", "am")), 1)
+        for lang in ("en", "am"):
+            for line in bot.HUMOR_LINES[lang]:
+                self.assertEqual(_emoji_count(line), 1, line)
+        # The order record itself is plain (read raw: it carries
+        # {placeholders}, so t() would need values).
+        self.assertEqual(
+            _emoji_count(bot.TEXT["order_summary"]["en"]), 0)
+
+    def test_price_error_help_replies_carry_no_emoji(self):
+        for key in (
+            "price_ask_service",
+            "not_understood",
+            "help",
+        ):
+            for lang in ("en", "am"):
+                # Read raw: these carry {placeholders}, so t()
+                # would need values.
+                self.assertEqual(
+                    _emoji_count(bot.TEXT[key].get(lang) or ""), 0,
+                    (key, lang))
+
+    def test_delivery_and_rescue_notices_carry_no_emoji(self):
+        for key in (
+            "order_delivered",
+            "order_stuck",
+            "order_rescued",
+            "order_rescue_exhausted",
+            "order_rescue_pricier",
+            "order_failed_rescued",
+            "order_split_test_done",
+            "order_split_test_moved",
+            "order_split_no_service",
+            "order_split_exhausted",
+            "order_split_rest_failed",
+            "order_split_rest_topup",
+            "order_split_rest_no_cover",
+        ):
+            for lang in ("en", "am"):
+                # Read raw: these carry {placeholders}, so t()
+                # would need values.
+                self.assertEqual(
+                    _emoji_count(bot.TEXT[key].get(lang) or ""), 0,
+                    (key, lang))
+
+    def test_reaction_pick_still_shows_its_emoji(self):
+        line = bot.t("no_exact_reaction", "en", emoji="👍")
+        self.assertIn("👍", line)
+        self.assertIn("👍❤️🔥🎉😁", line)
+        ask = bot.t("rate_ask", "en")
+        self.assertIn("👍", ask)
+        self.assertIn("👎", ask)
+
+    def test_buttons_may_carry_one_emoji(self):
+        for key in (
+            "use_fastest",
+            "deposit_paid_button",
+            "check_deposit_button",
+            "abandoned_resume_button",
+            "stop_this_order",
+            "friday_yes_button",
+            "first_order_button",
+        ):
+            self.assertEqual(_emoji_count(bot.t(key, "en")), 1, key)
+
+    def test_no_text_key_carries_more_than_one_emoji_except_reactions(self):
+        # Reaction content is the only exception: the no-exact mix
+        # names the five mix emojis, and the rate ask names 👍 and 👎.
+        exceptions = {"no_exact_reaction", "rate_ask"}
+        for key, value in bot.TEXT.items():
+            if not isinstance(value, dict):
+                continue
+            for lang in ("en", "am"):
+                text = value.get(lang) or ""
+                if key in exceptions:
+                    continue
+                self.assertLessEqual(
+                    _emoji_count(text), 1, (key, lang, text[:60]))
+
+
+class Min50ReactionsPaxyo(RealReactionsPaxyo):
+    """The screenshot's catalogue (16 Nov 2026): the Positive mix
+    needs 50+, so a quantity of 10 leaves the draft open at
+    "How many?" instead of building the card."""
+
+    async def services(self):
+        services = [dict(s) for s in RealReactionsPaxyo.REACTIONS_SERVICES]
+        for s in services:
+            if s["service"] == 6534:
+                s["min"] = 50
+        return SAMPLE_SERVICES + services
+
+
+class Min50ThumbsUpPaxyo(RealReactionsPaxyo):
+    """The picked 👍 service needs 50+, but another 👍 service
+    allows 10 — the lower-min same-emoji offer."""
+
+    async def services(self):
+        services = [dict(s) for s in RealReactionsPaxyo.REACTIONS_SERVICES]
+        for s in services:
+            if s["service"] == 6541:
+                s["min"] = 50
+        return SAMPLE_SERVICES + services
+
+
+class TestDraftEmojiCorrection(unittest.IsolatedAsyncioTestCase):
+    """Mid-draft emoji correction (screenshot bug, 16 Nov 2026):
+    naming a specific emoji — by word or by the emoji itself —
+    re-picks that emoji's exact service, keeps the link and the
+    rest of the draft, and never falls through to "I did not
+    understand". Every reaction emoji, Telegram and Facebook."""
+
+    LINK = "https://t.me/paxyo251/180"
+
+    def setUp(self):
+        for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.PENDING, bot.PENDING_REFILL, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PARTIAL, bot.PENDING, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    def _reactions_intent(self, **overrides):
+        intent = {
+            "platform": "telegram",
+            "service_hint": "telegram reactions",
+        }
+        intent.update(overrides)
+        return intent_of("order", **intent)
+
+    async def _open_draft(self, paxyo=None):
+        """The screenshot's first two turns: a Telegram post link
+        (draft open, "How many?"), then quantity 10 — below the
+        mix's minimum of 50, so the draft stays open."""
+        msg, fake = await self._turns([
+            ("I want reactions for https://t.me/paxyo251/180",
+             self._reactions_intent(link=self.LINK)),
+            ("10", intent_of("unclear")),
+        ], paxyo=paxyo or Min50ReactionsPaxyo())
+        self.assertIn("How many", msg.text_sent[0])
+        self.assertIn("50", msg.text_sent[1])
+        self.assertNotIn("did not understand", msg.text_sent[1].lower())
+        self.assertEqual(bot.PARTIAL[1].get("link"), self.LINK)
+        self.assertEqual(len(bot.PENDING), 0)
+        return msg, fake
+
+    async def _correct(self, msg, fake, text):
+        msg2 = FakeMessage()
+        update = FakeUpdate(msg2)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                return_value=self._reactions_intent()),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg2
+
+    async def test_like_by_word_re_picks_thumbs_up(self):
+        msg, fake = await self._open_draft()
+        msg2 = await self._correct(msg, fake, "I want only like reaction")
+        self.assertNotIn("did not understand",
+                         " ".join(msg2.text_sent).lower())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 6541)
+        self.assertIn("👍", pending["service"]["name"])
+        self.assertEqual(pending["link"], self.LINK)
+        self.assertEqual(pending["quantity"], 10)
+
+    async def test_like_by_emoji_re_picks_thumbs_up(self):
+        msg, fake = await self._open_draft()
+        msg2 = await self._correct(msg, fake, "I want 👍 reaction only")
+        self.assertNotIn("did not understand",
+                         " ".join(msg2.text_sent).lower())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 6541)
+        self.assertEqual(pending["link"], self.LINK)
+
+    async def test_every_emoji_correction(self):
+        cases = [
+            ("only 😂", 6579, "😂"),
+            ("only 😘", 6550, "😘"),
+            ("only love", 6537, "❤️"),
+            ("only 😁", 1722, "😁"),
+            ("only laughing", 6579, "😂"),
+            ("only kissing", 6550, "😘"),
+            ("only grin", 1722, "😁"),
+        ]
+        for text, service_id, emoji in cases:
+            with self.subTest(text=text):
+                self.setUp()
+                msg, fake = await self._open_draft()
+                msg2 = await self._correct(msg, fake, text)
+                self.assertNotIn(
+                    "did not understand",
+                    " ".join(msg2.text_sent).lower())
+                self.assertEqual(len(bot.PENDING), 1)
+                pending = next(iter(bot.PENDING.values()))
+                self.assertEqual(
+                    pending["service"]["service"], service_id)
+                self.assertIn(emoji, pending["service"]["name"])
+                self.assertEqual(pending["link"], self.LINK)
+
+    async def test_facebook_reaction_correction(self):
+        # Same correction, Facebook: the draft keeps its Facebook
+        # post link and the re-pick is a Facebook service for ❤️.
+        fb_link = "https://facebook.com/somepost/123"
+        msg, fake = await self._turns([
+            ("I want facebook reactions for "
+             "https://facebook.com/somepost/123",
+             intent_of("order", platform="facebook",
+                       service_hint="facebook reactions",
+                       link=fb_link)),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("How many", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("link"), fb_link)
+        msg2 = FakeMessage()
+        update = FakeUpdate(msg2)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "order", platform="facebook",
+                service_hint="facebook reactions")),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "I want only ❤️ reaction")
+        self.assertNotIn("did not understand",
+                         " ".join(msg2.text_sent).lower())
+        # No quantity yet, so the bot re-asks for one — with the
+        # picked ❤️ service's bounds, not a bare "How many?".
+        self.assertIn("quantity must be between", msg2.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "❤️")
+        self.assertEqual(bot.PARTIAL[1].get("link"), fb_link)
+        msg3 = FakeMessage()
+        update = FakeUpdate(msg3)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "order", platform="facebook",
+                service_hint="facebook reactions")),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, "100")
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertIn("Facebook", pending["service"]["name"])
+        self.assertIn("❤️", pending["service"]["name"])
+        self.assertEqual(pending["link"], fb_link)
+
+    async def test_below_min_offers_lower_min_same_emoji(self):
+        # The picked 👍 service needs 50, but another 👍 service
+        # allows 10: the order continues on the lower-min service
+        # instead of only rejecting the number.
+        msg, fake = await self._turns([
+            ("I want 👍 reactions for https://t.me/paxyo251/180",
+             self._reactions_intent(link=self.LINK)),
+            ("10", intent_of("unclear")),
+        ], paxyo=Min50ThumbsUpPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1717)
+        self.assertIn("👍", pending["service"]["name"])
+        self.assertEqual(pending["link"], self.LINK)
+        self.assertEqual(pending["quantity"], 10)
+
+
+class StoryReactionsPaxyo(RealReactionsPaxyo):
+    """The catalogue plus the story service from the screenshot
+    (16 Nov 2026): Telegram Story Reactions ~ 👍 (#7166)."""
+
+    async def services(self):
+        services = [dict(s) for s in RealReactionsPaxyo.REACTIONS_SERVICES]
+        services.append({
+            "service": 7166,
+            "name": "Telegram Story Reactions ~ 👍 | [ Max 100K ]",
+            "category": "Telegram Story Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 100000, "average_time": "5 minutes",
+            "active": True, "provider_service_id": 7166,
+        })
+        return SAMPLE_SERVICES + services
+
+
+class TestReactionPicker(unittest.IsolatedAsyncioTestCase):
+    """Reaction picker (ideas batch 1 #1, 16 Nov 2026): the
+    quantity question for a reactions draft carries inline emoji
+    buttons — only emoji with an exact service on that platform —
+    and tapping one picks that emoji's exact service and continues
+    the draft. No exact service is an honest line, never a silent
+    different emoji."""
+
+    LINK = "https://t.me/paxyo251/180"
+
+    def setUp(self):
+        for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.PENDING, bot.PENDING_REFILL, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PARTIAL, bot.PENDING, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def _tap(self, data, fake):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.on_callback(update, None)
+        return query
+
+    async def test_picker_options_telegram_only_exact_emoji(self):
+        services = await RealReactionsPaxyo().services()
+        options = bot.reaction_picker_options(services, "telegram")
+        self.assertEqual(
+            options,
+            ["👍", "❤️", "🔥", "😂", "😍", "🙏", "🎉", "😁", "😘",
+             "❤️‍🔥", "💔", "👎"],
+        )
+        # The Positive mix (👍❤️🔥🎉😁) never becomes one button.
+        self.assertEqual(len(options), len(set(options)))
+
+    async def test_picker_options_facebook_own_set(self):
+        services = await RealReactionsPaxyo().services()
+        options = bot.reaction_picker_options(services, "facebook")
+        self.assertIn("👍", options)
+        self.assertIn("❤️", options)
+        self.assertIn("😆", options)
+        # No single-😂 Facebook service: the [👍 ❤️ 😂] mix is not
+        # a 😂 button, and the sets differ from Telegram's.
+        self.assertNotIn("😂", options)
+        self.assertNotEqual(
+            options,
+            bot.reaction_picker_options(services, "telegram"),
+        )
+
+    async def test_picker_options_empty_when_no_exact_service(self):
+        self.assertEqual(
+            bot.reaction_picker_options([], "telegram"), [])
+        self.assertEqual(
+            bot.reaction_picker_options(
+                [{"service": 1, "name": "Telegram Post Reactions — Positive",
+                  "category": "Telegram Reactions", "active": True}],
+                "telegram",
+            ),
+            [],
+        )
+
+    async def test_quantity_question_shows_picker(self):
+        msg, _ = await self._turns([
+            ("I want reactions for https://t.me/paxyo251/180",
+             intent_of(
+                 "order", platform="telegram",
+                 service_hint="telegram reactions", link=self.LINK,
+             )),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("Which reaction?", msg.text_sent[0])
+        self.assertIn("How many?", msg.text_sent[0])
+        markup = msg.markups[0]
+        self.assertIsInstance(markup, bot.InlineKeyboardMarkup)
+        buttons = [
+            b for row in markup.inline_keyboard for b in row
+        ]
+        self.assertIn("react:👍", [b.callback_data for b in buttons])
+        self.assertIn("react:❤️", [b.callback_data for b in buttons])
+        self.assertIn("react:😂", [b.callback_data for b in buttons])
+
+    async def test_picker_not_shown_when_emoji_already_chosen(self):
+        msg, _ = await self._turns([
+            ("I want 👍 reactions for https://t.me/paxyo251/180",
+             intent_of(
+                 "order", platform="telegram",
+                 service_hint="telegram reactions", link=self.LINK,
+                 reaction_emoji="👍",
+             )),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("How many?", msg.text_sent[0])
+        self.assertNotIn("Which reaction?", msg.text_sent[0])
+        self.assertIsInstance(
+            msg.markups[0], bot.ReplyKeyboardRemove)
+
+    async def test_tap_picks_emoji_and_asks_quantity(self):
+        msg, fake = await self._turns([
+            ("I want reactions for https://t.me/paxyo251/180",
+             intent_of(
+                 "order", platform="telegram",
+                 service_hint="telegram reactions", link=self.LINK,
+             )),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIn("Which reaction?", msg.text_sent[0])
+        query = await self._tap("react:👍", fake)
+        self.assertEqual(query.edited, ["👍 reactions — got it."])
+        self.assertIn("How many?", query.message.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "👍")
+        self.assertEqual(len(bot.PENDING), 0)
+        # The quantity now completes the order on the 👍 service.
+        msg2, _ = await self._turns([
+            ("100", intent_of("unclear")),
+        ], paxyo=fake)
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 6541)
+        self.assertEqual(pending["link"], self.LINK)
+        self.assertEqual(pending["quantity"], 100)
+
+    async def test_tap_with_quantity_shows_confirm_card(self):
+        bot.PARTIAL[1] = {
+            "platform": "telegram",
+            "service_hint": "telegram reactions",
+            "link": self.LINK, "quantity": 100,
+        }
+        fake = RealReactionsPaxyo()
+        query = await self._tap("react:❤️", fake)
+        self.assertEqual(query.edited, ["❤️ reactions — got it."])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 6537)
+        self.assertEqual(pending["quantity"], 100)
+
+    async def test_tap_unknown_emoji_is_honest(self):
+        bot.PARTIAL[1] = {
+            "platform": "telegram",
+            "service_hint": "telegram reactions",
+            "link": self.LINK, "quantity": 100,
+        }
+        fake = RealReactionsPaxyo()
+        query = await self._tap("react:😮", fake)
+        self.assertEqual(len(bot.PENDING), 0)
+        reply = " ".join(query.message.text_sent)
+        self.assertIn("don't have a 😮-only service", reply)
+
+    async def test_stale_tap_is_honest(self):
+        query = await self._tap("react:👍", RealReactionsPaxyo())
+        self.assertEqual(
+            query.edited,
+            ["That order is no longer open — send a new order "
+             "to start again."],
+        )
+        self.assertEqual(query.message.text_sent, [])
+
+
+class TestStoryPost(unittest.IsolatedAsyncioTestCase):
+    """Story vs post mix-up (screenshots, 16 Nov 2026): a
+    t.me/<channel>/<number> link is a POST — never offer story
+    services for it; "not for story, it's for tg post" switches
+    the draft to post reactions; a fresh link replaces an old
+    tg://openmessage link; a tg:// link is never an order link."""
+
+    POST_LINK = "https://t.me/kefayemikiragelglot/1689743"
+    STORY_LINK = "https://t.me/somechannel/stories/123"
+
+    def setUp(self):
+        for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.PENDING, bot.PENDING_REFILL, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (bot.PARTIAL, bot.PENDING, bot.CHAT_HISTORY):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    def test_post_link_is_a_post_not_a_story(self):
+        self.assertEqual(
+            bot.link_story_state(self.POST_LINK), "post")
+        self.assertEqual(
+            bot.link_story_state(self.STORY_LINK), "story")
+        self.assertIsNone(bot.link_story_state(
+            "tg://openmessage?chat_id=1&message_id=2"))
+
+    def test_post_link_never_gets_story_service(self):
+        story = {
+            "service": 7166,
+            "name": "Telegram Story Reactions ~ 👍 | [ Max 100K ]",
+            "category": "Telegram Story Reactions",
+            "type": "Default", "rate_etb_per_1000": 5.46,
+            "min": 10, "max": 100000, "average_time": "5 minutes",
+            "active": True, "provider_service_id": 7166,
+        }
+        pool = bot._reactions_pool(
+            RealReactionsPaxyo.REACTIONS_SERVICES + [story],
+            "👍", story=False)
+        self.assertNotIn(7166, [s["service"] for s in pool])
+        self.assertIn(6541, [s["service"] for s in pool])
+        pool = bot._reactions_pool(
+            RealReactionsPaxyo.REACTIONS_SERVICES + [story],
+            "👍", story=True)
+        self.assertEqual([s["service"] for s in pool], [7166])
+
+    async def test_post_link_order_picks_post_service(self):
+        msg, fake = await self._turns([
+            ("I want 👍 reactions for "
+             "https://t.me/kefayemikiragelglot/1689743 100",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link=self.POST_LINK, quantity=100)),
+        ], paxyo=StoryReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 6541)
+        self.assertEqual(pending["link"], self.POST_LINK)
+
+    async def test_not_for_story_correction_switches_to_post(self):
+        # Open a story draft and card it on the story service,
+        # then correct it: the card is re-picked as a post service.
+        msg, fake = await self._turns([
+            ("I want 👍 story reactions",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram story reactions")),
+            ("https://t.me/somechannel/stories/123 100",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram story reactions",
+                       link=self.STORY_LINK, quantity=100)),
+        ], paxyo=StoryReactionsPaxyo())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 7166)
+        msg2 = FakeMessage()
+        update = FakeUpdate(msg2)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("unclear")),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "Not for story its for tg post")
+        self.assertNotIn("did not understand",
+                         " ".join(msg2.text_sent).lower())
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 6541)
+        self.assertNotIn("Story", pending["service"]["name"])
+        # The link is kept (no new link was given in the correction).
+        self.assertEqual(pending["link"], self.STORY_LINK)
+
+    async def test_fresh_link_replaces_tg_openmessage_link(self):
+        # A tg:// link in the draft is dropped, never carded; the
+        # post link the user sends next becomes the order link.
+        msg, fake = await self._turns([
+            ("I want reactions for "
+             "tg://openmessage?chat_id=1&message_id=2",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link="tg://openmessage?chat_id=1&message_id=2")),
+        ], paxyo=RealReactionsPaxyo())
+        self.assertIsNone(bot.PARTIAL[1].get("link"))
+        self.assertEqual(len(bot.PENDING), 0)
+        msg2 = FakeMessage()
+        update = FakeUpdate(msg2)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "order", platform="telegram",
+                service_hint="telegram reactions",
+                link=self.POST_LINK, quantity=100)),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None,
+                "https://t.me/kefayemikiragelglot/1689743 100")
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["link"], self.POST_LINK)
+        self.assertNotIn("tg://", pending["link"])
+
+    async def test_tg_openmessage_never_used_as_order_link(self):
+        self.assertEqual(
+            bot.validate_order_link(
+                "tg://openmessage?chat_id=1&message_id=2",
+                SAMPLE_SERVICES[0]),
+            "link_type")
+
+
+class TestDepositHijack(unittest.IsolatedAsyncioTestCase):
+    """Deposit-flow hijack (screenshot, 16 Nov 2026): with a
+    reaction order draft open, tapping Deposit parks the draft;
+    while the deposit flow asks for an amount, a number IS the
+    deposit amount (10 ETB is valid); saying "order" later resumes
+    the parked draft."""
+
+    LINK = "https://t.me/paxyo251/180"
+
+    def setUp(self):
+        for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.PENDING, bot.PENDING_REFILL, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PARKED_DRAFT,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PARTIAL, bot.PARKED_DRAFT, bot.PENDING,
+            bot.DEPOSIT_DRAFT, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake_paxyo = paxyo or FakePaxyo()
+        intents = [intent for _, intent in turns]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg, fake_paxyo
+
+    async def test_draft_open_deposit_ten_goes_to_payment_method(self):
+        msg, fake = await self._turns([
+            ("I want reactions for https://t.me/paxyo251/180",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link=self.LINK)),
+            ("Deposit", intent_of("deposit")),
+            ("10", intent_of("unclear")),
+        ], paxyo=RealReactionsPaxyo())
+        # Turn 1 opened the reactions draft.
+        self.assertIn("How many", msg.text_sent[0])
+        # Turn 2 parked it (one short line) and asked for the
+        # deposit amount.
+        self.assertIn("unfinished order is saved",
+                      msg.text_sent[1].lower())
+        self.assertIn("How much do you want to deposit",
+                      msg.text_sent[2])
+        self.assertEqual(bot.PARTIAL.get(1), None)
+        self.assertEqual(
+            bot.PARKED_DRAFT[1].get("link"), self.LINK)
+        # Turn 3: "10" is the deposit amount, never a reactions
+        # quantity — the bot moves on to the payment method.
+        self.assertNotIn("quantity must be between",
+                         " ".join(msg.text_sent).lower())
+        self.assertEqual(bot.DEPOSIT_DRAFT[1].get("amount"), 10.0)
+        self.assertIn("Telebirr", msg.text_sent[-1])
+
+    async def test_order_resumes_parked_draft(self):
+        msg, fake = await self._turns([
+            ("I want reactions for https://t.me/paxyo251/180",
+             intent_of("order", platform="telegram",
+                       service_hint="telegram reactions",
+                       link=self.LINK)),
+            ("Deposit", intent_of("deposit")),
+            ("order", intent_of("order")),
+        ], paxyo=RealReactionsPaxyo())
+        # The parked draft is back, link intact, asking quantity.
+        self.assertEqual(bot.PARKED_DRAFT.get(1), None)
+        self.assertEqual(bot.PARTIAL[1].get("link"), self.LINK)
+        self.assertIn("How many", msg.text_sent[-1])
+
+
+class TestHideReplyKeyboard(unittest.IsolatedAsyncioTestCase):
+    """Hide the reply keyboard (William, 16 Nov 2026): no bot reply
+    ever carries the persistent Order / Balance / My orders /
+    Deposit / Support keyboard — replies send ReplyKeyboardRemove
+    instead. Inline Confirm/Cancel buttons and all other inline
+    keyboards stay."""
+
+    def setUp(self):
+        for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.PENDING, bot.PENDING_REFILL, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PARKED_DRAFT,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PARTIAL, bot.PARKED_DRAFT, bot.PENDING,
+            bot.DEPOSIT_DRAFT, bot.CHAT_HISTORY,
+        ):
+            store.clear()
+
+    async def test_no_reply_carries_the_reply_keyboard(self):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = TikTokPaxyo(balance=1000.0)
+        intents = [
+            intent_of("greeting"),
+            intent_of("order", platform="tiktok",
+                      service_hint="views"),
+            intent_of("order", platform="tiktok",
+                      service_hint="views",
+                      link="https://tiktok.com/@x/video/1",
+                      quantity=1000),
+            intent_of("deposit"),
+            intent_of("unclear"),
+        ]
+        texts = [
+            "Hi",
+            "I want tiktok views",
+            "https://tiktok.com/@x/video/1 1000",
+            "Deposit",
+            "10",
+        ]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            for text in texts:
+                await bot.handle_order_text(update, None, text)
+        self.assertGreater(len(msg.text_sent), 0)
+        self.assertEqual(len(msg.text_sent), len(msg.markups))
+        for markup in msg.markups:
+            self.assertNotIsInstance(
+                markup, bot.ReplyKeyboardMarkup)
+        # The hiding actually happens, and the Confirm card's
+        # inline keyboard is still there.
+        self.assertTrue(any(
+            isinstance(m, bot.ReplyKeyboardRemove)
+            for m in msg.markups))
+        self.assertTrue(any(
+            isinstance(m, bot.InlineKeyboardMarkup)
+            for m in msg.markups))
 
 
 class LinkPlatformPaxyo(FakePaxyo):
@@ -20405,7 +23173,7 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertNotIn(1, bot.FIRST_ORDER_NUDGE_DONE)
 
-    async def test_start_shows_quick_keyboard_and_nudge(self):
+    async def test_start_hides_quick_keyboard_and_nudge(self):
         msg = FakeMessage("/start")
         update = FakeUpdate(msg)
         update.update_id = 999001
@@ -20413,15 +23181,9 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         with mock.patch("bot.paxyo", fake):
             await bot.start(update, None)
         self.assertEqual(len(msg.text_sent), 2)
-        # Message 1: the greeting, with the persistent quick keyboard.
-        keyboard = msg.markups[0]
-        self.assertTrue(hasattr(keyboard, "keyboard"))
-        labels = [b.text for row in keyboard.keyboard for b in row]
-        self.assertEqual(
-            labels,
-            ["🛒 Order", "💰 Balance", "📦 My orders", "💳 Deposit",
-             "🆘 Support"],
-        )
+        # Message 1: the greeting — the persistent quick keyboard
+        # is hidden now (16 Nov 2026), not shown.
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)
         # Message 2: the one-time cheapest-test offer.
         self.assertIn("1.26", msg.text_sent[1])
         nudge_button = msg.markups[1].inline_keyboard[0][0]
@@ -20527,6 +23289,16 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.quick_reply_action("🆘 Support"), "support")
         self.assertIsNone(bot.quick_reply_action("hello"))
         self.assertIsNone(bot.quick_reply_action("I want 1000 views"))
+        # Late-reply fix (16 Nov 2026): voice transcription adds
+        # trailing punctuation — a plain command word with it still
+        # matches instead of falling through to the AI classifier.
+        self.assertEqual(bot.quick_reply_action("Order."), "order")
+        self.assertEqual(bot.quick_reply_action("balance!"), "balance")
+        self.assertEqual(bot.quick_reply_action("My orders?"), "orders")
+        self.assertEqual(bot.quick_reply_action("Deposit."), "deposit")
+        self.assertEqual(bot.quick_reply_action("support!"), "support")
+        self.assertIsNone(bot.quick_reply_action("please order"))
+        self.assertIsNone(bot.quick_reply_action("cancel my last order"))
 
     async def test_quick_balance_tap_never_calls_classifier(self):
         msg = FakeMessage()
@@ -20562,17 +23334,20 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("t.me/paxyo", msg.text_sent[0])
 
-    async def test_quick_order_tap_asks_platform(self):
+    async def test_quick_order_tap_asks_what_to_order(self):
+        # Late-reply fix (16 Nov 2026): a plain "order" gets the
+        # instant order prompt — service + link — with no AI call.
+        # (Was: test_quick_order_tap_asks_platform.)
         msg = await self._send("🛒 Order", intent_of("order"))
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("platform", msg.text_sent[0].lower())
+        self.assertEqual(msg.text_sent[0], bot.t("order_prompt", "en"))
 
-    async def test_greeting_intent_keeps_quick_keyboard(self):
+    async def test_greeting_intent_hides_quick_keyboard(self):
+        # The persistent quick keyboard is hidden now (16 Nov
+        # 2026): a greeting carries bot.ReplyKeyboardRemove, and the
+        # text commands still work when typed.
         msg = await self._send("hello", intent_of("greeting"))
-        keyboard = msg.markups[0]
-        self.assertTrue(hasattr(keyboard, "keyboard"))
-        labels = [b.text for row in keyboard.keyboard for b in row]
-        self.assertEqual(len(labels), 5)
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)
 
     # --- one-tap deposit retry -----------------------------------
 
@@ -20740,6 +23515,128 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
             await client._client.aclose()
 
 
+class TestInstantCommandFastPath(unittest.IsolatedAsyncioTestCase):
+    """Late-reply fix (16 Nov 2026): the plain command words
+    "order", "balance", "my orders", "deposit", "support", "cancel"
+    and "my invite link" must get an INSTANT deterministic reply
+    with no AI call first — William sent "order" and got no reply
+    for a long time because the message waited on the classifier.
+    Every test here patches the whole provider layer
+    (extract_intent + ai_generate) and asserts it is never called.
+    """
+
+    def setUp(self):
+        bot.PARTIAL.clear()
+        bot.PENDING.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    def tearDown(self):
+        bot.PARTIAL.clear()
+        bot.PENDING.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    async def _send_no_ai(self, text, paxyo=None):
+        """One turn with the provider layer mocked out; returns
+        (msg, intent_mock, ai_mock)."""
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent") as intent, \
+             mock.patch("bot.ai_generate") as ai, \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo(balance=1000.0)), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg, intent, ai
+
+    def _assert_no_provider_call(self, intent, ai):
+        intent.assert_not_called()
+        ai.assert_not_called()
+
+    async def test_order_word_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("order")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(msg.text_sent, [bot.t("order_prompt", "en")])
+
+    async def test_order_with_trailing_punctuation_is_instant(self):
+        # Voice transcription adds a full stop — the live bug:
+        # "Order." fell through to the AI classifier and waited.
+        msg, intent, ai = await self._send_no_ai("Order.")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(msg.text_sent, [bot.t("order_prompt", "en")])
+
+    async def test_balance_word_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("balance")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("1,000.00", msg.text_sent[0])
+
+    async def test_my_orders_word_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("my orders")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(msg.text_sent, ["You have no orders yet."])
+
+    async def test_deposit_word_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("deposit")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("How much do you want to deposit", msg.text_sent[0])
+
+    async def test_support_word_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("support")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("t.me/paxyo", msg.text_sent[0])
+
+    async def test_cancel_word_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("cancel")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(msg.text_sent, ["Nothing to cancel."])
+
+    async def test_my_invite_link_word_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("my invite link")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn(bot.user_invite_code(1), msg.text_sent[0])
+
+    async def test_my_invite_link_punctuated_is_instant(self):
+        msg, intent, ai = await self._send_no_ai("My invite link.")
+        self._assert_no_provider_call(intent, ai)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn(bot.user_invite_code(1), msg.text_sent[0])
+
+    def test_invite_link_request_matcher(self):
+        self.assertTrue(bot.is_invite_link_request("my invite link"))
+        self.assertTrue(bot.is_invite_link_request("My invite link."))
+        self.assertTrue(bot.is_invite_link_request("invite link"))
+        self.assertFalse(
+            bot.is_invite_link_request("send my invite link to a friend")
+        )
+        self.assertFalse(bot.is_invite_link_request("my invite link please"))
+        self.assertFalse(bot.is_invite_link_request("my code is REF123"))
+
+    async def test_longer_message_still_uses_classifier(self):
+        # The fast path is for the bare command words only — a real
+        # order sentence still goes through the classifier.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "order", platform="tiktok", service_hint="views",
+            )),
+        ) as intent, mock.patch("bot.paxyo", FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "please order tiktok views"
+            )
+        intent.assert_called_once()
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("link", msg.text_sent[0].lower())
+
+
 class TestStallRescue(unittest.IsolatedAsyncioTestCase):
     """Automatic stall rescue (feature 2, 15 Nov 2026): a stuck
     order is cancelled + refunded once and re-placed on the
@@ -20763,10 +23660,16 @@ class TestStallRescue(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         bot.WATCHED_ORDERS.clear()
         bot.LAST_ORDER.clear()
+        # Cancel-cutting caches are module-level: a seeded pause or
+        # reliability map from one test must never leak into the next.
+        bot._SERVICE_RELIABILITY_CACHE.update({"at": 0.0, "data": {}})
+        bot._SERVICE_PAUSES_CACHE.update({"at": 0.0, "data": set()})
 
     def tearDown(self):
         bot.WATCHED_ORDERS.clear()
         bot.LAST_ORDER.clear()
+        bot._SERVICE_RELIABILITY_CACHE.update({"at": 0.0, "data": {}})
+        bot._SERVICE_PAUSES_CACHE.update({"at": 0.0, "data": set()})
 
     def _watch(self, order_id, minutes_ago=200, avg_minutes=1,
                service=None, quantity=1000, user_id=1, total=None,
@@ -21545,8 +24448,16 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         bot.WATCHED_ORDERS.clear()
         bot.LAST_ORDER.clear()
+        # Cancel-cutting caches are module-level: a seeded pause or
+        # reliability map from one test must never leak into the next.
+        bot._SERVICE_RELIABILITY_CACHE.update({"at": 0.0, "data": {}})
+        bot._SERVICE_PAUSES_CACHE.update({"at": 0.0, "data": set()})
 
     def tearDown(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.LAST_ORDER.clear()
+        bot._SERVICE_RELIABILITY_CACHE.update({"at": 0.0, "data": {}})
+        bot._SERVICE_PAUSES_CACHE.update({"at": 0.0, "data": set()})
         bot.WATCHED_ORDERS.clear()
         bot.LAST_ORDER.clear()
 
@@ -21953,14 +24864,48 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.smm_orders_created, [])
         self.assertNotIn("1841", bot.WATCHED_ORDERS)
 
-    # --- watch: cancelled / refunded still drop silently -----------
+    # --- watch: provider-cancelled is rescued like failed --------
 
-    async def test_cancelled_and_refunded_still_drop_silently(self):
+    async def test_provider_cancelled_order_is_rescued_like_failed(self):
+        # Cancel-cutting item 4 (16 Nov 2026): a PROVIDER-cancelled
+        # order goes through the SAME rescue path as a failed one —
+        # refund in full, then the next fastest affordable service
+        # (here the other provider's views), with the same user
+        # message. The cancel is recorded for the auto-pause count.
         self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[self._gop_views(), self._smm_views()],
+            status_by_order={"1841": "cancelled"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1843],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+        text = app.bot.sent[0][1]
+        self.assertIn("#1841", text)
+        self.assertIn("10.00", text)
+        self.assertIn("#1843", text)
+        self.assertEqual(fake.fail_refund_calls, [("1841", 1)])
+        self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertEqual(
+            fake.record_service_cancel_calls, [("gop", 7000, "1841")]
+        )
+        self.assertEqual(fake.smm_orders_created, [
+            (874, "https://tiktok.com/@x/video/1", 1000),
+        ])
+        self.assertEqual(fake.orders_created, [])
+        # The replacement order is watched now, not the cancelled one.
+        self.assertEqual(list(bot.WATCHED_ORDERS), ["1843"])
+
+    async def test_refunded_order_still_drops_silently(self):
+        # An order the provider already refunded needs nothing: no
+        # message, no refund call, and it leaves the watch list.
         self._watch("1842", self._gop_views())
         fake = FakePaxyo(
             services=[self._gop_views(), self._smm_views()],
-            status_by_order={"1841": "cancelled", "1842": "refunded"},
+            status_by_order={"1842": "refunded"},
         )
         app = FakeApp()
         with mock.patch("bot.paxyo", fake):
@@ -21968,7 +24913,143 @@ class TestFailedRescue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.bot.sent, [])
         self.assertEqual(fake.fail_refund_calls, [])
         self.assertEqual(fake.cancel_refund_calls, [])
+        self.assertEqual(fake.record_service_cancel_calls, [])
         self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    # --- watch: auto-pause on the 3rd provider cancel (item 2) ---
+
+    async def test_provider_cancel_starting_pause_notifies_admin_once(self):
+        # The record call says this 3rd cancel started a pause:
+        # William is told once, the service is noted paused at
+        # once, and the rescue still places the replacement — on
+        # the other provider, never on the paused service.
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[
+                self._gop_views(),
+                self._smm_views(),
+                self._gop_views(7001, "3 minutes", 20.0),
+            ],
+            status_by_order={"1841": "cancelled"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1843],
+            pause_result={
+                "paused_now": True, "cancel_count": 3,
+                "paused_until": "2026-11-17T10:00:00Z",
+            },
+            pauses=[{"provider": "gop", "service_id": 7000}],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake), \
+                mock.patch.object(bot, "ADMIN_TELEGRAM_IDS", {999}):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(
+            fake.record_service_cancel_calls, [("gop", 7000, "1841")]
+        )
+        self.assertIn(
+            "gop:7000", bot._SERVICE_PAUSES_CACHE["data"])
+        admin = [t for cid, t in app.bot.sent if cid == 999]
+        self.assertEqual(len(admin), 1)
+        self.assertIn("Service paused", admin[0])
+        self.assertIn("TikTok Video Views", admin[0])
+        self.assertIn("3 provider cancels", admin[0])
+        self.assertIn("2026-11-17T10:00:00Z", admin[0])
+        self.assertNotIn("GodOfPanel", admin[0])
+        # The rescue still ran, on the healthy provider.
+        self.assertEqual(fake.smm_orders_created, [
+            (874, "https://tiktok.com/@x/video/1", 1000),
+        ])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(list(bot.WATCHED_ORDERS), ["1843"])
+
+    async def test_provider_cancel_below_pause_threshold_no_admin_alert(self):
+        # Only the 2nd cancel in 24h: recorded, no pause, no admin
+        # alert — the rescue proceeds exactly as before.
+        self._watch("1841", self._gop_views())
+        fake = FakePaxyo(
+            services=[self._gop_views(), self._smm_views()],
+            status_by_order={"1841": "cancelled"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1843],
+            pause_result={
+                "paused_now": False, "cancel_count": 2,
+                "paused_until": None,
+            },
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake), \
+                mock.patch.object(bot, "ADMIN_TELEGRAM_IDS", {999}):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(
+            fake.record_service_cancel_calls, [("gop", 7000, "1841")]
+        )
+        self.assertNotIn(
+            "gop:7000", bot._SERVICE_PAUSES_CACHE["data"])
+        admin = [t for cid, t in app.bot.sent if cid == 999]
+        self.assertEqual(admin, [])
+        self.assertEqual(fake.smm_orders_created, [
+            (874, "https://tiktok.com/@x/video/1", 1000),
+        ])
+
+    async def test_bot_requested_cancel_is_dropped_not_rescued(self):
+        # The bot cancelled this one itself (stall rescue /
+        # auto-cancel): the provider word is "cancelled", but the
+        # entry is already refunded — drop it silently, record
+        # nothing, rescue nothing.
+        self._watch("1841", self._gop_views())
+        bot.WATCHED_ORDERS["1841"]["bot_requested_cancel"] = True
+        fake = FakePaxyo(
+            services=[self._gop_views(), self._smm_views()],
+            status_by_order={"1841": "cancelled"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1843],
+        )
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.record_service_cancel_calls, [])
+        self.assertEqual(fake.fail_refund_calls, [])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.smm_orders_created, [])
+        self.assertEqual(bot.WATCHED_ORDERS, {})
+
+    async def test_user_cancelled_order_is_never_rescued(self):
+        # The user asked to cancel order 1841 themselves: the
+        # confirm run drops the watch entry at once, so the next
+        # cycle has nothing to rescue — no record, no refund, no
+        # replacement, no message about it.
+        self._watch("1841", self._gop_views())
+        said = []
+
+        async def respond(text):
+            said.append(text)
+
+        fake = FakePaxyo(
+            cancel_order_result={
+                "ok": True, "success": True, "order_id": 1841,
+                "refunded_etb": 10.0,
+            },
+            status_by_order={"1841": "cancelled"},
+            fail_refund_result=self._refund(),
+            next_order_ids=[1843],
+        )
+        with mock.patch("bot.paxyo", fake):
+            await bot._run_cancel_order_confirm(
+                1, {"order_id": "1841", "total": 10.0}, "en", respond,
+            )
+        self.assertNotIn("1841", bot.WATCHED_ORDERS)
+        self.assertEqual(len(said), 1)
+        self.assertIn("1841", said[0])
+        self.assertIn("10.00", said[0])
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_delivery_watch_cycle(app)
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.record_service_cancel_calls, [])
+        self.assertEqual(fake.fail_refund_calls, [])
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.smm_orders_created, [])
 
 
 class TestSplitTest(unittest.IsolatedAsyncioTestCase):
@@ -22989,7 +26070,7 @@ class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("10.00", msg.text_sent[0])
         self.assertNotIn("Please send the link", msg.text_sent[0])
-        self.assertIsNone(msg.markups[0])  # no Confirm card
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)  # no Confirm card — the reply keyboard is hidden
         # No order draft and nothing placed.
         self.assertEqual(bot.PENDING, {})
         self.assertEqual(bot.PARTIAL, {})
@@ -23177,7 +26258,7 @@ class TestCheapestQuestion(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("1.60", msg.text_sent[0])
         self.assertNotIn("2,520.00", msg.text_sent[0])
         self.assertNotIn("Please send the link", msg.text_sent[0])
-        self.assertIsNone(msg.markups[0])  # no Confirm card
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)  # no Confirm card — the reply keyboard is hidden
         self.assertEqual(bot.PENDING, {})
         self.assertEqual(bot.PARTIAL, {})
         self.assertEqual(fake.orders_created, [])
@@ -23776,11 +26857,11 @@ class TestAbandonedNudge(unittest.IsolatedAsyncioTestCase):
     async def test_no_nudge_after_order_completed(self):
         paxyo = FakePaxyo()
         await self._send(
-            "order 1000 instagram followers https://instagram.com/p/x",
+            "order 1000 instagram followers https://instagram.com/someuser",
             intent_of(
                 "order", platform="instagram",
                 service_hint="followers",
-                link="https://instagram.com/p/x", quantity=1000,
+                link="https://instagram.com/someuser", quantity=1000,
             ),
             paxyo=paxyo,
         )
@@ -24140,10 +27221,10 @@ class TestPerUserPersonality(_SmartLoopBase):
         _, views_fake = await self._place_views_order()
         ig_fake = FakePaxyo()
         await self._turns([
-            ("I want 1000 Instagram followers https://instagram.com/p/x",
+            ("I want 1000 Instagram followers https://instagram.com/someuser",
              intent_of("order", platform="instagram",
                        service_hint="followers",
-                       link="https://instagram.com/p/x", quantity=1000)),
+                       link="https://instagram.com/someuser", quantity=1000)),
         ], paxyo=ig_fake)
         await self._confirm_pending(ig_fake)
         # The mirror keeps the MOST RECENT order (Instagram), but
@@ -24376,7 +27457,11 @@ class TestPerUserPersonality(_SmartLoopBase):
             any(line in msg.text_sent[0] for line in bot.HUMOR_LINES["en"]),
             msg.text_sent[0],
         )
-        self.assertIn("buttons below", msg.text_sent[1])
+        # The hint no longer names buttons (16 Nov 2026 triage):
+        # the reply keyboard was hidden, so it just invites the
+        # next message.
+        self.assertIn(
+            "Tell me what you'd like to do next", msg.text_sent[1])
 
     async def test_prices_and_confirm_untouched_by_traits(self):
         # A chatty user with a learned tone still gets the
@@ -24573,6 +27658,14 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
         bot.LAST_ORDER.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.FASTEST_FALLBACK.clear()
+        # One-shot pins + prefs are per-user stores shared by every
+        # test (all FakeUsers are id 1): a quote or a cheapest-pref
+        # left by an earlier test must never steer this class's
+        # picks (16 Nov 2026 triage — a leftover youtube quote
+        # pinned #2494 into the fastest-first views test).
+        bot.QUOTED_SERVICE.clear()
+        bot.NUDGE_SERVICE.clear()
+        bot.USER_TRAITS.clear()
 
     def tearDown(self):
         bot.PENDING.clear()
@@ -24581,6 +27674,9 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
         bot.LAST_ORDER.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.FASTEST_FALLBACK.clear()
+        bot.QUOTED_SERVICE.clear()
+        bot.NUDGE_SERVICE.clear()
+        bot.USER_TRAITS.clear()
 
     async def _send(self, text, intent, paxyo=None, user=None):
         msg = FakeMessage()
@@ -24807,7 +27903,7 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("doesn't have followers", msg.text_sent[0])
         self.assertIn("members", msg.text_sent[0])
-        self.assertIsNone(msg.markups[0])  # no Confirm card
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)  # no Confirm card — the reply keyboard is hidden
         self.assertEqual(fake.orders_created, [])
 
     async def test_order_youtube_views_excludes_live_streams(self):
@@ -25563,8 +28659,8 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
     ]
 
     DELIVERY_TEXT = (
-        "✅ Your order is delivered — 100 TikTok views, order "
-        "#1839. Thank you for ordering with Paxyo! 🎉\n"
+        "Your order is delivered — 100 TikTok views, order "
+        "#1839. Thank you for ordering with Paxyo!\n"
         "How was it? Tap 👍 if it went well, 👎 if not."
     )
 
@@ -26037,7 +29133,7 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
     async def test_confirm_still_places_after_warning(self):
         paxyo = FakePaxyo(balance=10.0, traits=self._usual_traits())
         await self._send(
-            "I want 1000 instagram followers https://instagram.com/p/x",
+            "I want 1000 instagram followers https://instagram.com/someuser",
             self._usual_order_intent(), paxyo=paxyo,
         )
         self.assertEqual(len(bot.PENDING), 1)
@@ -26049,7 +29145,7 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
         update = FakeCallbackUpdate(query)
         with mock.patch("bot.paxyo", paxyo):
             await bot.on_callback(update, None)
-        self.assertEqual(paxyo.orders_created, [(1001, "https://instagram.com/p/x", 1000)])
+        self.assertEqual(paxyo.orders_created, [(1001, "https://instagram.com/someuser", 1000)])
         self.assertIn("Order placed!", query.edited[0])
 
     async def test_no_warning_when_balance_suffices(self):
@@ -26513,8 +29609,14 @@ class TestRefillInChat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.PENDING_REFILL, {})
 
     async def test_refill_unsupported_offers_reorder_second_confirm(self):
+        # The completed order's link is a profile link: the reorder
+        # places a NEW followers order, and the link check (16 Nov
+        # 2026) refuses a followers order to a post link.
         paxyo = FakePaxyo(
-            recent=[self._completed_order()],
+            recent=[{
+                **self._completed_order(),
+                "link": "https://instagram.com/someuser",
+            }],
             refill_result={"ok": False, "refill_supported": False, "error": ""},
         )
         await self._send(
@@ -26542,7 +29644,7 @@ class TestRefillInChat(unittest.IsolatedAsyncioTestCase):
             await bot.on_callback(update2, None)
         self.assertEqual(
             paxyo.orders_created,
-            [(1001, "https://instagram.com/p/x", 1000)],
+            [(1001, "https://instagram.com/someuser", 1000)],
         )
         self.assertIn("Order placed!", query2.edited[0])
         self.assertNotIn("Refill started", query2.edited[0])
@@ -26975,6 +30077,151 @@ class TestPriceWatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.bot.sent, [])
 
 
+class TestFasterServiceAlert(unittest.IsolatedAsyncioTestCase):
+    """New faster service alert (ideas batch 2 #6, 16 Nov 2026):
+    a service that is NEW in the refreshed catalogue and FASTER
+    than a user's usual service for the same platform+metric earns
+    that user one alert. Notification only — it never changes an
+    order."""
+
+    def setUp(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.BIG_DEPOSIT_ALERTED.clear()
+        bot.FEEDBACK_ASKED.clear()
+        bot.FEEDBACK_PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.FASTER_SERVICE_ALERTED.clear()
+        bot.QUIET_HELD.clear()
+        bot._PRICE_WATCH_LAST_REFRESH = None
+        bot._PRICE_WATCH_OFF = False
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9
+        bot._PROVIDER_BALANCE_STATE = "ok"
+
+    def tearDown(self):
+        bot.WATCHED_ORDERS.clear()
+        bot.BIG_DEPOSIT_ALERTED.clear()
+        bot.FEEDBACK_ASKED.clear()
+        bot.FEEDBACK_PENDING.clear()
+        bot.USER_TRAITS.clear()
+        bot.FASTER_SERVICE_ALERTED.clear()
+        bot.QUIET_HELD.clear()
+        bot._PRICE_WATCH_LAST_REFRESH = None
+        bot._PRICE_WATCH_OFF = False
+        bot._PROVIDER_BALANCE_LAST_CHECK = -1e9
+        bot._PROVIDER_BALANCE_STATE = "ok"
+
+    def _services(self, *ids):
+        specs = {
+            5535: ("TikTok Video Views | Fast", 1.85, "30 minutes"),
+            5560: ("TikTok Video Views | Super Fast", 2.10, "5 minutes"),
+            5561: ("TikTok Video Views | Slow", 1.50, "60 minutes"),
+            5562: ("TikTok Followers | Fast", 42.00, "5 minutes"),
+            5563: ("TikTok Video Views | No Time", 1.60, None),
+        }
+        services = []
+        for sid in ids:
+            name, price, avg = specs[sid]
+            service = {
+                "service": sid, "name": name,
+                "rate_etb_per_1000": price,
+            }
+            if avg is not None:
+                service["average_time"] = avg
+            services.append(service)
+        return services
+
+    def _fake(self, snapshot, services, refresh=1):
+        fake = FakePaxyo(
+            services=services, price_snapshot=snapshot)
+        fake.services_refresh_count = refresh
+        return fake
+
+    def _traits(self, user_id=2, usual="gop:5535",
+                platform="tiktok", metric="views"):
+        bot.USER_TRAITS[user_id] = {
+            "usual_platform": platform,
+            "usual_metric": metric,
+            "usual_service_id": usual,
+        }
+
+    async def _run(self, fake):
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake), \
+             mock.patch.object(bot, "ADMIN_TELEGRAM_IDS", {1}):
+            await bot.run_price_watch_cycle(app)
+        return app
+
+    async def test_new_faster_service_alerts_user(self):
+        self._traits()
+        fake = self._fake(
+            {"5535": 1.85}, self._services(5535, 5560))
+        app = await self._run(fake)
+        self.assertEqual(len(app.bot.sent), 1)
+        chat_id, text = app.bot.sent[0]
+        self.assertEqual(chat_id, 2)
+        self.assertIn("faster", text)
+        self.assertIn("5 minutes", text)
+        self.assertIn("30 minutes", text)
+        # short_service_name truncates at " | " — the service is
+        # named by its short name, as on the Confirm card.
+        self.assertIn("TikTok Video Views", text)
+
+    async def test_slower_new_service_alerts_nothing(self):
+        self._traits()
+        fake = self._fake(
+            {"5535": 1.85}, self._services(5535, 5561))
+        app = await self._run(fake)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_different_metric_alerts_nothing(self):
+        self._traits()
+        fake = self._fake(
+            {"5535": 1.85}, self._services(5535, 5562))
+        app = await self._run(fake)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_no_time_on_new_service_alerts_nothing(self):
+        self._traits()
+        fake = self._fake(
+            {"5535": 1.85}, self._services(5535, 5563))
+        app = await self._run(fake)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_no_usual_traits_alerts_nothing(self):
+        fake = self._fake(
+            {"5535": 1.85}, self._services(5535, 5560))
+        app = await self._run(fake)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_alert_fires_once_across_cycles(self):
+        self._traits()
+        fake = self._fake(
+            {"5535": 1.85}, self._services(5535, 5560))
+        app = await self._run(fake)
+        self.assertEqual(len(app.bot.sent), 1)
+        # A second refresh: the snapshot the save wrote now holds
+        # the new service, so it is no longer new — and the
+        # alerted-set backstop would stop it anyway.
+        fake.services_refresh_count = 2
+        with mock.patch("bot.paxyo", fake), \
+             mock.patch.object(bot, "ADMIN_TELEGRAM_IDS", {1}):
+            await bot.run_price_watch_cycle(app)
+        self.assertEqual(len(app.bot.sent), 1)
+
+    async def test_bootstrap_alerts_nothing(self):
+        self._traits()
+        fake = self._fake({}, self._services(5535, 5560))
+        app = await self._run(fake)
+        self.assertEqual(app.bot.sent, [])
+
+    async def test_usual_service_gone_alerts_nothing(self):
+        self._traits(usual="gop:9999")
+        fake = self._fake(
+            {"5535": 1.85}, self._services(5535, 5560))
+        app = await self._run(fake)
+        self.assertEqual(app.bot.sent, [])
+
+
 class TestProviderBalance(unittest.IsolatedAsyncioTestCase):
     """Low provider balance alert (feature 7, 15 Nov 2026): at
     most one check per hour; below $3 William gets one "low"
@@ -27358,7 +30605,7 @@ class TestLoyaltyBonus(_SmartLoopBase):
         )
         self.assertIn("already in your balance", user_text)
         self.assertIn(
-            "🎁 Loyalty bonus credited: 4.62 ETB to @testuser (1) "
+            "Loyalty bonus credited: 4.62 ETB to @testuser (1) "
             "— their 10th completed order.",
             admin_text,
         )
@@ -27483,7 +30730,7 @@ class TestLoyaltyBonus(_SmartLoopBase):
         self.assertIn("just earned a 4.62 ETB bonus", text)
         self.assertEqual(len(app.bot.sent), 1)
         self.assertIn(
-            "🎁 Loyalty bonus credited: 4.62 ETB to @testuser (1)",
+            "Loyalty bonus credited: 4.62 ETB to @testuser (1)",
             app.bot.sent[0][1],
         )
 
@@ -28419,7 +31666,7 @@ class TestRememberDepositMethod(_SmartLoopBase):
             ("deposit 100", intent_of("deposit", amount=100)),
         ], paxyo=FakePaxyo())
         self.assertIn("Telebirr or CBE", msg.text_sent[0])
-        self.assertIsNone(msg.markups[0])
+        self.assertIsInstance(msg.markups[0], bot.ReplyKeyboardRemove)  # no Confirm card — the reply keyboard is hidden
 
 
 class TestChannelNudge(_SmartLoopBase):

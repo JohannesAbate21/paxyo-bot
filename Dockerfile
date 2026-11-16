@@ -9,6 +9,12 @@
 #   WEBHOOK_URL=https://paxorder-bot.fly.dev
 FROM python:3.12-slim
 WORKDIR /app
+# ffmpeg (16 Nov 2026): GIFs arrive as MP4 animations — one frame is
+# pulled with ffmpeg so Gemini vision can read the GIF's mood. If
+# ffmpeg is missing at runtime the bot falls back to the neutral
+# reply instead of failing the message.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .

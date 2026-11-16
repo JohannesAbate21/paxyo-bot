@@ -2,3 +2,6 @@
 # runs its own HTTP server for Telegram updates + Render's health check.
 python-telegram-bot[webhooks]==21.*
 httpx==0.28.*
+# Deposit by QR (ideas batch 1 #9, 16 Nov 2026): pure-Python QR codes,
+# no Pillow or system packages needed.
+segno==1.6.*

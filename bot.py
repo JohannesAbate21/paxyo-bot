@@ -54,14 +54,16 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
+import tempfile
 import uuid
 from typing import Optional
 
 import httpx
 import tornado.web
 from tornado.httpserver import HTTPServer
-from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update, WebAppInfo
+from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -752,9 +754,36 @@ TEXT = {
         "am": "Quantity ስንት ይሁን? (ለምሳሌ 1000)",
         "en": "How many? (for example 1000)",
     },
+    # Reaction picker (ideas batch 1 #1, 16 Nov 2026): the prompt
+    # above the emoji buttons, the tap confirmation, and the stale
+    # button line. en + first-pass am, unreviewed.
+    "reaction_picker_prompt": {
+        "am": "የትኛውን reaction? ከታች ይጫኑ።",
+        "en": "Which reaction? Tap one below.",
+    },
+    "reaction_picker_picked": {
+        "am": "{emoji} reactions — እሺ።",
+        "en": "{emoji} reactions — got it.",
+    },
+    "reaction_picker_gone": {
+        "am": "ይቅርታ — ያ ትዕዛዝ ከእንግዲህ ክፍት አይደለም፤ አዲስ ትዕዛዝ ሲፈልጉ ይላኩልኝ።",
+        "en": "That order is no longer open — send a new order to start again.",
+    },
+    # Deposit-hijack fix (16 Nov 2026): one short line when the
+    # user switches flows mid-order — the unfinished order is
+    # saved, and saying "order" continues it. en + first-pass am,
+    # unreviewed.
+    "draft_parked": {
+        "am": "ያልተጠናቀቀው orderዎ ተቀምጧል — ለመቀጠል \"order\" ይበሉ።",
+        "en": "Your unfinished order is saved — say \"order\" to continue it.",
+    },
     "ask_platform": {
         "am": "የትኛው platform ነው? (Instagram, TikTok, Telegram, YouTube...)",
         "en": "Which platform? (Instagram, TikTok, Telegram, YouTube...)",
+    },
+    "order_prompt": {
+        "am": "ምን መግዛት ይፈልጋሉ? አገልግሎቱን ይንገሩኝ እና ሊንኩን ይለጥፉ።",
+        "en": "What would you like to order? Tell me the service and paste your link.",
     },
     "ask_deposit_amount": {
         "am": "ምን ያህል deposit ማድረግ ይፈልጋሉ? (ለምሳሌ 100)",
@@ -845,6 +874,34 @@ TEXT = {
         "am": "ይህ service በPaxyo አይገኝም — እባክዎ ሌላ ይምረጡ።",
         "en": "That service isn't available on Paxyo — please choose another one.",
     },
+    # A service the user chose (named by ID, pinned, or the last
+    # order's) is auto-paused right now (cancel-cutting item 2,
+    # 16 Nov 2026): say so plainly and offer the fastest one
+    # instead, with one tap — never silently switch.
+    "service_paused": {
+        "am": "ይህ service ({service}) አሁን ቆሟል። ፈጣኑን ልጠቀም?",
+        "en": "That service ({service}) is paused right now. Want me to use the fastest one instead?",
+    },
+    # Quoted-service re-quote (19:28 EAT 16 Nov 2026): the service
+    # whose price was quoted just before the order cannot be ordered
+    # after all — say so plainly on the card and name the
+    # replacement + its price, never silently swap.
+    "quoted_service_changed": {
+        "am": "ማስታወሻ — {service} {reason}፣ ስለዚህ ይህ order በምትኩ {replacement} በ{price} ETB per 1000 ይጠቀማል።",
+        "en": "Heads up — {service} {reason}, so this order uses {replacement} at {price} ETB per 1000 instead.",
+    },
+    "quoted_unavailable": {
+        "am": "አሁን አይገኝም",
+        "en": "is no longer available",
+    },
+    "quoted_paused": {
+        "am": "አሁን ቆሟል",
+        "en": "is paused right now",
+    },
+    "quoted_quantity": {
+        "am": "quantity ከ{min} እስከ {max} መሆን አለበት",
+        "en": "needs a quantity between {min} and {max}",
+    },
     "use_fastest": {
         "am": "⚡ ፈጣኑን ተጠቀም",
         "en": "⚡ Use the fastest one",
@@ -921,20 +978,27 @@ TEXT = {
         ),
     },
     "deposit_step_ussd": {
-        "am": "📱 {code} ይደውሉ",
-        "en": "📱 Dial {code}",
+        "am": "{code} ይደውሉ",
+        "en": "Dial {code}",
     },
     "deposit_step_pay_to": {
         "am": "ወደ: {pay_to} ይክፈሉ",
         "en": "Pay to: {pay_to}",
     },
     "deposit_step_link": {
-        "am": "🔗 ይክፈቱ: {url}",
-        "en": "🔗 Open: {url}",
+        "am": "ይክፈቱ: {url}",
+        "en": "Open: {url}",
+    },
+    # Deposit by QR (ideas batch 1 #9, 16 Nov 2026): the caption on
+    # the QR photo, sent only when the server actually returned a
+    # checkout URL for the deposit. en + first-pass am, unreviewed.
+    "deposit_qr_caption": {
+        "am": "ይህን ኮድ በስልክዎ ካሜራ ቃኝተው ይክፈሉ።",
+        "en": "Scan this code with your phone camera to pay.",
     },
     "deposit_step_website": {
-        "am": "🌐 paxyo.et ይክፈቱ → Deposit ይምረጡ",
-        "en": "🌐 Open paxyo.et → Deposit",
+        "am": "paxyo.et ይክፈቱ → Deposit ይምረጡ",
+        "en": "Open paxyo.et → Deposit",
     },
     # USSD push (Chapa Direct Charge): no code to dial, no link to open —
     # the payment prompt arrives on the user's own phone.
@@ -1266,6 +1330,56 @@ TEXT = {
     "batch_title": {
         "am": "{n} orders እባክዎ ያረጋግጡ:",
         "en": "Please confirm — {n} orders:",
+    },
+    # Post bundle (ideas batch 1 #3, 16 Nov 2026): the link question
+    # when no platform is known yet, the one quantity question, and
+    # the combined Confirm card title. en + first-pass am, unreviewed.
+    "bundle_ask_link": {
+        "am": "ለማሳደግ የሚፈልጉት post link ይላኩልኝ።",
+        "en": "Send the link of the post you want to boost.",
+    },
+    "bundle_ask_quantities": {
+        "am": "Views, likes እና reactions ስንት? (ለሦስቱም አንድ ቁጥር — ለምሳሌ 1000 — ወይም ሦስት ቁጥሮች፣ እንደ 1000 views, 500 likes, 200 reactions)",
+        "en": "How many views, likes and reactions? (one number for all three — for example 1000 — or three numbers, like 1000 views, 500 likes, 200 reactions)",
+    },
+    "bundle_title": {
+        "am": "እባክዎ ያረጋግጡ — ይህን post ያሳድጉ:",
+        "en": "Please confirm — boost this post:",
+    },
+    # Check my post (ideas batch 2 #2, 16 Nov 2026): the check
+    # answers. Counts are only ever what the public page showed —
+    # never guessed. en + first-pass am, unreviewed.
+    "faster_service_alert": {
+        "am": "ጥሩ ዜና — ፈጣን {platform} {metric} service አሁን አለ፡ {service} (በግምት {new_time}፣ የተለመደው {usual_service} በግምት {usual_time} ነው)። ቀጣዩ orderዎ ፈጣኑን በራስ-ሰር ይመርጣል።",
+        "en": "Good news — there's a faster {platform} {metric} service now: {service} (about {new_time}, your usual {usual_service} is about {usual_time}). Your next order will pick the fastest one automatically.",
+    },
+    "post_check_public_views": {
+        "am": "Postዎ public ነው — አሁን {views} views አለው። ለorder ዝግጁ ነው፤ ስንት views፣ likes ወይም reactions እንደሚፈልጉ ይንገሩኝ።",
+        "en": "Your post is public — it has {views} views right now. It's ready for an order: tell me how many views, likes or reactions you want.",
+    },
+    "post_check_public_no_counts": {
+        "am": "Postዎ public ነው። ከገጹ ላይ ያለውን view ቁጥር ማንበብ አልቻልኩም፣ ግን ለorder ዝግጁ ነው — ስንት views፣ likes ወይም reactions እንደሚፈልጉ ይንገሩኝ።",
+        "en": "Your post is public. I couldn't read its current view count from the page, but it's ready for an order — tell me how many views, likes or reactions you want.",
+    },
+    "post_check_not_public": {
+        "am": "ያ post መክፈት አልቻልኩም — private ወይም ተሰርዞ ሊሆን ይችላል። Orders public post ይፈልጋሉ፤ public መሆኑን አረጋግጠው link እንደገና ይላኩ።",
+        "en": "I couldn't open that post — it may be private or deleted. Orders need a public post, so check that it's public and send the link again.",
+    },
+    "post_check_unknown": {
+        "am": "ያ post መክፈት አልቻልኩም — link ትክክል መሆኑን እና channel public መሆኑን አረጋግጠው እንደገና ይላኩ።",
+        "en": "I couldn't open that post to check it — make sure the link is right and the channel is public, then send it again.",
+    },
+    "post_check_not_post_link": {
+        "am": "ያ {platform} profile/channel link ነው እንጂ post link አይደለም — ለመፈተሽ የተወሰነ post link ይላኩ።",
+        "en": "That's a {platform} profile/channel link, not a post link — send the link of the specific post to check it.",
+    },
+    "post_check_unknown_link": {
+        "am": "ያ link መፈተሽ አልቻልኩም — ከInstagram፣ TikTok፣ Telegram፣ YouTube ወይም Facebook post link ይላኩ።",
+        "en": "I can't check that link — send a post link from Instagram, TikTok, Telegram, YouTube or Facebook.",
+    },
+    "post_check_cant_read": {
+        "am": "ያ {platform} post link ነው፣ ግን ከዚህ ላይ ቁጥሩን ማንበብ አልችልም — post public ከሆነ ለorder ዝግጁ ነው። ስንት views፣ likes ወይም reactions እንደሚፈልጉ ይንገሩኝ።",
+        "en": "That's a {platform} post link, but I can't read its counts from here — if the post is public, it's ready for an order. Tell me how many views, likes or reactions you want.",
     },
     "batch_total": {
         "am": "ጠቅላላ: {total} ETB",
@@ -1670,8 +1784,8 @@ TEXT = {
     # Voice messages: the transcription is shown to the user, so a
     # wrong transcript is visible instead of looking like silence.
     "voice_heard": {
-        "am": "🎙 ያልከው: \"{text}\"",
-        "en": "🎙 You said: \"{text}\"",
+        "am": "ያልከው: \"{text}\"",
+        "en": "You said: \"{text}\"",
     },
     "voice_download_failed": {
         "am": "Voice መልዕክቱን ማውረድ አልቻልኩም — እባክዎ እንደገና ይሞክሩ ወይም በጽሑፍ ይላኩልኝ።",
@@ -1681,15 +1795,32 @@ TEXT = {
         "am": "የቪዲዮ መልዕክት ማዳመጥ አልችልም — እባክዎ orderዎን በጽሑፍ ይላኩልኝ።",
         "en": "I can't listen to video messages — please type your order instead.",
     },
-    # GIFs and stickers: never silent, never "I did not understand" —
-    # a short playful line steering back to ordering.
-    "sticker_reply": {
-        "am": "😄 ጥሩ ነው! ምን ማዘዝ ይፈልጋሉ?",
-        "en": "😄 Nice one! What would you like to order?",
+    # GIF / sticker / image mood replies (16 Nov 2026, William's
+    # Media & GIF Reaction Handling rules): the vision model
+    # classifies the media into one of these four moods, and the
+    # reply matches it — never a generic "fun" line. The unclear
+    # line is also the fallback when vision cannot read the media
+    # at all: neutral, never a guess. Amharic is first-pass,
+    # unreviewed.
+    "gif_mood_angry": {
+        "am": "ቁጣዎን ገብቶኛል — ይህን ወዲያውኑ እናስተካክል። በትዕዛዝዎ እንዴት ልርዳዎት?",
+        "en": "I hear your frustration — let's get this sorted out right away. How can I help with your order?",
     },
-    "gif_reply": {
-        "am": "😄 አዝናኝ ነው! ምን ማዘዝ ይፈልጋሉ?",
-        "en": "😄 Haha, good one! What would you like to order?",
+    "gif_mood_confused": {
+        "am": "ዝማኔ እየጠበቁ ያሉ ይመስላል — እኔ እመረምራለሁ።",
+        "en": "Looks like you're waiting on an update — let me check on that for you.",
+    },
+    "gif_mood_happy": {
+        "am": "ነገሮች በጥሩ ሁኔታ እየሄዱ ማየቴ ደስ ብሎኛል! ሌላ የሚያስፈልግዎት ካለ ንገሩኝ።",
+        "en": "Glad to see things are going smoothly! Let me know if you need anything else.",
+    },
+    "gif_mood_sad": {
+        "am": "ይቅርታ! ምን እንደተበላሸ ንገሩኝ — እኔ እረዳዎታለሁ።",
+        "en": "Sorry to see that! Tell me what went wrong and I'll help fix it.",
+    },
+    "gif_mood_unclear": {
+        "am": "መልእክትዎ ደርሶኛል! ዛሬ በትዕዛዞችዎ እንዴት ልርዳዎት?",
+        "en": "Got your message! How can I assist you with your orders today?",
     },
     # Delivery times: a REAL time from the catalogue, never the vague
     # "shown before you confirm" line (owner, 13 Nov 2026).
@@ -1733,8 +1864,8 @@ TEXT = {
     # Public account reminder (owner, 13 Nov 2026): an order can only
     # land on a public account.
     "public_reminder": {
-        "am": "⚠️ account public መሆኑን ያረጋግጡ (private አይደለም) — private account order መቀበል አይችልም።",
-        "en": "⚠️ Make sure the account is public (not private) — a private account can't receive the order.",
+        "am": "account public መሆኑን ያረጋግጡ (private አይደለም) — private account order መቀበል አይችልም።",
+        "en": "Make sure the account is public (not private) — a private account can't receive the order.",
     },
     "public_answer": {
         "am": "አዎ — accountዎ public መሆን አለበት፣ private አይደለም። Private account order መቀበል አይችልም።",
@@ -1920,32 +2051,32 @@ TEXT = {
     # line steers back to the order without interrogating. The AI
     # answer is used when it works; these are the no-AI fallbacks.
     "chat_laugh": {
-        "am": "😄 Haha, ደስ ይላል!",
-        "en": "😄 Haha, glad you're in a good mood!",
+        "am": "Haha, ደስ ይላል!",
+        "en": "Haha, glad you're in a good mood!",
     },
     "chat_thanks": {
-        "am": "እንኳን ደህና መጡ! 🙂",
-        "en": "You're welcome! 🙂",
+        "am": "እንኳን ደህና መጡ!",
+        "en": "You're welcome!",
     },
     "chat_tired": {
-        "am": "አዝናለሁ — እረፍት ያግኙ። 🙂",
-        "en": "Sorry to hear that — hope you get some rest. 🙂",
+        "am": "አዝናለሁ — እረፍት ያግኙ።",
+        "en": "Sorry to hear that — hope you get some rest.",
     },
     "chat_happy": {
-        "am": "ጥሩ ነው — ደስ ይላል! 🙂",
-        "en": "Nice — love to hear it! 🙂",
+        "am": "ጥሩ ነው — ደስ ይላል!",
+        "en": "Nice — love to hear it!",
     },
     "chat_greeting": {
-        "am": "ሰላም! ደህና ነኝ 🙂",
-        "en": "Hey! I'm doing well, thanks for asking 🙂",
+        "am": "ሰላም! ደህና ነኝ",
+        "en": "Hey! I'm doing well, thanks for asking",
     },
     "chat_viral": {
         "am": "እሱ በቪዲዮው ላይ ይወሰናል — ጥሩ content እና views ወይም likes ከሆነ ብዙ ሰው ይደርስበታል።",
         "en": "Honestly, it depends on the video — good content plus a push from views or likes usually helps it travel further.",
     },
     "chat_default": {
-        "am": "ገብቶኛል 🙂",
-        "en": "Got it 🙂",
+        "am": "ገብቶኛል",
+        "en": "Got it",
     },
     "chat_continue_link": {
         "am": "Link ሲልኩት እጀምራለሁ።",
@@ -1980,12 +2111,20 @@ TEXT = {
     # I'm tired today" needs both parts acknowledged, not just the
     # laugh and not just the tiredness.
     "chat_laugh_tired": {
-        "am": "😄 Haha — እረፍት ያግኙ! 🙂",
-        "en": "Haha — get some rest when you can! 🙂",
+        "am": "Haha — እረፍት ያግኙ!",
+        "en": "Haha — get some rest when you can!",
     },
     "orders_history_title": {
         "am": "Ordersዎ:",
         "en": "Your orders:",
+    },
+    "orders_history_title_platform": {
+        "am": "{platform} ordersዎ:",
+        "en": "Your {platform} orders:",
+    },
+    "orders_history_empty_platform": {
+        "am": "እስካሁን {platform} order የለዎትም።",
+        "en": "You have no {platform} orders yet.",
     },
     # Ideas batch (owner, 15 Nov 2026): proactive delivery updates,
     # cross-sell after delivery, stuck-order watch, invite link,
@@ -1994,12 +2133,12 @@ TEXT = {
     # catalogue and the Paxyo API, never from the AI.
     "order_delivered": {
         "am": (
-            "✅ Orderዎ ደርሷል — {quantity} {service}, order #{order_id}. "
-            "ከPaxyo ጋር ስለዘዙ እናመሰግናለን! 🎉"
+            "Orderዎ ደርሷል — {quantity} {service}, order #{order_id}. "
+            "ከPaxyo ጋር ስለዘዙ እናመሰግናለን!"
         ),
         "en": (
-            "✅ Your order is delivered — {quantity} {service}, "
-            "order #{order_id}. Thank you for ordering with Paxyo! 🎉"
+            "Your order is delivered — {quantity} {service}, "
+            "order #{order_id}. Thank you for ordering with Paxyo!"
         ),
     },
     "order_delivered_crosssell": {
@@ -2052,13 +2191,13 @@ TEXT = {
     },
     "order_stuck": {
         "am": (
-            "⏳ Order #{order_id} ({service} ×{quantity}) ከተለመደው "
+            "Order #{order_id} ({service} ×{quantity}) ከተለመደው "
             "ጊዜ በላይ እየወሰደ ነው — አብዛኛውን ጊዜ {avg} ይወስዳል፣ "
             "አሁን {elapsed} ሆኗል። አሁንም እየተሰራበት ነው። ከቀጠለ "
             "support ያነጋግሩ: t.me/paxyo"
         ),
         "en": (
-            "⏳ Your order #{order_id} ({service} ×{quantity}) is "
+            "Your order #{order_id} ({service} ×{quantity}) is "
             "taking longer than usual — it usually takes about "
             "{avg}, and it has been {elapsed}. It is still being "
             "worked on. If it stays stuck, talk to support: "
@@ -2073,14 +2212,14 @@ TEXT = {
     # amount the user confirmed).
     "order_rescued": {
         "am": (
-            "⏳ Order #{old_order_id} ({old_service} ×{quantity}) "
+            "Order #{old_order_id} ({old_service} ×{quantity}) "
             "ስለተዘገየ ሰርዤ {refunded} ETB ወደ balanceዎ መልሻለሁ። "
             "ወደ ቀጣዩ service — {new_service} — አዛውሬዋለሁ፣ አዲስ "
             "order #{new_order_id} ነው። አዲሱ order {new_total} "
             "ETB ያስከፍላል (የተመለሰው order {refunded} ETB ነበር)።"
         ),
         "en": (
-            "⏳ Your order #{old_order_id} ({old_service} "
+            "Your order #{old_order_id} ({old_service} "
             "×{quantity}) stalled, so I cancelled it and refunded "
             "{refunded} ETB to your balance. I've moved your order "
             "to the next service — {new_service} — as order "
@@ -2109,14 +2248,14 @@ TEXT = {
     # service — so no refund figure is claimed.
     "order_rescue_exhausted": {
         "am": (
-            "⏳ Order #{order_id} ({service} ×{quantity}) አሁንም "
+            "Order #{order_id} ({service} ×{quantity}) አሁንም "
             "አልደረሰም — ወደ ቀጣዩ service አራት ጊዜ አዛውረነዋል "
             "ሁሉም ተዘግተዋል፣ ስለዚህ ማዛወር አቁመናል። Orderዎ አሁንም "
             "ከመጨረሻው service ጋር እየተሰራ ነው። ከቀጠለ support "
             "ያነጋግሩ: t.me/paxyo"
         ),
         "en": (
-            "⏳ Your order #{order_id} ({service} ×{quantity}) is "
+            "Your order #{order_id} ({service} ×{quantity}) is "
             "still not delivering — we already moved it to the next "
             "service four times and all of them stalled too, so "
             "we've stopped moving it. Your order is still in "
@@ -2132,17 +2271,34 @@ TEXT = {
     # first-pass am, unreviewed.
     "order_rescue_pricier": {
         "am": (
-            "⏳ Order #{order_id} ({service} ×{quantity}) ስለተዘገየ "
+            "Order #{order_id} ({service} ×{quantity}) ስለተዘገየ "
             "ሰርዤ {refunded} ETB ወደ balanceዎ መልሻለሁ። ቀጣዩ service "
             "ከ {refunded} ETB በላይ ስለሚያስከፍል orderዎን አላዛወርኩም "
             "— በማንኛውም ጊዜ እንደገና ማዘዝ ይችላሉ።"
         ),
         "en": (
-            "⏳ Your order #{order_id} ({service} ×{quantity}) "
+            "Your order #{order_id} ({service} ×{quantity}) "
             "stalled, so I cancelled it and refunded {refunded} "
             "ETB to your balance. The next services cost more than "
             "the {refunded} ETB you confirmed, so I did not move "
             "your order — you can order again any time."
+        ),
+    },
+    # Link mismatch on rescue (cancel-cutting item 5, 16 Nov 2026):
+    # the refunded order cannot be moved because its link does not
+    # fit this kind of service — the ask-link line is appended by
+    # the caller. en + first-pass am, unreviewed.
+    "order_rescue_link_mismatch": {
+        "am": (
+            "ትዕዛዝ #{order_id} ({service} ×{quantity}) — linkዎ "
+            "ለዚህ service ስለማይስማማ ሰርዤ {refunded} ETB ወደ "
+            "balanceዎ መልሻለሁ። እንደገና ለማዘዝ ትክክለኛውን link ላክልኝ።"
+        ),
+        "en": (
+            "Your order #{order_id} ({service} ×{quantity}) was "
+            "cancelled and I refunded {refunded} ETB to your "
+            "balance — the link does not fit this kind of service, "
+            "so I could not move the order to another service."
         ),
     },
     # Failed-order rescue (second provider, 15 Nov 2026): the
@@ -2153,14 +2309,14 @@ TEXT = {
     # happen. en + first-pass am, unreviewed.
     "order_failed_rescued": {
         "am": (
-            "⏳ Order #{old_order_id} ({old_service} ×{quantity}) "
+            "Order #{old_order_id} ({old_service} ×{quantity}) "
             "ስለተበላሸ {refunded} ETB ወደ balanceዎ መልሻለሁ። ወደ "
             "ቀጣዩ service — {new_service} — አዛውሬዋለሁ፣ አዲስ order "
             "#{new_order_id} ነው። አዲሱ order {new_total} ETB "
             "ያስከፍላል (የተመለሰው order {refunded} ETB ነበር)።"
         ),
         "en": (
-            "⏳ Your order #{old_order_id} ({old_service} "
+            "Your order #{old_order_id} ({old_service} "
             "×{quantity}) failed, so I refunded "
             "{refunded} ETB to your balance. I've moved your order "
             "to the next service — {new_service} — as order "
@@ -2249,12 +2405,12 @@ TEXT = {
     },
     "order_split_test_done": {
         "am": (
-            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
             "ደርሰዋል — ቀሪውን {rest_quantity} በተመሳሳይ service ላይ "
             "አሁን እያስቀመጥኩ ነው (order #{new_order_id})።"
         ),
         "en": (
-            "✅ The first {test_quantity} of {quantity} are "
+            "The first {test_quantity} of {quantity} are "
             "delivered — placing the remaining {rest_quantity} on "
             "the same service now (order #{new_order_id})."
         ),
@@ -2372,14 +2528,14 @@ TEXT = {
     },
     "order_split_test_moved": {
         "am": (
-            "⏳ በ {old_service} ላይ ያለው ሙከራ (order "
+            "በ {old_service} ላይ ያለው ሙከራ (order "
             "#{old_order_id}, {test_quantity}) አልደረሰም፣ ስለዚህ "
             "ሰርዤ {refunded} ETB ወደ balanceዎ መልሻለሁ። ቀጣዩን "
             "service አሁን እየሞከርኩ ነው — {new_service} (ሙከራ "
             "order #{new_order_id})።"
         ),
         "en": (
-            "⏳ The test on {old_service} (order #{old_order_id}, "
+            "The test on {old_service} (order #{old_order_id}, "
             "{test_quantity}) didn't deliver, so I cancelled it and "
             "refunded {refunded} ETB to your balance. I'm testing "
             "the next service now — {new_service} (test order "
@@ -2388,14 +2544,14 @@ TEXT = {
     },
     "order_split_no_service": {
         "am": (
-            "⏳ በ {service} ላይ ያለው ሙከራ (order #{order_id}, "
+            "በ {service} ላይ ያለው ሙከራ (order #{order_id}, "
             "{test_quantity}) አልደረሰም፣ ስለዚህ ሰርዤ {refunded} ETB "
             "ወደ balanceዎ መልሻለሁ። በዋጋዎ ውስጥ የሚሞከር ሌላ "
             "service የለም፣ ስለዚህ ምንም አልተቀመጠም — በማንኛውም ጊዜ "
             "እንደገና ማዘዝ ይችላሉ።"
         ),
         "en": (
-            "⏳ The test on {service} (order #{order_id}, "
+            "The test on {service} (order #{order_id}, "
             "{test_quantity}) didn't deliver, so I cancelled it and "
             "refunded {refunded} ETB to your balance. No more "
             "services to try in your price range, so nothing was "
@@ -2408,14 +2564,14 @@ TEXT = {
     # order_rescue_exhausted.
     "order_split_exhausted": {
         "am": (
-            "⏳ የሙከራ orderዎ #{order_id} ({service} ×{quantity}) "
+            "የሙከራ orderዎ #{order_id} ({service} ×{quantity}) "
             "አሁንም አልደረሰም — ወደ ሌላ service ሁለት ጊዜ አዛውረነዋል "
             "ሁለቱም ተዘግተዋል፣ ስለዚህ ማዛወር አቁመናል። የሙከራ orderዎ "
             "አሁንም ከመጨረሻው service ጋር እየተሰራ ነው። ከቀጠለ "
             "support ያነጋግሩ: t.me/paxyo"
         ),
         "en": (
-            "⏳ Your test order #{order_id} ({service} ×{quantity}) "
+            "Your test order #{order_id} ({service} ×{quantity}) "
             "is still not delivering — we already tried the other "
             "services twice and both stalled too, so we've stopped "
             "moving it. Your test order is still in progress with "
@@ -2443,13 +2599,13 @@ TEXT = {
     },
     "order_split_rest_failed": {
         "am": (
-            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
             "ደርሰዋል። ቀሪውን {rest_quantity} አሁን ማስቀመጥ "
             "አልቻልኩም — እባክዎ ቀሪውን እንደገና ይዘዙ ወይም support "
             "ያነጋግሩ: t.me/paxyo"
         ),
         "en": (
-            "✅ The first {test_quantity} of {quantity} are "
+            "The first {test_quantity} of {quantity} are "
             "delivered. I couldn't place the remaining "
             "{rest_quantity} right now — please order the rest "
             "again or talk to support: t.me/paxyo"
@@ -2457,13 +2613,13 @@ TEXT = {
     },
     "order_split_rest_topup": {
         "am": (
-            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
             "ደርሰዋል። ቀሪው {rest_quantity} {needed} ETB ይፈልጋል፣ "
             "balanceዎ ግን {balance} ETB ነው — እባክዎ top up "
             "ያድርጉ እና ቀሪውን እንደገና ይዘዙ።"
         ),
         "en": (
-            "✅ The first {test_quantity} of {quantity} are "
+            "The first {test_quantity} of {quantity} are "
             "delivered. The remaining {rest_quantity} needs "
             "{needed} ETB, but your balance is {balance} ETB — "
             "please top up and order the rest again."
@@ -2471,13 +2627,13 @@ TEXT = {
     },
     "order_split_rest_no_cover": {
         "am": (
-            "✅ ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
+            "ከ {quantity} ውስጥ የመጀመሪያዎቹ {test_quantity} "
             "ደርሰዋል። ቀሪው {rest_quantity} ካረጋገጡት ትንሽ በላይ "
             "ያስከፍላል፣ ተጨማሪው cover ገና አልተጀመረም — እባክዎ "
             "support ያነጋግሩ: t.me/paxyo እና orderዎን ይጥቀሱ።"
         ),
         "en": (
-            "✅ The first {test_quantity} of {quantity} are "
+            "The first {test_quantity} of {quantity} are "
             "delivered. The remaining {rest_quantity} costs a "
             "little more than you confirmed, and the extra cover "
             "isn't switched on yet — please talk to support: "
@@ -2516,15 +2672,50 @@ TEXT = {
     },
     "invite_link": {
         "am": (
-            "🎉 ጓደኞችዎን ወደ Paxyo ይጋብዙ! ይህን link ያጋሩ:\n{link}\n"
-            "በመጀመሪያ depositቸው invite code {code} ሲጠቀሙ 20% "
-            "bonus ያገኛሉ።"
+            "ጓደኞችዎን ወደ Paxyo ይጋብዙ! ይህን link ያጋሩ:\n{link}\n"
+            "ጓደኛዎ በመጀመሪያ depositቸው invite code {code} ሲጠቀሙ 20% "
+            "bonus ያገኛሉ — እና እርስዎም እንዲሁ።"
         ),
         "en": (
-            "🎉 Invite your friends to Paxyo! Share this link:\n"
-            "{link}\nWhen they make their first deposit with "
-            "invite code {code}, they get a 20% bonus."
+            "Invite your friends to Paxyo! Share this link:\n"
+            "{link}\nWhen your friend makes their first deposit with "
+            "invite code {code}, they get a 20% bonus — and so do you."
         ),
+    },
+    # In-chat invite codes (both-sides referral bonus, 16 Nov 2026):
+    # a user types a friend's code in the chat. Both the new user
+    # AND the code owner get 20% of the new user's first deposit.
+    "invite_code_registered": {
+        "am": "ገብተሃል! የመጀመሪያ depositህን ስታደርግ 20% bonus ታገኛለህ — እና codeውን ያጋራህ ጓደኛህም እንዲሁ።",
+        "en": "You're in! When you make your first deposit you'll get a 20% bonus — and so will the friend who shared the code.",
+    },
+    "invite_code_registered_shared": {
+        "am": "ገብተሃል! የመጀመሪያ depositህን ስታደርግ 20% bonus ታገኛለህ።",
+        "en": "You're in! When you make your first deposit you'll get a 20% bonus.",
+    },
+    "invite_code_own": {
+        "am": "ይህ የራስህ code ነው — ከጓደኛህ ጋር አጋራው።",
+        "en": "That's your own code — share it with a friend instead.",
+    },
+    "invite_code_invalid": {
+        "am": "ይህን code አላውቅም — አረጋግጠህ እንደገና ሞክር።",
+        "en": "I don't recognise that code — check it and try again.",
+    },
+    "invite_code_already": {
+        "am": "አስቀድመህ referrer አለህ — ይህ code መጠቀም አይቻልም።",
+        "en": "You already have a referrer — this code can't be used.",
+    },
+    "invite_code_already_shared": {
+        "am": "በጋራ link ስለገባህ፣ የጓደኛ code አሁን መጨመር አይቻልም።",
+        "en": "You joined with the shared link, so a friend's code can't be added now.",
+    },
+    "invite_code_too_late": {
+        "am": "የመጀመሪያ depositህን አስቀድመህ አድርገሃል፣ ስለዚህ ይህ code አሁን መጠቀም አይቻልም።",
+        "en": "You've already made your first deposit, so this code can't be used now.",
+    },
+    "invite_code_unavailable": {
+        "am": "ይህን code አሁን ማስቀመጥ አልቻልኩም — ቆይተህ እንደገና ሞክር።",
+        "en": "I couldn't save that code right now — please try again later.",
     },
     # Promo codes (ideas batch 2, feature 1, 15 Nov 2026): a code
     # never discounts an order price — it only adds a bonus on a
@@ -2568,8 +2759,8 @@ TEXT = {
         "en": "Okay — no problem.",
     },
     "promo_bonus": {
-        "am": "🎉 የ{code} bonusዎ: +{bonus} ETB ({percent}% ተጨማሪ) ወደ balanceዎ ተጨምሯል።",
-        "en": "🎉 Your {code} bonus: +{bonus} ETB ({percent}% extra) was added to your balance.",
+        "am": "የ{code} bonusዎ: +{bonus} ETB ({percent}% ተጨማሪ) ወደ balanceዎ ተጨምሯል።",
+        "en": "Your {code} bonus: +{bonus} ETB ({percent}% extra) was added to your balance.",
     },
     "promo_bonus_applied": {
         "am": "የ{code} bonusዎ ({percent}% ተጨማሪ) ከዚህ deposit ጋር ተተግብሯል።",
@@ -2580,8 +2771,8 @@ TEXT = {
         "en": "Your {code} bonus couldn't be added this time — the deposit itself went through.",
     },
     "deposit_confirm_promo": {
-        "am": "🎁 Promo code {code} — በዚህ deposit ላይ {percent}% bonus",
-        "en": "🎁 Promo code {code} — {percent}% bonus on this deposit",
+        "am": "Promo code {code} — በዚህ deposit ላይ {percent}% bonus",
+        "en": "Promo code {code} — {percent}% bonus on this deposit",
     },
     # Report a problem (ideas batch 2, feature 2, 15 Nov 2026):
     # this flow NEVER refunds — it only reports. The confirmation
@@ -2701,17 +2892,17 @@ TEXT = {
         "en": "Sorry — I couldn't find that order, it may be too old. Tell me the service and link again and I'll build it.",
     },
     "order_done_hint": {
-        "am": "ተጠናቋል! ለቀጣዩ እርምጃ ከታች ያሉትን አዝራሮች ይጠቀሙ።",
-        "en": "Done! Use the buttons below for your next step.",
+        "am": "ተጠናቋል! ቀጥሎ ምን ማድረግ እንደሚፈልጉ ይንገሩኝ።",
+        "en": "Done! Tell me what you'd like to do next.",
     },
     "first_order_offer": {
         "am": (
-            "🎁 አዲስ ነዎት? በትንሽ test order Paxyo ይሞክሩ — "
+            "አዲስ ነዎት? በትንሽ test order Paxyo ይሞክሩ — "
             "{quantity} {service} በ{total} ETB ብቻ። “🎁 Test order "
             "ጀምር” ይጫኑ፣ linkዎን ይላኩልኝ እና እዘዝዎታለሁ!"
         ),
         "en": (
-            "🎁 New here? Try Paxyo with a small test order — "
+            "New here? Try Paxyo with a small test order — "
             "{quantity} {service} for just {total} ETB. Tap "
             "“🎁 Start a test order”, send me your link, and I'll "
             "order it for you!"
@@ -2723,11 +2914,11 @@ TEXT = {
     },
     "first_order_link": {
         "am": (
-            "👍 {service} ×{quantity} — {total} ETB። Linkዎን "
+            "{service} ×{quantity} — {total} ETB። Linkዎን "
             "ይላኩልኝ እና Confirm card አሳይዎታለሁ።"
         ),
         "en": (
-            "👍 {service} ×{quantity} — {total} ETB. Send me your "
+            "{service} ×{quantity} — {total} ETB. Send me your "
             "link and I'll show you the Confirm card."
         ),
     },
@@ -2746,12 +2937,12 @@ TEXT = {
         "en": "Not today",
     },
     "friday_link_ask": {
-        "am": "👍 {service} ×{quantity} — {total} ETB። Linkዎን ይላኩልኝ እና Confirm card አሳይዎታለሁ።",
-        "en": "👍 {service} ×{quantity} — {total} ETB. Send me your link and I'll show you the Confirm card.",
+        "am": "{service} ×{quantity} — {total} ETB። Linkዎን ይላኩልኝ እና Confirm card አሳይዎታለሁ።",
+        "en": "{service} ×{quantity} — {total} ETB. Send me your link and I'll show you the Confirm card.",
     },
     "friday_link_ask_same": {
-        "am": "👍 {service} ×{quantity} — {total} ETB። Linkዎን ይላኩልኝ እና Confirm card አሳይዎታለሁ።\nእንደቀድሞው link መጠቀም ይፈልጋሉ? ከታች ይጫኑ።",
-        "en": "👍 {service} ×{quantity} — {total} ETB. Send me your link and I'll show you the Confirm card.\nSame link as last time? Tap below.",
+        "am": "{service} ×{quantity} — {total} ETB። Linkዎን ይላኩልኝ እና Confirm card አሳይዎታለሁ።\nእንደቀድሞው link መጠቀም ይፈልጋሉ? ከታች ይጫኑ።",
+        "en": "{service} ×{quantity} — {total} ETB. Send me your link and I'll show you the Confirm card.\nSame link as last time? Tap below.",
     },
     "friday_same_link_button": {
         "en": "🔗 Same link as last time",
@@ -2770,14 +2961,14 @@ TEXT = {
     },
     "daily_digest": {
         "am": (
-            "📊 Paxyo — {date}\n"
+            "Paxyo — {date}\n"
             "Orders: {orders} ({completed} completed)\n"
             "Revenue: {revenue} ETB\n"
             "New users: {new_users}"
             "{top_line}"
         ),
         "en": (
-            "📊 Paxyo — {date}\n"
+            "Paxyo — {date}\n"
             "Orders: {orders} ({completed} completed)\n"
             "Revenue: {revenue} ETB\n"
             "New users: {new_users}"
@@ -2803,7 +2994,7 @@ TEXT = {
     # test treats every TEXT entry as user-facing, and these two
     # name the provider — which only William may ever see.)
     "big_deposit_alert": {
-        "en": "💰 Big deposit: {amount} ETB from {user} via {method}.",
+        "en": "Big deposit: {amount} ETB from {user} via {method}.",
     },
     "big_deposit_balance": {
         "en": " New balance: {balance} ETB.",
@@ -2821,7 +3012,7 @@ TEXT = {
     # reply carries a username, else "user {telegram_id}" — the
     # bot never invents a name.
     "loyalty_bonus_admin": {
-        "en": "🎁 Loyalty bonus credited: {bonus} ETB to {user} — their {order_number}th completed order.",
+        "en": "Loyalty bonus credited: {bonus} ETB to {user} — their {order_number}th completed order.",
     },
     "loyalty_not_live": {
         "am": "የታማኝነት ቦነስ ገና አልተጀመረም — ሲጀምር አሳውቅዎታለሁ።",
@@ -2921,7 +3112,7 @@ TEXT = {
         "en": "Use a different method",
     },
     "channel_nudge": {
-        "en": "Thanks for your first order with Paxyo! 🎉 Join our channel for offers and updates — tap below.",
+        "en": "Thanks for your first order with Paxyo! Join our channel for offers and updates — tap below.",
     },
     "channel_nudge_button": {
         "en": "Join our channel",
@@ -3529,8 +3720,115 @@ def _platform_matches_service(platform, name, category):
     return platform in words
 
 
+# Geo-targeted / website-traffic guard (19:28 EAT 16 Nov 2026, live
+# fault): a plain request never gets a website-traffic service or a
+# country-targeted service — the bot quoted 1.6 ETB for 1,000 views
+# and then handed the user "Israel Traffic from iPhone Devices" at
+# 1,118.04 ETB. Country names + demonyms, lowercase, matched as
+# whole words/phrases against the service name + category. A service
+# is geo-targeted when it names any of these; it is only a candidate
+# when the user named that same country (or asked for traffic).
+_GEO_WORDS = frozenset([
+    "usa", "america", "united states", "united kingdom", "uk",
+    "england", "israel", "germany", "france", "italy", "spain",
+    "portugal", "netherlands", "belgium", "switzerland", "austria",
+    "poland", "ukraine", "russia", "turkey", "greece", "sweden",
+    "norway", "denmark", "finland", "ireland", "iceland",
+    "czech republic", "czechia", "hungary", "romania", "bulgaria",
+    "croatia", "serbia", "bosnia", "albania", "macedonia", "georgia",
+    "armenia", "azerbaijan", "kazakhstan", "uzbekistan", "india",
+    "pakistan", "bangladesh", "nepal", "sri lanka", "china", "taiwan",
+    "hong kong", "japan", "south korea", "north korea", "korea",
+    "vietnam", "thailand", "malaysia", "singapore", "indonesia",
+    "philippines", "australia", "new zealand", "canada", "mexico",
+    "brazil", "argentina", "chile", "colombia", "peru", "venezuela",
+    "ecuador", "bolivia", "uruguay", "paraguay", "costa rica",
+    "panama", "guatemala", "cuba", "dominican republic", "jamaica",
+    "haiti", "egypt", "morocco", "algeria", "tunisia", "libya",
+    "nigeria", "kenya", "ghana", "ethiopia", "south africa",
+    "saudi arabia", "uae", "united arab emirates", "emirates",
+    "qatar", "kuwait", "oman", "bahrain", "yemen", "jordan",
+    "lebanon", "syria", "iraq", "iran",
+    "american", "british", "english", "israeli", "german", "french",
+    "italian", "spanish", "portuguese", "dutch", "swiss", "austrian",
+    "polish", "ukrainian", "russian", "turkish", "greek", "swedish",
+    "norwegian", "danish", "finnish", "irish", "icelandic", "czech",
+    "hungarian", "romanian", "bulgarian", "croatian", "serbian",
+    "bosnian", "albanian", "macedonian", "georgian", "armenian",
+    "azerbaijani", "kazakh", "uzbek", "indian", "pakistani",
+    "bangladeshi", "nepali", "nepalese", "sri lankan", "chinese",
+    "taiwanese", "japanese", "korean", "vietnamese", "thai",
+    "malaysian", "singaporean", "indonesian", "filipino",
+    "australian", "canadian", "mexican", "brazilian", "argentine",
+    "argentinian", "chilean", "colombian", "peruvian", "venezuelan",
+    "ecuadorian", "bolivian", "uruguayan", "paraguayan",
+    "costa rican", "panamanian", "guatemalan", "cuban", "dominican",
+    "jamaican", "haitian", "egyptian", "moroccan", "algerian",
+    "tunisian", "libyan", "nigerian", "kenyan", "ghanaian",
+    "ethiopian", "south african", "saudi", "emirati", "qatari",
+    "kuwaiti", "omani", "bahraini", "yemeni", "jordanian",
+    "lebanese", "syrian", "iraqi", "iranian",
+])
+
+
+def _countries_in(text):
+    """Country names/demonyms named in the text, as a set of
+    lowercase phrases. Word-boundary matched on a normalised
+    string, so \"uk\" never matches \"like\" and \"india\" never
+    matches \"indian\" unless \"indian\" itself is listed. \"Nail
+    polish\" is a product, not Poland — the demonym \"polish\"
+    must never flag it (16 Nov 2026: it blocked the 💅 reactions
+    service)."""
+    s = " " + re.sub(r"[^a-z]+", " ", (text or "").lower()) + " "
+    s = s.replace(" nail polish ", " ")
+    return {c for c in _GEO_WORDS if f" {c} " in s}
+
+
+# The geo rule (see _drop_geo_candidates) applies to every
+# fastest-first pick, whatever the metric: the quote/order tests
+# pin it for views AND for followers AND for an empty hint. It
+# never applies to cheapest-first picks (the true cheapest must
+# stay quotable) or to exact-emoji picks (the emoji decides).
+
+
+def _drop_geo_candidates(candidates, hint):
+    """Geo rule (19:28 EAT 16 Nov 2026): a fastest-first pick
+    never lands on a country-targeted service when a non-targeted
+    one fits. The catalogue is full of country-targeted services
+    — for most niche types the cheapest service IS one — so this
+    is a veto-with-fallback, like the reliability skip: geo
+    services are only dropped when a non-geo candidate remains,
+    never leave the user with no service at all. A country the
+    user named in the hint wins instead: only that country's
+    services are kept, when any exist. Cheapest-first picks never
+    call this (the true cheapest must stay quotable, geo or not),
+    and exact-emoji picks never do either (the emoji decides)."""
+    if not candidates:
+        return candidates
+    wanted_geo = _countries_in(hint or "")
+    if wanted_geo:
+        named = [
+            s for s in candidates
+            if _countries_in(
+                str(s.get("name") or "") + " "
+                + str(s.get("category") or "")
+            ) & wanted_geo
+        ]
+        return named if named else candidates
+    non_geo = [
+        s for s in candidates
+        if not _countries_in(
+            str(s.get("name") or "") + " "
+            + str(s.get("category") or "")
+        )
+    ]
+    return non_geo if non_geo else candidates
+
+
 def pick_services(services, platform=None, service_hint=None, limit=3,
-                  reaction_emoji=None, ratings=None):
+                  reaction_emoji=None, ratings=None, reliability=None,
+                  paused=None, balance_health=None, quantity=None,
+                  story=None):
     """Rank services for a platform, fastest average time first.
 
     Excludes blacklisted and inactive services. Services with no average
@@ -3571,6 +3869,22 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     apply_rating_demotions — cheapest-first and reaction-emoji
     picks are NOT demoted (a cheapest question must quote the
     true cheapest; an emoji pick must stay the exact emoji).
+    Cancel-cutting (16 Nov 2026, items 1 + 2 + 8 + 12) — placement
+    picks only; informational picks (a price or speed answer) pass
+    none of these, so they quote exactly as before:
+    `reliability` is the {combined id: 30-day stats} map (None =
+    unknown, no ranking change) — the fastest-first ranking is
+    re-ranked by apply_trust_reliability_ranking (trusted first,
+    unreliable skipped unless all are, unproven small-orders-only;
+    cheapest-first and reaction-emoji picks are NOT re-ranked,
+    exactly like ratings). `paused` is a set of paused services'
+    combined ids (None = unknown, skip nothing) — paused services
+    are skipped in EVERY ranking, never placed on. `balance_health`
+    maps provider slug -> True when its balance is healthy (None =
+    unknown, skip nothing) — a nearly-empty provider's services
+    are skipped when a healthy provider has candidates too, and
+    kept when it is the only option. `quantity` is the order's
+    quantity, for the unproven small-order cap; None lifts it.
     """
     wanted = (platform or "").strip().lower()
     hint = (service_hint or "").strip().lower()
@@ -3616,6 +3930,31 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
         name = str(s.get("name") or "").lower()
         if wanted and not _platform_matches_service(wanted, name, category):
             continue
+        # Geo/traffic guard (19:28 EAT 16 Nov 2026): a plain request
+        # never gets a website-traffic service. Only an explicit ask counts — "traffic" in the
+        # hint, or the platform
+        # being website-traffic (which IS a traffic order). A
+        # traffic ask with NO country named accepts any traffic
+        # service (traffic products are geo by nature — "Israel
+        # Traffic" is still traffic); a named country still
+        # restricts to that country. This runs before the word/kind
+        # filters below, so even a pick with no hint at all can
+        # never surface one: an empty hint used to fall back to the
+        # fastest service in the whole catalogue, which was a
+        # traffic service. The COUNTRY part of the guard is NOT
+        # here: it runs after the loop, placement-only, in
+        # _drop_geo_candidates — a blanket veto in the loop emptied
+        # whole types (most niche services ARE country-targeted)
+        # and broke cheapest questions, which must quote the true
+        # cheapest.
+        _svc_words = re.findall(r"[a-z]+", name + " " + category)
+        _is_traffic = "traffic" in _svc_words
+        _traffic_asked = (
+            "traffic" in (service_hint or "").lower().split()
+            or wanted == "website-traffic"
+        )
+        if _is_traffic and not _traffic_asked:
+            continue
         if words and reaction is None:
             # Platform words are already enforced by the platform
             # check above, so they are not re-matched here
@@ -3643,8 +3982,24 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     # reactions services, in the emoji's family — never a Bot Start
     # service and never an "Auto … 10 Future Posts" service for a
     # single post. The emoji may also ride in the hint itself.
+    # `story` (16 Nov 2026): a post link never gets a story
+    # service, a story link only gets story services.
     if _reactions_request:
-        candidates = _reactions_pool(candidates, reaction)
+        candidates = _reactions_pool(candidates, reaction, story=story)
+    # Cancel-cutting (16 Nov 2026): paused services and
+    # nearly-empty providers' services are skipped in EVERY
+    # ranking — a paused service is never placed on, whatever the
+    # ranking mode (see _filter_pick_candidates).
+    candidates = _filter_pick_candidates(
+        candidates, paused=paused, balance_health=balance_health
+    )
+    if not cheapest and reaction is None:
+        # Geo rule (see _drop_geo_candidates): fastest-first picks
+        # never land on a country-targeted service when a non-geo
+        # one fits. Cheapest-first picks and exact-emoji picks are
+        # exempt — the true cheapest must stay quotable and the
+        # emoji decides.
+        candidates = _drop_geo_candidates(candidates, hint)
     if cheapest or reaction is not None:
         # Cheapest first (owner, 14 Nov 2026): within ONE exact
         # emoji the services are the same reaction, so the
@@ -3652,7 +4007,13 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
         # average times say today — fastest-first picked Heart
         # Eyes #1725 over Heart #6537 for a ❤️ order live, because
         # its time was shorter. A generic reactions request (no
-        # emoji) still gets the fastest Positive mix.
+        # emoji) still gets the fastest Positive mix. The risky
+        # gate below only drops, never re-ranks, so cheapest
+        # first still holds inside the branch.
+        if reliability is not None:
+            candidates = _drop_risky_candidates(
+                candidates, reliability, quantity
+            )
         candidates.sort(
             key=lambda s: (
                 float(s.get("rate_etb_per_1000") or 0),
@@ -3665,6 +4026,13 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
                 parse_average_time(s.get("average_time")) is None,
                 parse_average_time(s.get("average_time")) or 0,
             )
+        )
+    if reliability is not None and not cheapest and reaction is None:
+        # Trust/reliability ranking (cancel-cutting items 1 + 8):
+        # only the fastest-first ranking is re-ranked, never
+        # cheapest or emoji picks (same rule as ratings above).
+        candidates = apply_trust_reliability_ranking(
+            candidates, reliability, quantity
         )
     if ratings and not cheapest and reaction is None:
         # Rating demotion (feature 3): only the fastest-first
@@ -3687,6 +4055,37 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
 # never applies to cheapest-first or reaction-emoji picks.
 RATING_DEMOTE_BAD_MIN = 3
 RATING_SKIP_BAD_MIN = 10
+
+
+# Cancel-cutting (16 Nov 2026, items 1 + 2 + 8 + 12) — ONE merged
+# ranking for placement picks, not two competing systems. The
+# reliability endpoint (GET /service-reliability) is the single
+# source: 30-day per (provider, service) stats + clean streak.
+#   * RELIABILITY_MIN_ORDERS / RELIABILITY_MAX_CANCEL_RATE: a
+#     service with cancel_rate >= 10% over >= 5 orders is
+#     unreliable and skipped unless every candidate is.
+#   * TRUST_MIN_ORDERS: 10 clean completions in a row (clean
+#     streak) makes a service trusted — it ranks first. Fewer
+#     than 10 completed orders makes it unproven: it only gets
+#     small orders (its own total under TRUST_SMALL_ORDER_MAX_ETB)
+#     until it earns trust, unless nothing else fits.
+#   * PAUSE_CANCEL_THRESHOLD / PAUSE_WINDOW_HOURS /
+#     PAUSE_DURATION_HOURS: 3 provider-cancels in 24h pauses a
+#     service for 24h (server/api-service-pause.php).
+#   * SERVICE_PAUSES_CACHE_SECONDS: pauses change rarely, 5
+#     minutes is plenty fresh (mirrors the ratings cache).
+#   * RELIABILITY_CACHE_SECONDS: the 30-day counts move one order
+#     at a time — one hour is plenty fresh (mirrors the
+#     price-watch snapshot probe's cadence).
+RELIABILITY_MIN_ORDERS = 5
+RELIABILITY_MAX_CANCEL_RATE = 0.10
+RELIABILITY_CACHE_SECONDS = 3600
+TRUST_MIN_ORDERS = 10
+TRUST_SMALL_ORDER_MAX_ETB = 100
+PAUSE_CANCEL_THRESHOLD = 3
+PAUSE_WINDOW_HOURS = 24
+PAUSE_DURATION_HOURS = 24
+SERVICE_PAUSES_CACHE_SECONDS = 300
 
 
 def apply_rating_demotions(candidates, ratings):
@@ -3785,7 +4184,10 @@ async def _cached_service_ratings(fetch, service_ids):
 
 
 async def pick_services_rated(services, platform=None, service_hint=None,
-                              limit=3, reaction_emoji=None, client=None):
+                              limit=3, reaction_emoji=None, client=None,
+                              reliability=None, paused=None,
+                              balance_health=None, quantity=None,
+                              story=None):
     """pick_services with rating demotion applied (rate your order,
     ideas batch 2, feature 3, 15 Nov 2026): the candidate pool is
     picked first (limit 100, so the ratings call sees every service
@@ -3795,10 +4197,26 @@ async def pick_services_rated(services, platform=None, service_hint=None,
     not live, network error, a client without the method — ranks
     exactly as today, never slower or broken. Only the
     fastest-first ranking is demoted (see pick_services); cheapest
-    and reaction-emoji picks keep their own order."""
+    and reaction-emoji picks keep their own order.
+    Cancel-cutting (16 Nov 2026): the same re-pick also applies
+    the merged trust/reliability ranking, the pause skip and the
+    balance guard (see pick_services) — the maps are fetched once
+    here through their caches when the caller did not pass them,
+    so the initial pick never waits on more than one fetch each.
+    `quantity` is the order's quantity, for the unproven
+    small-order cap; None lifts the cap.
+    Geo rule (19:28 EAT 16 Nov 2026): every fastest-first pick
+    skips country-targeted services when a non-geo one fits (see
+    _drop_geo_candidates) — a plain request never lands on a geo
+    service unless the user named that country. Cheapest-first
+    picks and exact-emoji picks are exempt: the true cheapest
+    must stay quotable, geo or not, and the emoji decides.
+    """
     pool = pick_services(
         services, platform=platform, service_hint=service_hint,
         limit=100, reaction_emoji=reaction_emoji,
+        paused=paused, balance_health=balance_health,
+        story=story,
     )
     if not pool:
         return []
@@ -3816,12 +4234,321 @@ async def pick_services_rated(services, platform=None, service_hint=None,
             if sid > 0 and sid not in ids:
                 ids.append(sid)
         ratings = await _cached_service_ratings(fetch, ids)
+    if reliability is None:
+        reliability = await _cached_service_reliability(client)
+    if paused is None:
+        paused = await _cached_paused_services(client)
+    if balance_health is None:
+        balance_health = _provider_balance_health()
     if not ratings:
-        return pool[:limit]
+        return pick_services(
+            pool, platform=platform, service_hint=service_hint,
+            limit=limit, reaction_emoji=reaction_emoji,
+            reliability=reliability, paused=paused,
+            balance_health=balance_health, quantity=quantity,
+            story=story,
+        )
     return pick_services(
         pool, platform=platform, service_hint=service_hint,
         limit=limit, reaction_emoji=reaction_emoji, ratings=ratings,
+        reliability=reliability, paused=paused,
+        balance_health=balance_health, quantity=quantity,
+        story=story,
     )
+
+
+# Cache for the reliability stats the merged ranking reads
+# (cancel-cutting item 1, 16 Nov 2026): {"at": epoch seconds of
+# the last fetch, "data": {"gop:123": {"orders": n, "completed":
+# n, "cancelled": n, "failed": n, "cancel_rate": 0.12,
+# "clean_streak": 10}, ...}}. One hour is plenty fresh, and a
+# pick never waits on a second fetch inside the hour. In-memory
+# only, like the ratings cache; a restart simply fetches again.
+_SERVICE_RELIABILITY_CACHE = {"at": 0.0, "data": {}}
+# Cache for the active pauses (item 2): {"at": epoch seconds,
+# "data": {"gop:123", ...} — combined ids of paused services}.
+# 5 minutes, like the ratings cache. A pause that just started is
+# also written straight into this cache by the watcher (see
+# _note_paused_service), so the next pick skips it at once instead
+# of waiting out the 5 minutes.
+_SERVICE_PAUSES_CACHE = {"at": 0.0, "data": set()}
+
+
+async def _cached_service_reliability(client=None):
+    """The reliability map from the 1-hour cache when fresh, else
+    one fetch through the client's service_reliability. Never
+    raises: on any failure — endpoint not live (None), network
+    error, bad shape — it returns None and the pick ranks exactly
+    as today (no trust data is not a penalty)."""
+    import time
+
+    now = time.time()
+    cache = _SERVICE_RELIABILITY_CACHE
+    if now - cache["at"] < RELIABILITY_CACHE_SECONDS and cache["data"]:
+        return dict(cache["data"])
+    fetch = getattr(
+        client if client is not None else paxyo, "service_reliability", None
+    )
+    if not callable(fetch):
+        return None
+    try:
+        reliability = await fetch()
+    except Exception as exc:
+        log.warning("service reliability failed: %s", exc)
+        return None
+    if reliability is None:
+        return None
+    if not isinstance(reliability, dict):
+        return None
+    cache["data"] = dict(reliability)
+    cache["at"] = now
+    return dict(cache["data"])
+
+
+async def _cached_paused_services(client=None):
+    """The set of paused services' combined ids from the 5-minute
+    cache when fresh, else one fetch through the client's
+    service_pauses. Never raises: on any failure it returns None
+    and the pick skips nothing (a pause the bot cannot read must
+    never block an order)."""
+    import time
+
+    now = time.time()
+    cache = _SERVICE_PAUSES_CACHE
+    if now - cache["at"] < SERVICE_PAUSES_CACHE_SECONDS:
+        return set(cache["data"])
+    fetch = getattr(
+        client if client is not None else paxyo, "service_pauses", None
+    )
+    if not callable(fetch):
+        return None
+    try:
+        pauses = await fetch()
+    except Exception as exc:
+        log.warning("service pauses failed: %s", exc)
+        return None
+    if pauses is None:
+        return None
+    paused = set()
+    for row in pauses if isinstance(pauses, list) else []:
+        if not isinstance(row, dict):
+            continue
+        provider = str(row.get("provider") or "").strip().lower()
+        if provider not in ("gop", "smm"):
+            continue
+        try:
+            sid = int(row.get("service_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0:
+            paused.add(f"{provider}:{sid}")
+    cache["data"] = paused
+    cache["at"] = now
+    return set(paused)
+
+
+def _note_paused_service(combined_id):
+    """Write one freshly-paused service straight into the pauses
+    cache (cancel-cutting item 2): the watcher's record call just
+    started this pause, so the next pick must skip it at once
+    instead of waiting out the 5-minute cache."""
+    if not combined_id:
+        return
+    _SERVICE_PAUSES_CACHE["data"].add(str(combined_id))
+
+
+async def _pick_context(client=None):
+    """The cancel-cutting pick context (16 Nov 2026):
+    (reliability, paused, balance_health) — each fetched once
+    through its own cache (None when its endpoint is not live, so
+    the pick ranks exactly as today). The balance health is read
+    from the probe's state, never fetched here. Never raises."""
+    reliability = await _cached_service_reliability(client)
+    paused = await _cached_paused_services(client)
+    return reliability, paused, _provider_balance_health()
+
+
+def _reliability_record(reliability, service):
+    """The reliability record for one service dict, or {} when the
+    map has no entry for it: no orders in 30 days. Unknown is
+    neutral for the cancel rate (never penalised) and unproven
+    for the trust tiers (fewer than 10 completed orders)."""
+    if not isinstance(reliability, dict):
+        return {}
+    rec = reliability.get(service_combined_id(service))
+    return rec if isinstance(rec, dict) else {}
+
+
+def _service_is_unreliable(rec):
+    """True when the service's 30-day cancel rate is at least 10%
+    over at least 5 orders (item 1). Unknown (no record) is never
+    unreliable."""
+    try:
+        orders = int(rec.get("orders") or 0)
+    except (TypeError, ValueError):
+        orders = 0
+    try:
+        rate = float(rec.get("cancel_rate") or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    return (
+        orders >= RELIABILITY_MIN_ORDERS
+        and rate >= RELIABILITY_MAX_CANCEL_RATE
+    )
+
+
+def _service_is_trusted(rec):
+    """True when the service completed 10 orders in a row with no
+    cancel and no fail (item 8): the clean streak in the record.
+    A trusted service outranks the cancel-rate rule — its last 10
+    orders all delivered, so an older cancel does not demote it."""
+    try:
+        return int(rec.get("clean_streak") or 0) >= TRUST_MIN_ORDERS
+    except (TypeError, ValueError):
+        return False
+
+
+def _service_is_proven(rec):
+    """True when the service completed at least 10 orders in the
+    window (item 8): proven enough for any order size, even
+    without a 10-clean streak."""
+    try:
+        return int(rec.get("completed") or 0) >= TRUST_MIN_ORDERS
+    except (TypeError, ValueError):
+        return False
+
+
+def _filter_pick_candidates(candidates, paused=None,
+                            balance_health=None):
+    """Drop services a placement pick must never use, in every
+    ranking (item 2 pauses, item 12 balance guard): paused
+    services are skipped outright; a provider whose balance is
+    nearly empty is skipped when a healthy provider has
+    candidates too — and kept when it is the only option, so an
+    order is never blocked for this reason. Pure: no network, no
+    state. `paused` is a set of combined ids (None = unknown, skip
+    nothing); `balance_health` maps provider slug -> True when its
+    balance is healthy (None = unknown, skip nothing)."""
+    pool = list(candidates or [])
+    if paused:
+        pool = [
+            s for s in pool
+            if service_combined_id(s) not in paused
+        ]
+    if balance_health:
+        low = {
+            provider for provider, healthy in balance_health.items()
+            if not healthy
+        }
+        if low:
+            healthy_pool = [
+                s for s in pool
+                if service_provider(s) not in low
+            ]
+            if healthy_pool:
+                pool = healthy_pool
+    return pool
+
+
+def apply_trust_reliability_ranking(candidates, reliability,
+                                    quantity=None):
+    """ONE merged ranking (cancel-cutting items 1 + 8, 16 Nov 2026)
+    for a fastest-first candidate list, fastest first inside each
+    tier: trusted services first (10 clean completions in a row),
+    then proven reliable services, then unproven services — but
+    only for small orders (an unproven service's own total under
+    100 ETB); for a bigger order unproven services are the fallback
+    when no trusted or proven service fits, never a refusal.
+    Unreliable services (cancel_rate >= 10% with >= 5 orders) are
+    dropped unless every candidate is unreliable, in which case
+    the fastest is kept anyway and nothing is said to the user
+    about reliability. Pure: no network, no state. `reliability`
+    None (endpoint not live) returns the list unchanged;
+    `quantity` None (no quantity known) lifts the small-order cap,
+    so an unproven service is never blocked for want of a number.
+    A service with no record at all (no orders in 30 days) reads
+    as unproven for the size cap — never penalised by the rate,
+    and the fallback when nothing proven fits."""
+    if not candidates:
+        return []
+    if reliability is None:
+        return list(candidates)
+    trusted, proven = [], []
+    unproven_small, unproven_big, unreliable = [], [], []
+    for service in candidates:
+        rec = _reliability_record(reliability, service)
+        if _service_is_trusted(rec):
+            trusted.append(service)
+        elif _service_is_unreliable(rec):
+            unreliable.append(service)
+        elif _service_is_proven(rec):
+            proven.append(service)
+        elif quantity is None:
+            unproven_small.append(service)
+        else:
+            try:
+                qty = int(quantity)
+            except (TypeError, ValueError):
+                qty = 0
+            total = estimated_total_etb(
+                float(service.get("rate_etb_per_1000") or 0), qty
+            )
+            if total < TRUST_SMALL_ORDER_MAX_ETB:
+                unproven_small.append(service)
+            else:
+                unproven_big.append(service)
+    ranked = trusted + proven + unproven_small
+    if not ranked:
+        ranked = unproven_big
+    if not ranked:
+        ranked = unreliable
+    if not ranked:
+        return list(candidates)
+    return ranked
+
+
+def _drop_risky_candidates(candidates, reliability, quantity=None):
+    """Drop-only gate (cancel-cutting items 1 + 8, 16 Nov 2026)
+    for cheapest/emoji picks, where the tiered ranking above
+    does not apply (the owner's cheapest-first rule inside one
+    emoji, 14 Nov 2026): remove unreliable services (cancel_rate
+    >= 10% with >= 5 orders) when a reliable candidate remains,
+    and remove unproven services when the order total is >= 100
+    ETB and a trusted or proven candidate remains. This only
+    drops — it never re-ranks, so the pick inside the branch
+    stays cheapest-first. Never empties the list: when every
+    candidate is risky, the list is returned unchanged and the
+    pick falls back to the cheapest/fastest anyway. Pure: no
+    network, no state. `quantity` is in units; None lifts the
+    unproven gate (the unreliable gate needs no quantity)."""
+    if not candidates or reliability is None:
+        return list(candidates)
+    reliable = [
+        s for s in candidates
+        if not _service_is_unreliable(_reliability_record(reliability, s))
+    ]
+    if reliable:
+        candidates = reliable
+    if quantity is not None:
+        try:
+            qty = int(quantity)
+        except (TypeError, ValueError):
+            qty = 0
+        has_proven = any(
+            _service_is_trusted(_reliability_record(reliability, s))
+            or _service_is_proven(_reliability_record(reliability, s))
+            for s in candidates
+        )
+        if has_proven:
+            candidates = [
+                s for s in candidates
+                if _service_is_trusted(_reliability_record(reliability, s))
+                or _service_is_proven(_reliability_record(reliability, s))
+                or estimated_total_etb(
+                    float(s.get("rate_etb_per_1000") or 0), qty
+                ) < TRUST_SMALL_ORDER_MAX_ETB
+            ]
+    return candidates
 
 
 def _kinds_compatible(name_kinds, hint_kinds):
@@ -4057,7 +4784,7 @@ def _reaction_emoji_in_hint(hint):
     return None
 
 
-def _reactions_pool(candidates, emoji):
+def _reactions_pool(candidates, emoji, story=None):
     """Single-post reactions services only, in the emoji's family.
 
     The NAME must say "reaction" — a category match alone pulls
@@ -4076,7 +4803,12 @@ def _reactions_pool(candidates, emoji):
     service, the pool is EMPTY instead of falling back to the
     whole pool (owner, 14 Nov 2026: a 🙏 order silently got the
     Positive mix) — the caller then says honestly that there is
-    no {emoji}-only service."""
+    no {emoji}-only service.
+    Story/post (16 Nov 2026): `story` True keeps ONLY story
+    services, False keeps only post services (a t.me post link
+    never gets a Story Reactions service), None leaves the pool
+    as it was — a story service is only ever picked when the
+    link or the hint says story."""
     pool = []
     for s in candidates:
         name = str(s.get("name") or "").lower()
@@ -4087,6 +4819,13 @@ def _reactions_pool(candidates, emoji):
         if name.startswith("auto") or "future post" in name:
             continue
         pool.append(s)
+    if story is True:
+        pool = [s for s in pool if "story" in str(s.get("name") or "").lower()]
+    elif story is False:
+        pool = [
+            s for s in pool
+            if "story" not in str(s.get("name") or "").lower()
+        ]
     if not pool:
         return []
     if emoji is not None:
@@ -4103,6 +4842,77 @@ def _reactions_pool(candidates, emoji):
         if emoji is not None:
             return []
     return pool
+
+
+# Reaction picker (ideas batch 1 #1, 16 Nov 2026): the buttons on
+# the quantity question, most-asked first — the rest follow in
+# catalogue order.
+_REACTION_PICKER_ORDER = (
+    "👍", "❤️", "🔥", "😂", "😍", "🙏", "🎉", "😁", "😘",
+)
+
+
+def reaction_picker_options(services, platform):
+    """The emoji the picker offers for one platform: every emoji
+    with an exact single-emoji reactions service in the catalogue
+    — the same exact-emoji rule as _service_in_reaction_family,
+    so a multi-emoji mix never becomes a button, and a Bot Start
+    or future-posts service never does either. Deduped, capped
+    at 12. Pure — no fetch."""
+    platform = (platform or "").strip().lower() or None
+    if not platform:
+        return []
+    seen = {}
+    for s in services or []:
+        if not s.get("active", True):
+            continue
+        plat, _hint = _platform_hint_of_service(s)
+        if plat != platform:
+            continue
+        name = str(s.get("name") or "").lower()
+        if "reaction" not in name:
+            continue
+        if "bot start" in name:
+            continue
+        if name.startswith("auto") or "future post" in name:
+            continue
+        found = emoji_meanings(str(s.get("name") or ""))
+        if len(found) != 1:
+            continue
+        emoji = found[0][0]
+        key = emoji.replace("\ufe0f", "")
+        if key not in seen:
+            seen[key] = emoji
+    preferred = [
+        e.replace("\ufe0f", "") for e in _REACTION_PICKER_ORDER
+    ]
+    ordered = sorted(
+        seen.values(),
+        key=lambda e: (
+            preferred.index(e.replace("\ufe0f", ""))
+            if e.replace("\ufe0f", "") in preferred
+            else len(preferred)
+        ),
+    )
+    return ordered[:12]
+
+
+def reaction_picker_keyboard(platform, services):
+    """Inline buttons with the emoji options for that platform, or
+    None when the catalogue has no exact-emoji reactions service
+    for it. One tap per button: callback_data "react:<emoji>"."""
+    options = reaction_picker_options(services, platform)
+    if not options:
+        return None
+    rows = []
+    for i in range(0, len(options), 5):
+        rows.append([
+            InlineKeyboardButton(
+                emoji, callback_data=f"react:{emoji}",
+            )
+            for emoji in options[i:i + 5]
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
 def find_service_by_id(services, service_id):
@@ -5490,6 +6300,98 @@ class PaxyoClient:
                 }
             raise
 
+    # --------------------------------------------- service reliability --
+    # Contract (server side, server/api-service-reliability.php —
+    # cancel-cutting item 1, 16 Nov 2026): GET /service-reliability
+    # -> {"reliability": {"gop:123": {"orders": 12, "completed": 10,
+    # "cancelled": 2, "failed": 0, "cancel_rate": 0.17,
+    # "clean_streak": 10}, ...}}. 30-day per (provider, service)
+    # stats from the live orders table. 404-tolerant like
+    # service_ratings: until the endpoint exists it returns None
+    # and the pick ranks exactly as today; any other failure raises.
+
+    async def service_reliability(self):
+        """GET /service-reliability -> {"gop:123": {...}} ({} when
+        nothing is stored yet). Returns None on 404 (endpoint not
+        live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/service-reliability")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /service-reliability returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        if isinstance(data, dict):
+            reliability = data.get("reliability", {})
+            return reliability if isinstance(reliability, dict) else {}
+        return {}
+
+    # --------------------------------------------- service pauses -------
+    # Contract (server side, server/api-service-pause.php —
+    # cancel-cutting item 2, 16 Nov 2026): GET
+    # /service-pauses?active=1 -> {"pauses": [{"provider": "gop",
+    # "service_id": 123, "paused_until": "..."}, ...]}. POST
+    # /service-pause {provider, service_id, order_id} records one
+    # provider-cancel; at 3 in 24h the service pauses 24h and the
+    # reply carries "paused_now": true exactly once per pause.
+    # Both 404-tolerant like service_ratings: until the endpoint
+    # exists they return None and nothing is paused; any other
+    # failure raises.
+
+    async def service_pauses(self):
+        """GET /service-pauses?active=1 -> [{"provider", "service_id",
+        "paused_until"}, ...]. Returns None on 404 (endpoint not
+        live yet)."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/service-pauses?active=1")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /service-pauses returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        if isinstance(data, dict):
+            pauses = data.get("pauses", [])
+            return pauses if isinstance(pauses, list) else []
+        return []
+
+    async def record_service_cancel(self, provider, service_id,
+                                    order_id=None):
+        """POST /service-pause {provider, service_id, order_id} ->
+        {"ok": true, "cancel_count": N, "paused": bool,
+        "paused_now": bool, "paused_until": ...}. Returns None on
+        404 (endpoint not live yet)."""
+        body = {
+            "provider": provider,
+            "service_id": int(service_id),
+        }
+        if order_id is not None:
+            try:
+                body["order_id"] = int(order_id)
+            except (TypeError, ValueError):
+                pass
+        try:
+            return await self._send(
+                build_api_request("POST", "/service-pause", body)
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /service-pause returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+
     async def service_ratings(self, service_ids):
         """GET /ratings/services?service_ids=1,2,3 -> {id str:
         {"good": n, "bad": n}}. Returns None on 404 (endpoint not
@@ -5939,23 +6841,29 @@ async def gemini_transcribe(audio_bytes: bytes, language: str = None) -> str:
 # the user implicitly asked for by sending the picture to the bot.
 VISION_PROMPT = """You are the Paxyo order bot. Read this picture a customer sent.
 Extract: any text, amounts in ETB, phone numbers, transaction
-references, usernames, profile/post links, error messages. Then say
-in one or two lines what the customer most likely wants (e.g.
+references, usernames, profile/post links, the platform the picture
+is about (tiktok, instagram, telegram, youtube, facebook, ...) and
+the metric it is about (views, likes, followers, subscribers,
+reactions, comments, shares) when they can be seen, error messages.
+Then say in one or two lines what the customer most likely wants (e.g.
 'payment receipt for a deposit', 'screenshot of an Instagram profile
 to order followers for', 'error screenshot'). Reply as compact JSON:
 {"summary": ..., "amount": ..., "phone": ..., "tx_ref": ...,
-"link": ..., "username": ...,
+"link": ..., "username": ..., "platform": ..., "metric": ...,
 "want": "deposit_receipt"|"order"|"support"|"other"}"""
 
 MAX_PHOTO_BYTES = 10 * 1024 * 1024  # 10 MB: larger pictures are refused
 
 
-async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
+async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT,
+                        mime_type: str = "image/jpeg") -> str:
     """Read a picture with Gemini vision. Returns the reply text (may
     be empty). Telegram photos are JPEG, so the image is sent as
-    image/jpeg inline data, same shape as gemini_transcribe's audio.
-    Raises on HTTP errors — the caller turns that into one short
-    "couldn't read that picture" reply and never retries in a loop."""
+    image/jpeg inline data, same shape as gemini_transcribe's audio;
+    a static sticker is webp, so the caller passes
+    mime_type="image/webp" for one. Raises on HTTP errors — the
+    caller turns that into one short "couldn't read that picture"
+    reply and never retries in a loop."""
     payload = {
         "contents": [
             {
@@ -5963,7 +6871,7 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
                     {"text": prompt},
                     {
                         "inlineData": {
-                            "mimeType": "image/jpeg",
+                            "mimeType": mime_type,
                             "data": base64.b64encode(image_bytes).decode(),
                         }
                     },
@@ -6842,6 +7750,14 @@ def parse_vision_result(text: str):
         amount = float(amount) if amount is not None else None
     except (TypeError, ValueError):
         amount = None
+    # Order from a screenshot (ideas batch 1 #10, 16 Nov 2026):
+    # the platform/metric the picture shows, normalized through
+    # the same detectors the text flow uses — a free-text value
+    # vision invents ("cool stuff") never becomes a hint.
+    platform = str(obj.get("platform") or "").strip().lower() or None
+    if platform is not None and platform not in _PLATFORMS:
+        platform = None
+    metric = kind_from_text(str(obj.get("metric") or ""))
     return {
         "summary": obj.get("summary"),
         "amount": amount,
@@ -6849,6 +7765,8 @@ def parse_vision_result(text: str):
         "tx_ref": obj.get("tx_ref"),
         "link": obj.get("link"),
         "username": obj.get("username"),
+        "platform": platform,
+        "metric": metric,
         "want": want,
     }
 
@@ -7255,46 +8173,95 @@ def reaction_emoji(text: str):
             return found_pray
     # Word forms ("pray reactions", "heart reactions"): the same
     # emoji the word names, so the word form gets the same service
-    # — or the same honest answer — as the emoji form (service-
-    # types inventory §5, 15 Nov 2026). Only inside a reactions
+    # - or the same honest answer - as the emoji form (service-
+    # types inventory section 5, 15 Nov 2026). Only inside a reactions
     # message, so filler "like" and plain adjectives never trigger
     # it ("cool" is left out on purpose: "cool reactions" usually
-    # means good reactions, not 😎).
+    # means good reactions, not the cool emoji). The unguarded twin
+    # below is for when a reactions draft is already open.
     s = " ".join((text or "").strip().lower().split())
     if "reaction" in s:
-        if "heart eyes" in s:
-            return "😍"
-        if "heart on fire" in s:
-            return "❤️‍🔥"
-        if "pray" in s:
-            return "🙏"
-        if "heart" in s:
-            return "❤️"
-        if "fire" in s:
-            return "🔥"
-        if "thumbs up" in s or "thumb up" in s:
-            return "👍"
-        if "thumbs down" in s or "thumb down" in s or "dislike" in s:
-            return "👎"
-        if "wow" in s:
-            return "😮"
-        if "crying" in s or "sad" in s:
-            return "😢"
-        if "angry" in s:
-            return "😡"
-        if "thinking" in s:
-            return "🤔"
-        if "celebration" in s or "party" in s:
-            return "🎉"
-        if "laugh" in s or "tears of joy" in s:
-            return "😂"
-        if "snowman" in s:
-            return "☃️"
-        if "lightning" in s:
-            return "⚡️"
-        if "writing hand" in s:
-            return "✍️"
+        return _reaction_word_emoji(s)
     return None
+
+
+# Word -> reaction emoji, in match order (screenshot bug, 16 Nov
+# 2026): phrases first ("heart eyes" before "heart", "heart on
+# fire" before "heart"), then exact words, then stems for verb
+# forms ("laugh" matches "laughing", "kiss" matches "kissing",
+# "grin" matches "grinning", "lov" matches "love"/"loving").
+# Exact words never match inside another word, so "like" never
+# fires on "likely" and "dislike" never fires as "like".
+# The _REACTION_WORD_EMOJI dict elsewhere maps words to emoji
+# families for service matching; this ordered table picks ONE
+# emoji from the user's words.
+_REACTION_WORD_PICK = (
+    # Phrases (substring match).
+    ("heart eyes", "😍"),
+    ("heart on fire", "❤️‍🔥"),
+    ("writing hand", "✍️"),
+    ("thumbs up", "👍"),
+    ("thumb up", "👍"),
+    ("thumbs down", "👎"),
+    ("thumb down", "👎"),
+    ("tears of joy", "😂"),
+    # Exact words.
+    ("dislike", "👎"),
+    ("like", "👍"),
+    ("love", "❤️"),
+    ("fire", "🔥"),
+    ("wow", "😮"),
+    ("snowman", "☃️"),
+    ("lightning", "⚡️"),
+    # Stems (a word starting with the stem matches).
+    ("heart", "❤️"),
+    ("lov", "❤️"),
+    ("pray", "🙏"),
+    ("cry", "😢"),
+    ("sad", "😢"),
+    ("angry", "😡"),
+    ("think", "🤔"),
+    ("celebrat", "🎉"),
+    ("party", "🎉"),
+    ("laugh", "😂"),
+    ("kiss", "😘"),
+    ("grin", "😁"),
+)
+
+
+def _reaction_word_emoji(text: str):
+    """The emoji a word in the text names ("only love" -> heart,
+    "only laughing" -> tears of joy, "only kissing" -> kiss),
+    or None. Pure."""
+    s = " ".join((text or "").strip().lower().split())
+    if not s:
+        return None
+    words = s.split()
+    for phrase, emoji in _REACTION_WORD_PICK:
+        if " " in phrase:
+            if phrase in s:
+                return emoji
+        elif phrase in words:
+            return emoji
+        elif phrase not in (
+            "dislike", "like", "love", "fire", "wow",
+            "snowman", "lightning",
+        ) and any(w.startswith(phrase) for w in words):
+            # A stem hit is a verb/plural form ("laughing",
+            # "kissing", "grinning", "loving", "hearts").
+            return emoji
+    return None
+
+
+def _reaction_emoji_from_words(text: str):
+    """The emoji a word in the text names, with NO "reaction"
+    guard - for use only when a reactions draft is already open
+    (screenshot bug, 16 Nov 2026): "only love", "only laughing",
+    "only kissing" name the emoji even without the word
+    "reaction", because the draft already says reactions. Never
+    call this on a message with no reactions context - a bare
+    "I like it" must not become a thumbs-up order. Pure."""
+    return _reaction_word_emoji(text)
 
 
 # Reaction emoji that may start a bare order ("10 🙏", "🙏 10",
@@ -7997,7 +8964,13 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
                 return sent
             except Exception as exc:
                 log.warning("reply_voice failed, falling back to text: %s", exc)
-    sent = await message.reply_text(out_text, reply_markup=reply_markup)
+    sent = await message.reply_text(
+        out_text,
+        reply_markup=(
+            reply_markup if reply_markup is not None
+            else hide_reply_keyboard()
+        ),
+    )
     _record_bot_reply(text)
     return sent
 
@@ -8030,6 +9003,35 @@ LAST_LANG = {}
 # created (the order then lives in PENDING), when the user cancels, or
 # when a different platform starts a new order.
 PARTIAL = {}  # telegram_id -> {"platform", "service_hint", "link", "quantity"}
+# Parked order draft (deposit-hijack fix, 16 Nov 2026): when the
+# user switches flows mid-order (Deposit, Balance, My orders,
+# Support, /start, /help), the draft being built moves here
+# instead of being lost — one short line says it is saved, and
+# saying "order" moves it back to PARTIAL and continues it.
+# In-memory only, like PARTIAL itself.
+PARKED_DRAFT = {}  # telegram_id -> the PARTIAL dict as it was
+
+
+def _park_order_draft(user_id: int) -> bool:
+    """Move the order draft being built to the parked store.
+    Returns True when a draft was parked (the caller then tells
+    the user, in one short line, that it is saved). Pure apart
+    from the two dict writes."""
+    draft = PARTIAL.pop(user_id, None)
+    if not draft:
+        return False
+    PARKED_DRAFT[user_id] = draft
+    return True
+
+
+def _resume_parked_draft(user_id: int):
+    """Move the parked draft back to PARTIAL, or None when there
+    is none. Pure apart from the two dict writes."""
+    draft = PARKED_DRAFT.pop(user_id, None)
+    if not draft:
+        return None
+    PARTIAL[user_id] = draft
+    return draft
 # Abandoned-order nudge (feature 4, 15 Nov 2026): a half-built
 # NORMAL order draft (PARTIAL) whose owner goes quiet for ~30
 # minutes gets ONE nudge with a Resume button. telegram_id ->
@@ -8211,13 +9213,17 @@ PROVIDER_CRITICAL_BALANCE_USD = 1.0
 # which only William may ever see, and the secrecy test treats
 # every TEXT entry as user-facing. {balance} is the USD figure
 # with 2 decimals, filled in by run_provider_balance_cycle.
+# {provider} is the provider slug ("gop"/"smm") — with two
+# providers William must know which balance is low (item 12,
+# 16 Nov 2026); the slug sits after the figure so the old alert
+# wording still reads the same.
 PROVIDER_BALANCE_LOW_TEXT = (
-    "⚠️ Provider balance is low: ${balance} — orders may fail "
-    "soon. Top it up."
+    "⚠️ Provider balance is low: ${balance} ({provider}) — orders "
+    "may fail soon. Top it up."
 )
 PROVIDER_BALANCE_CRITICAL_TEXT = (
-    "🚨 Provider balance is critically low: ${balance} — orders "
-    "may fail soon. Top it up now."
+    "🚨 Provider balance is critically low: ${balance} ({provider}) "
+    "— orders may fail soon. Top it up now."
 )
 PROVIDER_BALANCE_CHECK_SECONDS = 3600
 # Feedback check (feature 10): days after the first completed
@@ -8246,14 +9252,39 @@ FEEDBACK_PENDING = {}
 # snapshot gives, so no double alert.
 _PRICE_WATCH_LAST_REFRESH = None
 _PRICE_WATCH_OFF = False
+# New faster service alert (ideas batch 2 #6, 16 Nov 2026):
+# (telegram_id, combined service id) already alerted — one alert
+# per user per service, ever. The snapshot save is the primary
+# guard (a service stops being new once it is snapshotted); this
+# set is the backstop.
+FASTER_SERVICE_ALERTED = set()
 # Low provider balance watch (feature 7): monotonic time of the
 # last check, and the state machine's state — "ok" (at or above
 # the low threshold), "low" (below it, alert sent) or "critical"
 # (below $1, second alert sent). In-memory only: a restart resets
 # to "ok", so a balance that is still low after a restart alerts
 # once more — one honest repeat per restart, never a loop.
+# Two providers since item 12 (16 Nov 2026): _PROVIDER_BALANCE_STATE
+# is the first provider's state (kept as a plain string, exactly as
+# before), _PROVIDER_BALANCE_STATE_SMM the second's. A provider
+# whose stats field is missing (endpoint not updated yet) simply
+# keeps its state — the guard reads an unmeasured provider as
+# healthy rather than blocking orders on a missing number.
 _PROVIDER_BALANCE_LAST_CHECK = 0.0
 _PROVIDER_BALANCE_STATE = "ok"
+_PROVIDER_BALANCE_STATE_SMM = "ok"
+
+
+def _provider_balance_health():
+    """Provider slug -> True when its balance is healthy (item 12,
+    16 Nov 2026): the balance-guard reading of the probe's state
+    machine. A provider whose state is "ok" is healthy; "low" or
+    "critical" is not. Pure, sync — the probe refreshes the states
+    hourly in the scheduler, and picks read them from here."""
+    return {
+        "gop": _PROVIDER_BALANCE_STATE == "ok",
+        "smm": _PROVIDER_BALANCE_STATE_SMM == "ok",
+    }
 # Round 3 (15 Nov 2026) — cancel order (12): confirm_id -> the
 # placed order awaiting a cancel Confirm
 #   {user_id, order_id, total, service_name, quantity}.
@@ -8331,6 +9362,13 @@ NUDGE_SERVICE = {}
 # only when that order is for the same platform and metric — an
 # abandoned usual never hijacks a different order.
 USUAL_SERVICE = {}
+# The service the bot just quoted a price for (19:28 EAT 16 Nov 2026):
+# telegram_id -> {"combined_id", "platform", "metric", "price"}.
+# The Confirm card must show this exact service at this exact price
+# for the next order of the same platform+metric — a user quoted
+# 1.6 ETB was handed a 1,118.04 ETB traffic service. One-shot:
+# consumed (or dropped) by complete_order.
+QUOTED_SERVICE = {}
 # A deposit that failed after Confirm: telegram_id -> the confirmed
 # draft {"amount", "method", "phone"}, so the one-tap "Try again"
 # button can restart the same deposit without asking for the
@@ -8346,6 +9384,15 @@ RECEIPT_OFFER = {}
 # "orders": [{"service", "link", "quantity", "total"}]}. One Confirm
 # places them all, each with its own idempotency key.
 PENDING_BATCH = {}
+# Post bundle (ideas batch 1 #3, 16 Nov 2026): a boost of one post
+# with three legs (views + likes + reactions). BUNDLE_DRAFT is the
+# bundle being built: {"platform", "link", "quantities":
+# {"views", "likes", "reactions"}}. PENDING_BUNDLE is the confirmed
+# bundle awaiting Confirm, same shape as PENDING_BATCH — but placed
+# by place_bundle, which watches every leg so the normal rescue
+# rules apply per leg.
+BUNDLE_DRAFT = {}
+PENDING_BUNDLE = {}
 # A refill awaiting Confirm (15 Nov 2026, feature 3): confirm_id ->
 # {"user_id", "order_id", "service_id", "service_name", "link",
 # "quantity"}. One Confirm calls POST /orders/{id}/refill; the
@@ -11991,6 +13038,20 @@ def is_cancel_request(text: str) -> bool:
     return s.startswith("please cancel")
 
 
+def is_invite_link_request(text: str) -> bool:
+    """True when the message IS an invite-link command ("my invite
+    link", "invite link") — a deterministic command the classifier
+    must never sit on. Late-reply fix (16 Nov 2026): "my invite
+    link" had no fast path at all, so it waited on the AI like any
+    free text. Trailing punctuation is stripped, like
+    is_cancel_request, so a voice-transcribed "My invite link."
+    matches too. Longer messages ("send my invite link to a
+    friend") are not matched — they go through the normal flow."""
+    s = " ".join((text or "").strip().lower().split())
+    s = re.sub(r"[.!?]+$", "", s)
+    return s in ("my invite link", "invite link")
+
+
 # English number words (owner, 14 Nov 2026 — "one thousand" and
 # "five hundred" must work like 1000 and 500). There is no Amharic
 # number-word handling anywhere in the code, so this is English
@@ -12253,6 +13314,92 @@ def _needs_post_link(service_hint: str) -> bool:
     return metric_content_kind(hint) == "video"
 
 
+def link_story_state(link):
+    """'story' / 'post' / None for a link (story/post bug, 16 Nov
+    2026): a t.me/<channel>/<number> link is a POST, never a
+    story; a /stories/ URL is a story; a Facebook /posts/ URL or
+    an Instagram /p/ or /reel/ URL is a post. Anything else is
+    unknown (None) — the pick then does not filter on story-ness.
+    A tg:// link is not a story or a post: it is unusable as an
+    order link at all (see validate_order_link). Pure."""
+    low = str(link or "").strip().lower()
+    if not low:
+        return None
+    if "/stories/" in low:
+        return "story"
+    if "t.me/" in low:
+        tail = low.split("t.me/", 1)[1].strip("/")
+        if "/" in tail and tail.rsplit("/", 1)[1].isdigit():
+            return "post"
+        return None
+    if "facebook.com" in low or "fb.com" in low:
+        if "/posts/" in low:
+            return "post"
+        return None
+    if "instagram.com" in low:
+        if "/p/" in low or "/reel" in low:
+            return "post"
+        return None
+    return None
+
+
+def _story_flag(link, hint=None, explicit=None):
+    """True / False / None for a reactions pick (story/post bug,
+    16 Nov 2026): an explicit draft flag wins; else the link's
+    state; else a hint that says "story" (the user asked for
+    story reactions with no link yet). None means unknown — the
+    pool is not filtered. Pure."""
+    if explicit is not None:
+        return bool(explicit)
+    state = link_story_state(link)
+    if state == "story":
+        return True
+    if state == "post":
+        return False
+    if hint and "story" in str(hint).lower():
+        return True
+    return None
+
+
+def validate_order_link(link, service):
+    """Link check before paying (cancel-cutting item 5, 16 Nov
+    2026): the link's domain must match the service's platform,
+    and the link type must match the metric — followers /
+    subscribers / members need a profile/channel link, views /
+    likes / comments / shares / reactions need a post/video
+    link. Returns None when the link fits, else "platform" (the
+    domain is another platform's) or "link_type" (a profile link
+    for a post metric, or a post link for a profile metric).
+    Conservative by design: when either side cannot be told (no
+    recognisable platform in the service name, no recognisable
+    shape in the link), the link passes — an unknown shape never
+    blocks an order. No live profile fetching, ever. Pure: no
+    network, no state."""
+    if not link or not service:
+        return None
+    if str(link).strip().lower().startswith("tg://"):
+        # A tg://openmessage deep link is a client-side link, not
+        # a post URL the provider can open — never an order link
+        # (story/post bug, 16 Nov 2026).
+        return "link_type"
+    platform, hint = _platform_hint_of_service(service)
+    link_platform = platform_from_link(link)
+    if platform and link_platform and link_platform != platform:
+        return "platform"
+    need = metric_content_kind(hint or "")
+    if need is None and "reaction" in (hint or "").lower():
+        # Reactions are a content metric, but the word is not in
+        # _CONTENT_METRICS — a reaction service always needs a
+        # post link.
+        need = "video"
+    if need is None:
+        return None
+    got = link_content_kind(link)
+    if got is not None and got != need:
+        return "link_type"
+    return None
+
+
 def _same_link(a: str, b: str) -> bool:
     """Same link up to scheme, www, query string and a trailing
     slash — the AI sometimes normalises the link it returns."""
@@ -12451,11 +13598,14 @@ async def _price_line(user_id: int, text: str, platform, hint, quantity,
     """The deterministic price line for an identified service, straight
     from the catalogue (rate x420 ETB): "Thumbs up 👍: 5.46 ETB for
     1,000 (5.46 ETB per 1000)." when a quantity was asked for, else
-    the per-1000 rate. Returns (line, platform, hint) — line is None
-    when no service can be named, and platform/hint are the values
-    actually used, after falling back to the order in progress and
-    then to the message itself. Short service names only, like
-    everywhere else. The caller decides what None means:
+    the per-1000 rate. Returns (line, platform, hint, service) — line
+    is None when no service can be named, and platform/hint are the
+    values actually used, after falling back to the order in progress
+    and then to the message itself. `service` is the service the line
+    quotes, or None: the caller remembers it as the quoted service,
+    so the next order for the same platform+metric is charged on
+    that exact service (19:28 EAT 16 Nov 2026). Short service names
+    only, like everywhere else. The caller decides what None means:
     price_answer_text asks which service; the link-ask safety net
     just skips the line."""
     platform = (platform or "").strip().lower() or None
@@ -12475,20 +13625,20 @@ async def _price_line(user_id: int, text: str, platform, hint, quantity,
         metric = kind_from_text(text)
         hint = " ".join(p for p in (platform, metric) if p) or None
     if not platform and not hint:
-        return None, platform, hint
+        return None, platform, hint, None
     if services is None:
         try:
             services = await paxyo.services()
         except Exception as exc:
             log.warning("price lookup failed: %s", exc)
-            return None, platform, hint
+            return None, platform, hint, None
     picks = pick_services(
         services, platform=platform, service_hint=hint, limit=100,
         reaction_emoji=reaction_emoji,
     )
     if not picks:
-        return None, platform, hint
-    return _service_price_line(picks[0], quantity, lang), platform, hint
+        return None, platform, hint, None
+    return _service_price_line(picks[0], quantity, lang), platform, hint, picks[0]
 
 
 def no_service_reply(platform, hint, text, lang):
@@ -12528,6 +13678,29 @@ def no_service_reply(platform, hint, text, lang):
     return None
 
 
+def _remember_quote(user_id: int, service, platform, hint):
+    """Remember the service a price answer just quoted, so the next
+    order for the same platform+metric is charged on that exact
+    service at that exact price (19:28 EAT 16 Nov 2026: a user
+    quoted 1.6 ETB was handed a 1,118.04 ETB traffic service). The
+    quote is only a pin for the same platform+metric — complete_order
+    re-resolves the service from the live catalogue and checks it is
+    still orderable before using it. A platform-less quote is still
+    stored (the pin needs a platform to match, so it simply never
+    fires for one)."""
+    if not service:
+        return
+    metric = kind_from_text(hint or "") or kind_from_text(
+        f"{service.get('name') or ''} {service.get('category') or ''}"
+    )
+    QUOTED_SERVICE[int(user_id)] = {
+        "combined_id": service_combined_id(service),
+        "platform": (platform or "").strip().lower() or None,
+        "metric": metric,
+        "price": float(service.get("rate_etb_per_1000") or 0),
+    }
+
+
 async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
     """The price, straight from the catalogue: ETB per 1000, and the
     total when a quantity was asked for. Never asks for the link
@@ -12555,6 +13728,53 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
     except Exception as exc:
         log.warning("price lookup failed: %s", exc)
         return None
+    # Stale-price fix (16 Nov 2026): a bare price question ("how
+    # much is the price") names no service itself — the classifier
+    # may carry the platform/metric forward from an earlier
+    # conversation, and answering from that stale hint quotes the
+    # WRONG service (live fault: a TikTok views order got the old
+    # Telegram Reactions price, 37.80 ETB/1000). When the message
+    # itself names no platform or metric, the price comes from the
+    # CURRENT draft (the order being built, or the open Confirm
+    # card) — never from the classifier's carried-forward hint.
+    # With no current draft either, ask which service instead of
+    # guessing an old one.
+    _own_platform, _own_metric = detect_platform_metric(text)
+    if _own_platform is None and _own_metric is None:
+        platform, hint = _conversation_context(user_id)
+        if not platform and not hint:
+            return t("price_ask_service", lang)
+    _links = extract_links(text)
+    if _links:
+        # One-line price check (ideas batch 1 #2, 16 Nov 2026): a
+        # link + a price word answers the cheapest price for THAT
+        # link — the metric comes from the link's shape (a video
+        # link is views, a profile link is followers, a YouTube
+        # channel link is subscribers), never the fastest service
+        # of any metric on the platform (live fault: a TikTok video
+        # link + "how much" answered the Video Save price, 2.10,
+        # because Save is the fastest TikTok service). A metric the
+        # message itself names always wins over the link-derived
+        # one. No draft is started and "How many?" is never asked:
+        # a price question never starts an order.
+        _kind = link_content_kind(_links[0])
+        _derived = None
+        if _kind == "video":
+            _derived = "views"
+        elif _kind == "profile":
+            _derived = (
+                "subscribers" if platform == "youtube" else "followers"
+            )
+        if _derived and not kind_from_text(hint or ""):
+            hint = " ".join(
+                p for p in (platform, _derived) if p
+            ) or hint
+            _cheapest = cheapest_service(
+                services, platform=platform, service_hint=hint
+            )
+            if _cheapest is not None:
+                _remember_quote(user_id, _cheapest, platform, hint)
+                return _service_price_line(_cheapest, quantity, lang)
     if is_cheapest_question(text):
         # A cheapest question is answered from the cheapest
         # service, not the fastest pick: the fastest TikTok views
@@ -12568,8 +13788,9 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
             services, platform=platform, service_hint=hint
         )
         if cheapest is not None:
+            _remember_quote(user_id, cheapest, platform, hint)
             return _service_price_line(cheapest, quantity, lang)
-    line, platform, hint = await _price_line(
+    line, platform, hint, _quoted = await _price_line(
         user_id, text, platform, hint, quantity, lang,
         reaction_emoji=reaction_emoji(text), services=services,
     )
@@ -12581,7 +13802,10 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
         )
         if cheapest is not None:
             line = _service_price_line(cheapest, quantity, lang)
+            _remember_quote(user_id, cheapest, platform, hint)
     if line is not None:
+        if _quoted is not None:
+            _remember_quote(user_id, _quoted, platform, hint)
         if quantity is not None:
             try:
                 qty = int(quantity)
@@ -12804,22 +14028,51 @@ _ORDER_STATUS_ICONS = {
 }
 
 
-async def orders_history_text(user_id: int, lang: str) -> str:
+async def orders_history_text(user_id: int, lang: str,
+                              platform: str = None) -> str:
     """The user's LAST 5 orders only (owner, 14 Nov 2026 — the
     20-row monospace table was ugly and confusing on a phone):
     one line per order — ID, short service name, quantity, status
     with an icon, total in ETB. Newest first. No extra fields,
-    no long text, no monospace block that wraps badly."""
+    no long text, no monospace block that wraps badly.
+
+    My orders by platform (ideas batch 1 #6, 16 Nov 2026):
+    `platform` filters the list to that platform only ("Show my
+    TikTok orders"), read from each order's service name — no
+    catalogue fetch. No orders on that platform says so plainly
+    instead of showing another platform's orders."""
+    platform = (platform or "").strip().lower() or None
     try:
         orders = await paxyo.recent_orders(user_id, limit=5)
     except Exception as exc:
         log.warning("orders history failed: %s", exc)
         return t("not_understood", lang)
     if not orders:
+        if platform:
+            disp = _PLATFORM_DISPLAY.get(platform, platform.title())
+            return t(
+                "orders_history_empty_platform", lang, platform=disp
+            )
         # The API has nothing, but this session placed an order
         # (tracked in memory): show its status line.
         return await last_order_status_text(user_id, lang)
-    lines = [t("orders_history_title", lang)]
+    if platform:
+        disp = _PLATFORM_DISPLAY.get(platform, platform.title())
+        orders = [
+            o for o in orders
+            if _platform_hint_of_service(
+                {"name": o.get("service_name") or ""}
+            )[0] == platform
+        ]
+        if not orders:
+            return t(
+                "orders_history_empty_platform", lang, platform=disp
+            )
+        lines = [t(
+            "orders_history_title_platform", lang, platform=disp
+        )]
+    else:
+        lines = [t("orders_history_title", lang)]
     for o in orders[:5]:
         status = str(o.get("status") or "?").strip().lower()
         icon = _ORDER_STATUS_ICONS.get(status, "ℹ️")
@@ -12874,11 +14127,28 @@ async def place_order_now(message, user_id: int, merged: dict, lang: str,
         service, svc_error = resolve_named_service(services, named_service_id)
         if svc_error is not None:
             return False
+        # Cancel-cutting item 2 (16 Nov 2026): a service the user
+        # named that is auto-paused right now is never placed on
+        # at once — False falls through to the normal Confirm
+        # card, which says plainly it is paused and offers the
+        # fastest one instead.
+        _paused_now = await _cached_paused_services()
+        if _paused_now is not None and service_combined_id(service) in _paused_now:
+            return False
     if service is None:
+        # Cancel-cutting (16 Nov 2026): the order-now pick rides
+        # the merged ranking too (trusted first, unreliable /
+        # paused / low-balance-provider services skipped).
+        _rel, _paused, _health = await _pick_context()
         picks = pick_services(
             services, platform=merged.get("platform"),
             service_hint=merged.get("service_hint"),
             reaction_emoji=merged.get("reaction_emoji"),
+            reliability=_rel, paused=_paused, balance_health=_health,
+            quantity=merged.get("quantity"),
+            story=_story_flag(
+                merged.get("link"), merged.get("service_hint")
+            ),
         )
         if not picks:
             return False
@@ -14033,6 +15303,15 @@ def pending_batch_for_user(user_id: int):
     return None, None
 
 
+def pending_bundle_for_user(user_id: int):
+    """(confirm_id, bundle) of the user's most recent post bundle
+    awaiting Confirm, or (None, None)."""
+    for confirm_id, bundle in reversed(list(PENDING_BUNDLE.items())):
+        if bundle["user_id"] == user_id:
+            return confirm_id, bundle
+    return None, None
+
+
 def pending_refill_for_user(user_id: int):
     """(confirm_id, refill) of the user's most recent refill
     awaiting Confirm, or (None, None)."""
@@ -14110,12 +15389,29 @@ def quick_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def hide_reply_keyboard() -> ReplyKeyboardRemove:
+    """Hide the persistent reply keyboard (16 Nov 2026, William):
+    the Order / Balance / My orders / Deposit / Support buttons
+    are gone — every bot reply carries this instead, so the
+    buttons disappear from the chat. Inline keyboards are
+    unaffected: they ride on reply_markup explicitly, never
+    through here. The text commands (Order, Balance, My orders,
+    Deposit, Support) still work when typed — see
+    quick_reply_action."""
+    return ReplyKeyboardRemove()
+
+
 def quick_reply_action(text: str):
     """The quick-reply action for a message ("order", "balance",
     "orders", "deposit", "support"), or None. Matches the button
     label with or without its emoji, case-insensitive — a typed
-    "Balance" does the same thing as tapping 💰 Balance."""
+    "Balance" does the same thing as tapping 💰 Balance. Trailing
+    punctuation is stripped first (late-reply fix, 16 Nov 2026):
+    voice transcription often adds it ("Order.", "balance!"), and
+    without the strip a plain command word fell through to the AI
+    classifier and waited on a slow provider."""
     s = " ".join((text or "").strip().lower().split())
+    s = re.sub(r"[.!?]+$", "", s)
     for label in QUICK_REPLY_LABELS:
         plain = label.split(" ", 1)[-1].strip().lower()
         if s == label.lower() or s == plain:
@@ -14409,7 +15705,9 @@ def split_leg_cover(confirmed_total, leg_qty, total_qty, leg_cost):
 
 
 def _next_split_service(services, service, failed_services, total_qty,
-                        confirmed_total, allow_cover=True):
+                        confirmed_total, allow_cover=True,
+                        reliability=None, paused=None,
+                        balance_health=None, story=None):
     """The next service for a stalled split test: the same platform
     + metric, CHEAPEST first (the retry walks down the cheaper
     services), excluding every service that already stalled in
@@ -14425,11 +15723,20 @@ def _next_split_service(services, service, failed_services, total_qty,
     first — the cap on attempts bounds the walk anyway.
     `allow_cover` is False until the server confirms it honours
     the cover (split_cover_live): without it only a service
-    costing at most the confirmed total is returned."""
+    costing at most the confirmed total is returned.
+    Cancel-cutting (16 Nov 2026): `reliability` / `paused` /
+    `balance_health` ride the pick (see pick_services) — the
+    filters (unreliable / paused / low-balance-provider skips)
+    survive the cheapest re-sort below; the trust ordering does
+    not (the retry walks cheapest-first by design). `total_qty`
+    is the quantity for the unproven small-order cap."""
     platform, hint = _platform_hint_of_service(service or {})
     picks = pick_services(
         services or [], platform=platform, service_hint=hint,
         limit=RESCUE_CANDIDATE_LIMIT,
+        reliability=reliability, paused=paused,
+        balance_health=balance_health, quantity=total_qty,
+        story=story,
     )
     failed = _failed_combined_ids(service, failed_services)
     candidates = [
@@ -14504,7 +15811,8 @@ def _split_test_admin_text(order_id, service, test_qty, refunded,
 
 def _next_rescue_service(services, service, failed_services,
                          max_total=None, quantity=0, cheapest_first=False,
-                         user_id=None):
+                         user_id=None, reliability=None, paused=None,
+                         balance_health=None, story=None):
     """The next-best service for a stalled order: the same platform
     + metric, fastest first (reuse pick_services), excluding every
     service that already stalled in this chain — not just the latest
@@ -14530,11 +15838,20 @@ def _next_rescue_service(services, service, failed_services,
     approved separately (customizations #4, 15 Nov 19:57 EAT), not
     a change to the default — when the customer set cheapest-first,
     `user_id` carries it and the affordable tier sorts cheapest
-    first too."""
+    first too.
+    Cancel-cutting (16 Nov 2026): `reliability` / `paused` /
+    `balance_health` ride the pick (see pick_services) — trusted
+    first, unreliable / paused / low-balance-provider services
+    skipped; `quantity` doubles as the unproven small-order cap.
+    A quantity of 0 (the "any service at all" checks) lifts the
+    cap, so the check stays permissive."""
     platform, hint = _platform_hint_of_service(service or {})
     picks = pick_services(
         services or [], platform=platform, service_hint=hint,
         limit=RESCUE_CANDIDATE_LIMIT,
+        reliability=reliability, paused=paused,
+        balance_health=balance_health, quantity=quantity,
+        story=story,
     )
     failed = _failed_combined_ids(service, failed_services)
     candidates = [
@@ -14564,7 +15881,9 @@ def _next_rescue_service(services, service, failed_services,
 
 
 def _rescue_with_cover(services, service, failed_services, quantity,
-                       confirmed_total, allow_cover=True, user_id=None):
+                       confirmed_total, allow_cover=True, user_id=None,
+                       reliability=None, paused=None,
+                       balance_health=None, story=None):
     """The rescue pick with the Paxyo +10% band (owner, 15 Nov
     2026 — small orders, and the split-test path's own pick is
     _next_split_service): first the fastest service costing at
@@ -14581,11 +15900,15 @@ def _rescue_with_cover(services, service, failed_services, quantity,
     old strict-cap behaviour. A candidate beyond the +10% band is
     never returned. `user_id` carries the cheapest-first pref
     (#4) into the affordable tier — the band is cheapest-first
-    already."""
+    already. Cancel-cutting (16 Nov 2026): `reliability` /
+    `paused` / `balance_health` ride both tiers (see
+    _next_rescue_service)."""
     nxt = _next_rescue_service(
         services, service, failed_services,
         max_total=confirmed_total, quantity=quantity,
         user_id=user_id,
+        reliability=reliability, paused=paused,
+        balance_health=balance_health, story=story,
     )
     if nxt is not None:
         return nxt, 0.0
@@ -14598,6 +15921,8 @@ def _rescue_with_cover(services, service, failed_services, quantity,
         services, service, failed_services,
         max_total=band_max, quantity=quantity, cheapest_first=True,
         user_id=user_id,
+        reliability=reliability, paused=paused,
+        balance_health=balance_health, story=story,
     )
     if nxt is None:
         return None, 0.0
@@ -14685,13 +16010,17 @@ async def _propose_rescue(app, order_id, watched, nxt, cover, kind,
 
 def _resolve_proposal_service(services, service, failed_services,
                               proposal, quantity, confirmed_total,
-                              allow_cover):
+                              allow_cover, reliability=None, paused=None,
+                              balance_health=None, story=None):
     """The service a rescue proposal named, when it is still usable
-    (in the catalogue, active, not failed in this chain, and its
-    total fits the confirmed total or the +10% band) — else a fresh
-    pick via _rescue_with_cover. Returns (service, cover). The
-    caller passes the pref-filtered pool, so a proposed service
-    the customer's own rules now exclude is never used."""
+    (in the catalogue, active, not failed in this chain, not paused
+    since the proposal was made, and its total fits the confirmed
+    total or the +10% band) — else a fresh pick via
+    _rescue_with_cover. Returns (service, cover). The caller
+    passes the pref-filtered pool, so a proposed service the
+    customer's own rules now exclude is never used. Cancel-cutting
+    (16 Nov 2026): `reliability` / `paused` / `balance_health`
+    ride the fresh pick."""
     wanted = (proposal or {}).get("service")
     candidate = None
     for svc in services or []:
@@ -14701,21 +16030,29 @@ def _resolve_proposal_service(services, service, failed_services,
     if candidate is not None and candidate.get("active", True):
         failed = _failed_combined_ids(service, failed_services)
         if service_combined_id(candidate) not in failed:
-            total = estimated_total_etb(
-                float(candidate.get("rate_etb_per_1000") or 0),
-                quantity,
-            )
-            cover = round(
-                max(0.0, total - float(confirmed_total)), 2
-            )
-            max_cover = round(
-                float(confirmed_total) * SPLIT_COVER_MAX_FRACTION, 2
-            )
-            if cover == 0.0 or (allow_cover and cover <= max_cover):
-                return candidate, cover
+            # A pause that started while the customer was deciding
+            # beats the proposal: the service is not used, and the
+            # fresh pick below finds the next best instead.
+            if paused and service_combined_id(candidate) in paused:
+                candidate = None
+            else:
+                total = estimated_total_etb(
+                    float(candidate.get("rate_etb_per_1000") or 0),
+                    quantity,
+                )
+                cover = round(
+                    max(0.0, total - float(confirmed_total)), 2
+                )
+                max_cover = round(
+                    float(confirmed_total) * SPLIT_COVER_MAX_FRACTION, 2
+                )
+                if cover == 0.0 or (allow_cover and cover <= max_cover):
+                    return candidate, cover
     return _rescue_with_cover(
         services, service, failed_services, quantity,
         confirmed_total, allow_cover=allow_cover,
+        reliability=reliability, paused=paused,
+        balance_health=balance_health, story=story,
     )
 
 
@@ -14768,11 +16105,15 @@ async def _decline_rescue_proposal(app, order_id, watched, proposal):
 
 def _resolve_split_proposal(services, service, failed_services,
                             proposal, total_qty, confirmed_total,
-                            allow_cover):
+                            allow_cover, reliability=None, paused=None,
+                            balance_health=None, story=None):
     """The service a split-test proposal named, when it is still
     usable (in the catalogue, active, not failed in this chain,
-    and the order can be split on it) — else a fresh pick via
-    _next_split_service. Returns (service, cover)."""
+    not paused since the proposal was made, and the order can be
+    split on it) — else a fresh pick via _next_split_service.
+    Returns (service, cover). Cancel-cutting (16 Nov 2026):
+    `reliability` / `paused` / `balance_health` ride the fresh
+    pick."""
     wanted = (proposal or {}).get("service")
     candidate = None
     for svc in services or []:
@@ -14785,6 +16126,7 @@ def _resolve_split_proposal(services, service, failed_services,
         and service_combined_id(candidate) not in _failed_combined_ids(
             service, failed_services
         )
+        and not (paused and service_combined_id(candidate) in paused)
         and split_test_quantities(total_qty, candidate) is not None
     ):
         full = estimated_total_etb(
@@ -14799,6 +16141,8 @@ def _resolve_split_proposal(services, service, failed_services,
     return _next_split_service(
         services, service, failed_services, total_qty,
         confirmed_total, allow_cover=allow_cover,
+        reliability=reliability, paused=paused,
+        balance_health=balance_health, story=story,
     )
 
 
@@ -14880,6 +16224,17 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None,
     except Exception:
         cover_live = False
     allow_cover = (watched.get("split") or {}).get("leg") != "remainder"
+    # Cancel-cutting (16 Nov 2026): the rescue pick rides the
+    # merged ranking (trusted first, unreliable / paused /
+    # low-balance-provider services skipped).
+    _rel, _paused, _health = await _pick_context()
+    # Story/post (16 Nov 2026): the rescue pick rides
+    # the same link type as the order - a post link
+    # never rescues onto a story service.
+    _story = _story_flag(
+        link,
+        _platform_hint_of_service(service or {})[1],
+    )
     if proposal is not None:
         # The customer already said yes: use the proposed service
         # when it is still usable, else re-pick (and name the new
@@ -14888,12 +16243,14 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None,
             services, service, watched.get("failed_services"),
             proposal, quantity, confirmed_total,
             cover_live and allow_cover,
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         )
     else:
         nxt, cover = _rescue_with_cover(
             services, service, watched.get("failed_services"), quantity,
             confirmed_total, allow_cover=cover_live and allow_cover,
             user_id=user_id,
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         )
         if nxt is not None and pref_ask_first(user_id):
             # Ask-first (#6): propose the move and wait — nothing
@@ -14902,6 +16259,7 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None,
                 app, order_id, watched, nxt, cover, "stall"
             )
     pricier_only = False
+    _link_mismatch = False
     if nxt is None:
         # No affordable service — but is there any service at all?
         # None at all: leave the order alone, as before. Services
@@ -14909,11 +16267,28 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None,
         # plus the 10% band: refund in full and tell the user
         # plainly instead of the generic stuck warning.
         if _next_rescue_service(
-            services, service, watched.get("failed_services")
+            services, service, watched.get("failed_services"),
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         ) is None:
             log.warning("stall rescue %s: no next service", order_id)
             return False
         pricier_only = True
+    if nxt is not None:
+        # Link check (cancel-cutting item 5, 16 Nov 2026): the
+        # replacement service must fit the link the user gave —
+        # before any money moves. A mismatch means the order
+        # should never have been placed on this kind of service:
+        # refund it in full below and ask for the right link
+        # instead of moving it.
+        _link_error = validate_order_link(link, nxt)
+        if _link_error is not None:
+            _link_mismatch = True
+            nxt = None
+    # The bot itself is asking for this cancel (cancel-cutting
+    # item 4): mark the entry BEFORE the call, so the watch never
+    # mistakes the provider word "cancelled" that follows for a
+    # provider cancel and tries to rescue it again.
+    watched["bot_requested_cancel"] = True
     try:
         refund = await paxyo.cancel_refund(order_id, user_id)
     except Exception as exc:
@@ -14949,6 +16324,27 @@ async def _attempt_stall_rescue(app, order_id, watched, services=None,
                 quantity=int(quantity or 0),
                 refunded=format_money(refunded),
             ),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
+    if _link_mismatch:
+        # Refunded in full, no replacement: the link does not fit
+        # this kind of service, so the order cannot be moved —
+        # say so plainly and ask for the right link, so the user
+        # can order again with a link that fits.
+        _platform, _hint = _platform_hint_of_service(service or {})
+        await notify_user(
+            app, user_id,
+            t(
+                "order_rescue_link_mismatch", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                quantity=int(quantity or 0),
+                refunded=format_money(refunded),
+            )
+            + "\n"
+            + ask_link_text(_platform, _hint, "en"),
         )
         WATCHED_ORDERS.pop(order_id, None)
         return True
@@ -15056,9 +16452,13 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
     keep watching (throttled, or a transient failure — the next
     cycle retries). Never raises.
 
-    Only "failed" is ever rescued here — never "cancelled" /
-    "canceled" (that may be the user's own cancel, refunded by the
-    cancel endpoint instead) or "refunded" (already refunded). The
+    Cancel-cutting item 4 (16 Nov 2026): a PROVIDER-cancelled
+    order ("cancelled"/"canceled" from the provider) goes through
+    this same path — the watch only calls it when the entry is NOT
+    marked bot_requested_cancel, so an order the bot cancelled
+    itself (stall rescue, auto-cancel) or the user asked to cancel
+    never reaches here; those are refunded by the cancel endpoint
+    instead. "Refunded" (already refunded) is never rescued. The
     server re-reads the LIVE provider status itself and refunds
     only when the provider word is failed / canceled / cancelled,
     so a stale "failed" from the watch cannot refund an order the
@@ -15068,7 +16468,11 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
     endpoint is installed later, the next hourly retry refunds and
     rescues. The refund is the FULL stored total, and the server
     records it once ever (duplicate calls return the recorded
-    refund), so retrying after a successful refund is safe.
+    refund), so retrying after a successful refund is safe. A
+    stored 'cancelled' order the server refuses (its cancel path
+    already refunded it) surfaces the same way — the server's
+    fail-refund file must be the patched one (see HANDOVER.md)
+    for provider-cancelled refunds to work at all.
 
     No Confirm card: the user already confirmed this order, and the
     rescue only carries it out on the next service — the same
@@ -15233,6 +16637,17 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
     except Exception:
         cover_live = False
     allow_cover = (watched.get("split") or {}).get("leg") != "remainder"
+    # Cancel-cutting (16 Nov 2026): the rescue pick rides the
+    # merged ranking (trusted first, unreliable / paused /
+    # low-balance-provider services skipped).
+    _rel, _paused, _health = await _pick_context()
+    # Story/post (16 Nov 2026): the rescue pick rides
+    # the same link type as the order - a post link
+    # never rescues onto a story service.
+    _story = _story_flag(
+        link,
+        _platform_hint_of_service(service or {})[1],
+    )
     if proposal is not None:
         # The customer already said yes: use the proposed service
         # when it is still usable, else re-pick.
@@ -15240,12 +16655,14 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
             services, service, watched.get("failed_services"),
             proposal, quantity, confirmed_total,
             cover_live and allow_cover,
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         )
     else:
         nxt, cover = _rescue_with_cover(
             services, service, watched.get("failed_services"), quantity,
             confirmed_total, allow_cover=cover_live and allow_cover,
             user_id=user_id,
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         )
         if nxt is not None and pref_ask_first(user_id):
             # Ask-first (#6): the refund is already done — the
@@ -15260,7 +16677,8 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
         # but all cost more than the confirmed total plus the 10%
         # band: refund only, with the plain reason.
         if _next_rescue_service(
-            services, service, watched.get("failed_services")
+            services, service, watched.get("failed_services"),
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         ) is not None:
             log.warning(
                 "failed rescue %s: only pricier services remain",
@@ -15269,6 +16687,28 @@ async def _attempt_failed_rescue(app, order_id, watched, services=None,
             return await _refunded_pricier()
         log.warning("failed rescue %s: no next service", order_id)
         return await _refunded_no_replacement()
+    # Link check (cancel-cutting item 5, 16 Nov 2026): the
+    # replacement service must fit the link the user gave — the
+    # refund is already done, so a mismatch means refund-only
+    # plus the right-link question, never a placement on a
+    # service the link does not fit.
+    if validate_order_link(link, nxt) is not None:
+        _platform, _hint = _platform_hint_of_service(service or {})
+        await notify_user(
+            app, user_id,
+            t(
+                "order_failed_refunded", "en",
+                order_id=order_id,
+                service=short_service_name(service.get("name"))
+                or f"service {service.get('service')}",
+                quantity=int(quantity or 0),
+                refunded=format_money(refunded),
+            )
+            + "\n"
+            + ask_link_text(_platform, _hint, "en"),
+        )
+        WATCHED_ORDERS.pop(order_id, None)
+        return True
     new_total = estimated_total_etb(
         float(nxt.get("rate_etb_per_1000") or 0), quantity
     )
@@ -15580,6 +17020,18 @@ async def _attempt_split_test_rescue(app, order_id, watched, services=None,
         cover_live = await paxyo.split_cover_live()
     except Exception:
         cover_live = False
+    # Cancel-cutting (16 Nov 2026): the next test rides the merged
+    # ranking (trusted first, unreliable / paused /
+    # low-balance-provider services skipped).
+    _rel, _paused, _health = await _pick_context()
+    # Story/post (16 Nov 2026): the rescue pick rides
+    # the same link type as the order - a post link
+    # never rescues onto a story service.
+    _story = _story_flag(
+        link,
+        _platform_hint_of_service(service or {})[1],
+    )
+    _link_mismatch = False
     if proposal is not None:
         # The customer already said yes: use the proposed service
         # when it is still usable, else re-pick.
@@ -15587,12 +17039,20 @@ async def _attempt_split_test_rescue(app, order_id, watched, services=None,
             services, service, watched.get("failed_services"),
             proposal, total_qty, confirmed_total,
             allow_cover=cover_live,
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         )
     else:
         nxt, cover = _next_split_service(
             services, service, watched.get("failed_services"), total_qty,
             confirmed_total, allow_cover=cover_live,
+            reliability=_rel, paused=_paused, balance_health=_health, story=_story,
         )
+    if nxt is not None and validate_order_link(link, nxt) is not None:
+        # Link check (item 5): the link does not fit the next
+        # service — refund the test below and ask for the right
+        # link instead of testing a service the link does not fit.
+        _link_mismatch = True
+        nxt = None
     # Balance pre-check: the refund of this test (its stored total)
     # lands back first, so the new test is affordable when the
     # current balance plus that refund covers its cost after cover.
@@ -15716,6 +17176,12 @@ async def _attempt_split_test_rescue(app, order_id, watched, services=None,
             return False
         watched["fail_refund_done"] = True
     else:
+        # The bot itself is asking for this cancel (cancel-cutting
+        # item 4): mark the entry BEFORE the call, so the watch
+        # never mistakes the provider word "cancelled" that
+        # follows for a provider cancel and tries to rescue it
+        # again.
+        watched["bot_requested_cancel"] = True
         try:
             refund = await paxyo.cancel_refund(order_id, user_id)
         except Exception as exc:
@@ -15781,6 +17247,35 @@ async def _attempt_split_test_rescue(app, order_id, watched, services=None,
         WATCHED_ORDERS.pop(order_id, None)
         return True
     if nxt is None:
+        if _link_mismatch:
+            # Link check (item 5): refunded, nothing placed — the
+            # link does not fit this kind of service, so ask for
+            # the right link instead of the generic no-service
+            # message.
+            _platform, _hint = _platform_hint_of_service(service or {})
+            await notify_admins(
+                app,
+                _split_test_admin_text(
+                    order_id, service, test_qty, refunded, failed,
+                    "Link does not fit the next service — refunded, "
+                    "nothing placed.",
+                ),
+            )
+            await notify_user(
+                app, user_id,
+                t(
+                    "order_rescue_link_mismatch", "en",
+                    order_id=order_id,
+                    service=short_service_name(service.get("name"))
+                    or f"service {service.get('service')}",
+                    quantity=int(total_qty or 0),
+                    refunded=format_money(refunded),
+                )
+                + "\n"
+                + ask_link_text(_platform, _hint, "en"),
+            )
+            WATCHED_ORDERS.pop(order_id, None)
+            return True
         await notify_admins(
             app,
             _split_test_admin_text(
@@ -16189,6 +17684,12 @@ async def run_delivery_watch_cycle(app, now=None):
                 )
                 if _elapsed_min > _auto_cancel:
                     refunded = None
+                    # The bot itself is asking for this cancel
+                    # (cancel-cutting item 4): mark the entry BEFORE
+                    # the call, so the watch never mistakes the
+                    # provider word "cancelled" that follows for a
+                    # provider cancel and tries to rescue it again.
+                    watched["bot_requested_cancel"] = True
                     try:
                         refunded = await paxyo.cancel_refund(
                             order_id, user_id
@@ -16309,7 +17810,62 @@ async def run_delivery_watch_cycle(app, now=None):
                 )
             if handled:
                 continue
-        elif status in ("cancelled", "canceled", "refunded"):
+        elif status in ("cancelled", "canceled"):
+            # Cancel-cutting item 4 (16 Nov 2026): a PROVIDER
+            # cancel goes through the SAME rescue as "failed" —
+            # refund via fail-refund and re-place on the next
+            # fastest affordable service. But only when the
+            # provider cancelled it: an entry the bot itself
+            # cancelled (stall rescue, split-test rescue,
+            # auto-cancel — marked bot_requested_cancel BEFORE
+            # the cancel_refund call) is already refunded, so it
+            # is just dropped; and a user-asked cancel is never
+            # rescued either (the round-3 user-cancel flow
+            # refunds through its own endpoint and its entries
+            # are already gone — this branch never sees them).
+            # A cancelled split TEST leg goes through the
+            # split-test rescue instead (refund, tell William,
+            # next cheaper test); a cancelled remainder leg uses
+            # the plain rescue. False keeps the entry watched;
+            # the next cycle retries (throttled inside the
+            # rescue). The pause record is best-effort: a
+            # failure there must never block the rescue.
+            if watched.get("bot_requested_cancel"):
+                WATCHED_ORDERS.pop(order_id, None)
+                continue
+            split = watched.get("split") or {}
+            _svc = watched.get("service") or {}
+            try:
+                _pause = await paxyo.record_service_cancel(
+                    service_provider(_svc), _svc.get("service"),
+                    order_id,
+                )
+            except Exception as exc:
+                log.warning(
+                    "watch %s: record service cancel failed: %s",
+                    order_id, exc,
+                )
+                _pause = None
+            if isinstance(_pause, dict) and _pause.get("paused_now"):
+                _note_paused_service(service_combined_id(_svc))
+                await notify_admins(
+                    app,
+                    _service_pause_admin_text(
+                        _svc, _pause.get("cancel_count"),
+                        _pause.get("paused_until"),
+                    ),
+                )
+            if split.get("leg") == "test":
+                handled = await _attempt_split_test_rescue(
+                    app, order_id, watched, services, now, failed=True
+                )
+            else:
+                handled = await _attempt_failed_rescue(
+                    app, order_id, watched, services, now
+                )
+            if handled:
+                continue
+        elif status == "refunded":
             WATCHED_ORDERS.pop(order_id, None)
         # Any other status: keep watching; the next cycle retries.
 
@@ -16985,6 +18541,34 @@ async def conversation_reply(update, text: str, lang: str, voice: bool = False) 
         )
         OFF_TOPIC_COUNT.pop(user_id, None)
         return True
+    # Mid-draft emoji correction (screenshot bug, 16 Nov 2026):
+    # while a reactions draft (or card) is open, naming a
+    # DIFFERENT reaction emoji is a correction, not small talk —
+    # "only 😂" must re-pick the 😂 service instead of getting a
+    # laugh reply. Without this, 😂/🤣/😄/😊 are swallowed by
+    # is_free_chat below (they are also in _CHAT_EMOJI) and the
+    # correction chain never runs. A message naming the draft's
+    # own emoji is still chat.
+    _new_emoji = reaction_emoji(text) or _reaction_emoji_from_words(text)
+    if _new_emoji is not None:
+        _draft = PARTIAL.get(user_id) or {}
+        _cid, _card = pending_for_user(user_id)
+        _card_emoji = (_card or {}).get("reaction_emoji")
+        _draft_hint = (_draft.get("service_hint") or "").lower()
+        _card_name = ((_card or {}).get("service") or {}).get("name", "")
+        _is_reactions = (
+            "reaction" in _draft_hint
+            or bool(_draft.get("reaction_emoji"))
+            or "reaction" in str(_card_name).lower()
+            or bool(_card_emoji)
+        )
+        _old_emoji = (
+            _draft.get("reaction_emoji")
+            or reaction_emoji(_draft_hint)
+            or _card_emoji
+        )
+        if _is_reactions and _new_emoji != _old_emoji:
+            return False
     if is_free_chat(text):
         _cid, _pending = pending_for_user(user_id)
         _partial = PARTIAL.get(user_id) or {}
@@ -17622,9 +19206,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ideas batch (15 Nov 2026): the quick-reply keyboard stays
     # under the chat from here on; a brand-new user also gets the
     # one-time cheapest-test offer as a second message.
+    # Deposit-hijack fix (16 Nov 2026): /start switches flows too,
+    # so an open order draft is parked first (saved, not lost).
+    # A bundle draft is dropped (ideas batch 1 #3).
+    _parked = _park_order_draft(user.id)
+    BUNDLE_DRAFT.pop(user.id, None)
     await update.message.reply_text(
-        t("greeting", lang), reply_markup=quick_reply_keyboard()
+        t("greeting", lang), reply_markup=hide_reply_keyboard()
     )
+    if _parked:
+        await update.message.reply_text(t("draft_parked", lang))
     record_exchange(user.id, update.message.text or "/start", t("greeting", lang))
     nudge = await maybe_first_order_nudge(user.id, lang)
     if nudge is not None:
@@ -17890,6 +19481,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     lang = lang_of("", user.language_code)
     text = t("help", lang)
+    # Deposit-hijack fix (16 Nov 2026): /help switches flows too,
+    # so an open order draft is parked first (saved, not lost).
+    # A bundle draft is dropped (ideas batch 1 #3).
+    if _park_order_draft(user.id):
+        text += "\n" + t("draft_parked", lang)
+    BUNDLE_DRAFT.pop(user.id, None)
     await update.message.reply_text(text)
     record_exchange(user.id, update.message.text or "/help", text)
 
@@ -18043,11 +19640,22 @@ async def place_pending_order(pending, user_id: int):
     Returns (result, error). On success result is a dict with the order
     id, status, service name, quantity, link and total, and error is
     None. On failure result is None and error is ("insufficient",
-    balance, total), ("order_failed",) or ("not_understood",).
+    balance, total), ("order_failed",), ("not_understood",),
+    ("bad_link", reason) or ("bad_quantity",).
     """
     service = pending["service"]
     quantity = pending["quantity"]
     total = pending["total"]
+    # Link check (cancel-cutting item 5, 16 Nov 2026): before any
+    # money moves — a link that does not fit the service is
+    # refused, never placed. The quantity bounds are enforced
+    # here too as a backstop (complete_order already checks, but
+    # the Confirm card is not the only caller).
+    link_error = validate_order_link(pending.get("link"), service)
+    if link_error is not None:
+        return None, ("bad_link", link_error)
+    if validate_quantity(quantity, service) is not None:
+        return None, ("bad_quantity",)
     try:
         bal = await paxyo.balance(user_id)
     except Exception as exc:
@@ -18219,6 +19827,24 @@ async def _maybe_start_auto_repeat(user_id, pending):
     return True
 
 
+def _restore_draft_after_bad_link(pending, user_id: int):
+    """Restore the order draft (minus the bad link) after a link
+    check refusal (cancel-cutting item 5, 16 Nov 2026): the user
+    only needs to send the right link to continue — the platform,
+    metric, emoji and quantity are kept. Returns (platform, hint)
+    for the ask-link question. Pure apart from the PARTIAL write."""
+    _platform, _hint = _platform_hint_of_service(pending.get("service") or {})
+    PARTIAL[user_id] = {
+        k: v for k, v in {
+            "platform": pending.get("platform") or _platform,
+            "service_hint": pending.get("service_hint") or _hint,
+            "reaction_emoji": pending.get("reaction_emoji"),
+            "quantity": pending.get("quantity"),
+        }.items() if v is not None
+    }
+    return _platform, _hint
+
+
 async def send_order_result(message, lang: str, pending, user_id: int):
     """Place a pending order and send the full summary as a new TEXT
     message. Used when the user accepts by voice or by text: the
@@ -18235,6 +19861,28 @@ async def send_order_result(message, lang: str, pending, user_id: int):
                     total=format_money(error[2]),
                 ),
                 reply_markup=deposit_webapp_keyboard(lang),
+            )
+        elif key == "bad_link":
+            # Link check (item 5): do not place — ask for the
+            # right link with the per-order-type wording, and
+            # restore the draft (minus the bad link) so the user
+            # can continue by sending just the link.
+            _platform, _hint = _restore_draft_after_bad_link(
+                pending, user_id
+            )
+            await message.reply_text(
+                ask_link_text(_platform, _hint, lang)
+            )
+        elif key == "bad_quantity":
+            # Backstop that should never fire (complete_order
+            # validates first): state the bounds plainly.
+            _svc = pending.get("service") or {}
+            await message.reply_text(
+                t(
+                    "bad_quantity", lang,
+                    service=short_service_name(_svc.get("name")),
+                    min=_svc.get("min"), max=_svc.get("max"),
+                )
             )
         else:
             await message.reply_text(t(key, lang))
@@ -18303,7 +19951,7 @@ async def send_order_result(message, lang: str, pending, user_id: int):
     if not brief:
         await message.reply_text(
             t("order_done_hint", lang),
-            reply_markup=quick_reply_keyboard(),
+            reply_markup=hide_reply_keyboard(),
         )
     _record_bot_reply(summary)
 
@@ -18692,6 +20340,48 @@ def deposit_instructions_text(result, amount, method, lang: str) -> str:
         method=METHOD_LABELS.get(method, method),
         steps="\n".join(steps),
     )
+
+
+def make_deposit_qr_png(url: str):
+    """QR code PNG bytes for a checkout URL, or None. Pure-Python
+    segno (no Pillow, no system deps). Never raises: a bad URL, a
+    missing library, or an over-long URL just means no QR photo.
+    The URL is only ever one the server returned — never invented."""
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        import segno
+        qr = segno.make(url, error="m")
+        buf = io.BytesIO()
+        qr.save(buf, kind="png", scale=8, border=2)
+        return buf.getvalue()
+    except Exception as exc:
+        log.warning("deposit QR failed: %s", exc)
+        return None
+
+
+async def maybe_send_deposit_qr(message, result, lang: str):
+    """Deposit by QR (ideas batch 1 #9, 16 Nov 2026): after the
+    deposit is created, when the server actually returned a
+    checkout URL for it, send a QR code photo of that URL so the
+    user scans it with their phone camera and pays — alongside
+    the existing instructions and Web App button. No checkout URL
+    means no photo, silently: the instructions already carry the
+    link (or the USSD push / website fallback) and nothing is
+    invented. Never raises — a failed photo must not fail the
+    deposit message that already went out."""
+    try:
+        url = (result or {}).get("checkout_url")
+        png = make_deposit_qr_png(url) if url else None
+        if png is None:
+            return
+        await message.reply_photo(
+            photo=InputFile(io.BytesIO(png), filename="deposit-qr.png"),
+            caption=t("deposit_qr_caption", lang),
+        )
+    except Exception as exc:
+        log.warning("deposit QR send failed: %s", exc)
 
 
 def deposit_webapp_keyboard(lang: str, amount=None, allow_retry: bool = False,
@@ -19236,6 +20926,122 @@ async def handle_promo_code(update, code: str, lang: str, voice=False):
     )
 
 
+def extract_invite_code(text: str):
+    """The invite code a message carries, or None.
+
+    A bare REF... token, or an explicit phrasing (\"my code is
+    REF...\"). Promo codes never start with REF (the derivation
+    always does), so a REF-prefixed token is an invite code, never
+    a promo code. Reuses extract_promo_code's shapes — the two
+    code families look alike in chat.
+    """
+    code = extract_promo_code(text)
+    if code is not None and code.startswith("REF"):
+        return code
+    return None
+
+
+async def handle_invite_code_text(update, text: str, lang: str, voice=False) -> bool:
+    """In-chat invite codes (both-sides referral bonus, 16 Nov
+    2026): a user types a friend's invite code in the chat. True
+    when the message carried an invite code and has been answered;
+    False when it was not a code at all, or a draft/Confirm card is
+    open (the code must not hijack it — same guard as the promo
+    branch). Runs BEFORE the promo branch: a REF code is
+    promo-shaped, and typing one must NEVER show the invite-friends
+    card — that card is only for \"my invite link\" requests (live
+    bug, 19:27 EAT 16 Nov 2026: typing REFCVTYSVA3 showed the card
+    and registered nothing). The referrer is registered with the
+    server (POST /referrals); the 20% bonus itself is credited
+    server-side on the first deposit, both sides. The bot never
+    promises a bonus it did not register: an unavailable endpoint
+    gets an honest \"try again later\", never a false confirmation.
+    """
+    user = update.effective_user
+    if _promo_busy(user.id):
+        return False
+    code = extract_invite_code(text)
+    if code is None:
+        return False
+    # Own code: checked locally — no server call, exact by derivation.
+    if code == user_invite_code(user.id):
+        await reply_message(
+            update.message, t("invite_code_own", lang), lang, voice=voice,
+        )
+        return True
+    # Invalid: the checksum fails locally — a mistyped code is
+    # never sent to the server, and never credits the wrong person.
+    if code != INVITE_CODE and invite_code_owner(code) is None:
+        await reply_message(
+            update.message, t("invite_code_invalid", lang), lang,
+            voice=voice,
+        )
+        return True
+    try:
+        result = await paxyo.record_referral(user.id, code)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 409:
+            # Already deposited: the bonus is first-deposit only.
+            await reply_message(
+                update.message, t("invite_code_too_late", lang), lang,
+                voice=voice,
+            )
+            return True
+        if status == 400:
+            # Server-side validation (a code the server rejects):
+            # same plain line as a locally invalid code.
+            await reply_message(
+                update.message, t("invite_code_invalid", lang), lang,
+                voice=voice,
+            )
+            return True
+        log.warning("record_referral failed (%s): %s", status, exc)
+        await reply_message(
+            update.message, t("invite_code_unavailable", lang), lang,
+            voice=voice,
+        )
+        return True
+    except Exception as exc:
+        log.warning("record_referral failed: %s", exc)
+        await reply_message(
+            update.message, t("invite_code_unavailable", lang), lang,
+            voice=voice,
+        )
+        return True
+    if result is None:
+        # 404: the endpoint is not live yet — never claim the code
+        # was saved when it was not.
+        await reply_message(
+            update.message, t("invite_code_unavailable", lang), lang,
+            voice=voice,
+        )
+        return True
+    if result.get("already_recorded"):
+        # First referrer wins (server rule): a user who already has
+        # one cannot add another. Referrer 0 means they joined with
+        # the shared link — no real referrer, but the row still
+        # stands, so the code cannot be added.
+        referrer = result.get("referrer_telegram_id") or 0
+        key = (
+            "invite_code_already" if referrer
+            else "invite_code_already_shared"
+        )
+        await reply_message(
+            update.message, t(key, lang), lang, voice=voice,
+        )
+        return True
+    referrer = result.get("referrer_telegram_id") or 0
+    key = (
+        "invite_code_registered" if referrer
+        else "invite_code_registered_shared"
+    )
+    await reply_message(
+        update.message, t(key, lang), lang, voice=voice,
+    )
+    return True
+
+
 async def handle_promo_text(update, text: str, lang: str, voice=False) -> bool:
     """The promo-code branch of handle_order_text: True when the
     message was a promo code (or a question about one) and has been
@@ -19243,10 +21049,10 @@ async def handle_promo_text(update, text: str, lang: str, voice=False) -> bool:
     classifier, with the other deterministic local guards — but
     only when nothing is being built and no Confirm card is
     pending, so a code typed mid-order or mid-deposit never hijacks
-    that draft. A token that IS an invite code (the shared code or
-    a per-user code) gets the invite-link reply instead: the chat
-    has no typed-invite path, and "that code does not exist" would
-    be the wrong answer for a real invite code."""
+    that draft. A REF token never reaches here: the invite-code
+    handler above already answered it (or left it alone while busy)
+    — a typed invite code is registered, never shown the
+    invite-friends card and never validated as a promo code."""
     user = update.effective_user
     if _promo_busy(user.id):
         return False
@@ -19255,17 +21061,6 @@ async def handle_promo_text(update, text: str, lang: str, voice=False) -> bool:
         # A fresh code supersedes any pending "Is this a promo
         # code?" question — the user just gave the real one.
         PROMO_OFFER.pop(user.id, None)
-        if code == INVITE_CODE or invite_code_owner(code) is not None:
-            await reply_message(
-                update.message,
-                t(
-                    "invite_link", lang,
-                    link=user_invite_link(user.id),
-                    code=user_invite_code(user.id),
-                ),
-                lang, voice=voice,
-            )
-            return True
         await handle_promo_code(update, code, lang, voice=voice)
         return True
     offer = extract_promo_offer(text)
@@ -20246,6 +22041,27 @@ async def _remembered_deposit_method(user_id: int):
     return None
 
 
+async def _continue_parked_draft(message, user_id, lang, voice=False):
+    """Resume a parked order draft (deposit-hijack fix, 16 Nov
+    2026): the draft is back in PARTIAL; ask the next missing
+    piece, or show the Confirm card when it is complete."""
+    draft = PARTIAL.get(user_id) or {}
+    if draft.get("link") and draft.get("quantity"):
+        await complete_order(message, user_id, dict(draft), lang, voice=voice)
+        return
+    if draft.get("link"):
+        await reply_message(message, t("ask_quantity", lang), lang, voice=voice)
+        return
+    if draft.get("platform") or draft.get("service_hint"):
+        await reply_message(
+            message,
+            ask_link_text(draft.get("platform"), draft.get("service_hint"), lang),
+            lang, voice=voice,
+        )
+        return
+    await reply_message(message, t("ask_platform", lang), lang, voice=voice)
+
+
 async def handle_deposit_text(update, text, intent, lang, voice=False):
     """Build a deposit over several turns (amount -> method -> phone),
     then show a Confirm summary. Nothing is created on the server
@@ -20254,6 +22070,18 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
     and credits the balance only after Chapa confirms the payment;
     the bot never credits anything itself."""
     user = update.effective_user
+    # Deposit-hijack fix (16 Nov 2026): the deposit flow starts
+    # here, so an open order draft is parked first (saved, not
+    # lost) — a number the user then sends is the deposit amount,
+    # never an order quantity. Only on flow start: later turns
+    # find DEPOSIT_DRAFT already open and park nothing. A bundle
+    # draft is dropped (ideas batch 1 #3): it has no parked resume.
+    if not DEPOSIT_DRAFT.get(user.id) and _park_order_draft(user.id):
+        await reply_message(
+            update.message, t("draft_parked", lang), lang, voice=voice,
+        )
+    if not DEPOSIT_DRAFT.get(user.id):
+        BUNDLE_DRAFT.pop(user.id, None)
     stored = DEPOSIT_DRAFT.get(user.id) or {}
     amount = intent.get("amount")
     try:
@@ -20515,6 +22343,12 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         return False
 
     service = None
+    # Cancel-cutting item 2 (16 Nov 2026): a service the user
+    # chose themselves (named by ID, pinned, or the last order's)
+    # is never silently swapped when it is auto-paused — the
+    # pause check below the pick needs to know the pick was
+    # theirs, not the bot's.
+    _user_chosen_service = False
     if named_service_id is not None:
         service, svc_error = resolve_named_service(services, named_service_id)
         if svc_error is not None:
@@ -20533,6 +22367,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 reply_markup=fastest_fallback_keyboard(token, lang),
             )
             return False
+        _user_chosen_service = True
     # First-order nudge pin (ideas batch, 15 Nov 2026): the user
     # tapped "Start a test order", so THIS order pins the cheapest
     # views service instead of the fastest pick. One-shot, and only
@@ -20570,6 +22405,86 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                     and pin_metric in _name_kinds(merged.get("service_hint") or "")
                 ):
                     service = pin
+                    _user_chosen_service = True
+    # Quoted-service pin (19:28 EAT 16 Nov 2026, live fault): the
+    # Confirm card must show the service whose price was quoted in
+    # the chat just before this order — a user quoted 1.6 ETB was
+    # handed a 1,118.04 ETB traffic service. One-shot, only when
+    # this order is for the same platform and metric as the quote,
+    # and only when the quoted service is still orderable (in the
+    # catalogue, active, not blacklisted, not auto-paused, quantity
+    # within min/max). The quote is consumed only when it matches
+    # this order — an order for something else leaves it alone.
+    # When the quoted service cannot be ordered, the automatic pick
+    # below runs and the card carries a plain note naming the quoted
+    # service and the replacement — never a silent swap. A quantity
+    # that is not a multiple of 10 is the user's number to fix, not
+    # a reason to drop the pin (any service would refuse it).
+    _quoted_note = None
+    _quoted = QUOTED_SERVICE.get(user_id)
+    if (
+        _quoted is not None and service is None
+        and named_service_id is None
+        and _quoted.get("platform")
+        and _quoted.get("platform") == merged.get("platform")
+        and _quoted.get("metric")
+        and kind_from_text(merged.get("service_hint") or "") == _quoted["metric"]
+    ):
+        QUOTED_SERVICE.pop(user_id, None)
+        _q = find_service_by_id(services, _quoted["combined_id"])
+        _q_reason = None
+        if _q is None or not _q.get("active", True):
+            _q_reason = "unavailable"
+        else:
+            # Identity check (16 Nov 2026): the pin stores only a
+            # combined id, and ids are only unique inside one
+            # catalogue — a quote remembered from another list must
+            # never pin a different service that happens to share
+            # the number (test fault: a TikTok views quote pinned
+            # Telegram Channel Members #2001). The resolved service
+            # must BE the quoted one: same platform, same metric,
+            # same price — otherwise the pin is dropped and the
+            # automatic pick below runs with a note, never a
+            # silent swap.
+            _q_platform, _ = _platform_hint_of_service(_q)
+            try:
+                _q_price = float(_q.get("rate_etb_per_1000") or 0)
+            except (TypeError, ValueError):
+                _q_price = -1.0
+            if (
+                _q_platform != _quoted.get("platform")
+                or _quoted.get("metric") not in _name_kinds(
+                    str(_q.get("name") or ""),
+                    str(_q.get("category") or ""),
+                )
+                or abs(_q_price - float(_quoted.get("price") or 0)) > 0.01
+            ):
+                _q_reason = "unavailable"
+            else:
+                try:
+                    _q_blacklisted = (
+                        int(_q.get("service", 0)) in BLACKLISTED_SERVICES
+                        and service_provider(_q) == "gop"
+                    )
+                except (TypeError, ValueError):
+                    _q_blacklisted = True
+                if _q_blacklisted:
+                    _q_reason = "unavailable"
+                else:
+                    _paused_now = await _cached_paused_services()
+                    if (
+                        _paused_now is not None
+                        and service_combined_id(_q) in _paused_now
+                    ):
+                        _q_reason = "paused"
+                    elif merged.get("quantity") is not None and validate_quantity(
+                        merged.get("quantity"), _q
+                    ) in ("below_min", "above_max"):
+                        _q_reason = "quantity"
+        if _q_reason is None:
+            service = _q
+        else:
+            _quoted_note = (_q_reason, _q)
     if (
         service is None
         and last_service_id is not None
@@ -20587,6 +22502,19 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 usable = False
             if usable:
                 service = found
+                _user_chosen_service = True
+    # The pref-filtered pool the automatic pick drew from (None
+    # when the service was user-chosen): the same-emoji lower-min
+    # offer below must draw from it too, or it could offer a
+    # service that breaks the customer's own rule.
+    _pick_pool = None
+    # Story/post (16 Nov 2026): the pick keys off the link type
+    # — a post link never gets a story service. An explicit draft
+    # flag (the "not for story" correction) wins over the link.
+    _story = _story_flag(
+        merged.get("link"), merged.get("service_hint"),
+        merged.get("story"),
+    )
     if service is None:
         # Rating demotion (ideas batch 2, feature 3, 15 Nov 2026):
         # the fastest pick is demoted by the services' bad ratings
@@ -20608,6 +22536,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         _pool, _blocked_by = filter_pref_candidates(
             services, user_id, deadline=_deadline,
         )
+        _pick_pool = _pool
         if _blocked_by is not None:
             await reply_message(
                 message,
@@ -20629,6 +22558,8 @@ async def complete_order(message, user_id, merged, lang, voice=False,
             _pool, platform=merged.get("platform"), service_hint=_hint,
             reaction_emoji=merged.get("reaction_emoji"),
             limit=_pick_limit,
+            quantity=merged.get("quantity"),
+            story=_story,
         )
         if not picks:
             # A specific reaction emoji with no dedicated service:
@@ -20692,7 +22623,60 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         # to 10) picks — a favourite first, else a service with
         # no claimed time, else the picker's first pick.
         service = _prefer_pick(picks, user_id)
+    if _user_chosen_service and service is not None:
+        # Cancel-cutting item 2 (16 Nov 2026): a service the user
+        # chose that is auto-paused right now is never used —
+        # say so plainly and offer the fastest one instead, with
+        # one tap. The pick path above already skips paused
+        # services, so only a user-chosen service can reach here
+        # paused. The draft stays in PARTIAL, so tapping the
+        # button resumes the same order on the fastest service.
+        _paused_now = await _cached_paused_services()
+        if (
+            _paused_now is not None
+            and service_combined_id(service) in _paused_now
+        ):
+            _token = uuid.uuid4().hex[:12]
+            FASTEST_FALLBACK[_token] = {
+                "user_id": user_id,
+                "merged": {k: v for k, v in merged.items() if v is not None},
+            }
+            await reply_message(
+                message,
+                t(
+                    "service_paused", lang,
+                    service=short_service_name(service.get("name"))
+                    or f"service {service.get('service')}",
+                ),
+                lang, voice=voice,
+                reply_markup=fastest_fallback_keyboard(_token, lang),
+            )
+            return False
     error = validate_quantity(merged.get("quantity"), service)
+    if error == "below_min" and merged.get("reaction_emoji"):
+        # Screenshot bug (16 Nov 2026): the quantity is below the
+        # picked service's minimum — offer the closest SAME-EMOJI
+        # service that allows it instead of only rejecting the
+        # number. Same platform + same emoji, cheapest first (the
+        # emoji pick rule); the first service whose min/max and
+        # multiple-of-10 rule fit the quantity wins, and the order
+        # continues to the Confirm card on it.
+        _rel, _paused, _health = await _pick_context()
+        _alts = pick_services(
+            _pick_pool if _pick_pool is not None else services,
+            platform=merged.get("platform"),
+            service_hint=merged.get("service_hint"),
+            reaction_emoji=merged.get("reaction_emoji"),
+            limit=100,
+            reliability=_rel, paused=_paused, balance_health=_health,
+            quantity=merged.get("quantity"),
+            story=_story,
+        )
+        for _alt in _alts:
+            if validate_quantity(merged.get("quantity"), _alt) is None:
+                service = _alt
+                error = None
+                break
     if error:
         await reply_message(
             message,
@@ -20822,6 +22806,12 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         "quantity": quantity,
         "total": total,
         "full_name": show_full_name,
+        # Draft context, so a link-check refusal (item 5) can
+        # restore the order the user was building: platform,
+        # metric, reaction emoji and quantity ride along.
+        "platform": merged.get("platform"),
+        "service_hint": merged.get("service_hint"),
+        "reaction_emoji": merged.get("reaction_emoji"),
     }
     if drip is not None:
         _pending_entry["drip"] = {
@@ -20839,6 +22829,29 @@ async def complete_order(message, user_id, merged, lang, voice=False,
     _card_notes = []
     if note:
         _card_notes.append(note)
+    if _quoted_note is not None:
+        # Quoted-service re-quote (19:28 EAT 16 Nov 2026): the
+        # service whose price was quoted cannot be ordered after
+        # all — the card says so plainly and names the replacement
+        # + its price, never silently swapping.
+        _q_reason, _q = _quoted_note
+        _q_name = (
+            short_service_name(_q.get("name"))
+            if _q is not None else "that service"
+        ) or "that service"
+        if _q_reason == "quantity" and _q is not None:
+            _reason = t(
+                "quoted_quantity", lang,
+                min=_q.get("min"), max=_q.get("max"),
+            )
+        else:
+            _reason = t(f"quoted_{_q_reason}", lang)
+        _card_notes.append(t(
+            "quoted_service_changed", lang,
+            service=_q_name, reason=_reason,
+            replacement=short_service_name(service.get("name")),
+            price=format_money(rate),
+        ))
     if _alert_line is not None:
         _card_notes.append(_alert_line)
     if drip is not None:
@@ -21272,6 +23285,14 @@ async def _run_cancel_order_confirm(user_id, entry, lang, respond):
         refunded = result.get("refunded_etb")
     if refunded is None:
         refunded = entry.get("total")
+    # Cancel-cutting item 4 (16 Nov 2026): the user asked for
+    # this cancel themselves, so the order is done — drop it from
+    # the watch here, or the next cycle would see the provider
+    # word "cancelled" and mistake it for a provider cancel and
+    # try to rescue it. (Before this fix the entry was left
+    # watched: harmless while "cancelled" was only ever dropped,
+    # fatal once a provider cancel is rescued.)
+    WATCHED_ORDERS.pop(order_id, None)
     await respond(
         t(
             "cancel_order_done", lang, order_id=order_id,
@@ -21848,9 +23869,17 @@ async def resolve_batch_drafts(drafts, user_id):
                 missing.append(f"{link} — service {named} is not available")
                 continue
         if service is None:
+            # Story/post (16 Nov 2026): the pick keys off the link
+            # type — a post link never gets a story service. Only
+            # the reactions pool reads the flag, so other drafts
+            # are unaffected.
             picks = pick_services(
                 services, platform=d.get("platform"),
                 service_hint=d.get("service_hint"),
+                story=_story_flag(
+                    d.get("link"), d.get("service_hint"),
+                    d.get("story"),
+                ),
             )
             if not picks:
                 missing.append(f"{link} — no service found")
@@ -21949,6 +23978,386 @@ def batch_result_text(results, lang: str) -> str:
         else:
             lines.append(f"❌ {draft['quantity']} {name} — could not be placed")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------ post bundle -----
+# Ideas batch 1 #3 (16 Nov 2026): "Boost my new post" orders views +
+# likes + reactions together for ONE post link — one combined Confirm
+# card, one grand total, one payment, three legs placed sequentially.
+# The batch machinery does the heavy lifting (resolve_batch_drafts,
+# the Confirm card shape, the per-leg result lines); the bundle adds
+# the three-leg draft, the one quantity question, and watching every
+# placed leg so the normal rescue rules apply per leg.
+
+def is_post_bundle_request(text: str) -> bool:
+    """True for a post-boost request: "boost my new post", "boost
+    this post", "promote my latest post". A named metric ("boost my
+    post with 1000 views") is a single-service order, not a bundle —
+    and "boost" without "post" ("boost my tiktok") is one too."""
+    s = " ".join(normalize_text(text or "").split())
+    if "boost" not in s and "promote" not in s:
+        return False
+    if "post" not in s.split():
+        return False
+    if kind_from_text(text) is not None:
+        return False
+    return True
+
+
+def bundle_quantities_from_text(text):
+    """{"views", "likes", "reactions"} from a bundle quantity
+    answer, or None. One number applies to all three legs ("1000");
+    three numbers each next to its metric ("1000 views, 500 likes,
+    200 reactions") apply per leg. A partial answer (only some legs)
+    is None — the caller asks again instead of guessing the rest.
+    Numbers inside the links themselves are never read as
+    quantities: the text is split around the links first (a post
+    link ending in /180 is not a quantity of 180)."""
+    text = re.sub(r"https?://\S+|t\.me/\S+", " ", text or "")
+    parts = re.split(r"[,;]|\band\b", text)
+    found = {}
+    fallback = None
+    for part in parts:
+        qty = quantity_from_text(part)
+        if qty is None:
+            continue
+        metric = kind_from_text(part)
+        if metric in ("views", "likes", "reactions"):
+            found[metric] = qty
+        elif fallback is None:
+            fallback = qty
+    if len(found) == 3:
+        return found
+    if fallback is not None and not found:
+        return {
+            "views": fallback, "likes": fallback, "reactions": fallback,
+        }
+    return None
+
+
+async def show_bundle_confirm(message, user_id, ready, lang, voice=False):
+    """One combined Confirm card for a post bundle: the three legs
+    with quantities and the one grand total. One Confirm places all
+    three legs — never a leg the user did not confirm."""
+    confirm_id = uuid.uuid4().hex[:12]
+    PENDING_BUNDLE[confirm_id] = {"user_id": user_id, "orders": ready}
+    total = sum(o["total"] for o in ready)
+    lines = [t("bundle_title", lang), ""]
+    for i, o in enumerate(ready, 1):
+        lines.append(
+            f"{i}. {short_service_name(o['service'].get('name'))} "
+            f"×{o['quantity']} → {o['link']} — "
+            f"{format_money(o['total'])} ETB"
+        )
+    lines.append("")
+    lines.append(t("batch_total", lang, total=format_money(total)))
+    # Bundle Confirm card: always text — it carries the buttons.
+    await reply_message(
+        message, "\n".join(lines), lang, voice=voice,
+        reply_markup=confirm_keyboard(confirm_id),
+    )
+
+
+async def place_bundle(bundle, user_id):
+    """Place every leg of a confirmed post bundle, sequentially.
+    Returns (results, error) like place_batch — but every placed
+    leg is watched, so the normal rescue rules (price cap,
+    cross-provider) apply per leg and a leg that fails later is
+    rescued or refunded by the watcher. A leg that fails at
+    placement was never charged, so there is nothing to refund
+    for it — the result line says plainly it could not be placed."""
+    orders = bundle["orders"]
+    total = sum(o["total"] for o in orders)
+    try:
+        bal = await paxyo.balance(user_id)
+    except Exception as exc:
+        log.warning("bundle balance check failed: %s", exc)
+        return None, ("not_understood",)
+    if not bal.get("found") or float(bal.get("balance", 0)) < total:
+        return None, ("insufficient", bal.get("balance", 0), total)
+    results = []
+    for draft in orders:
+        try:
+            result = await create_order_for_service(
+                paxyo, user_id, draft["service"], draft["link"],
+                draft["quantity"], uuid.uuid4().hex,
+            )
+        except httpx.HTTPStatusError as exc:
+            log.warning("bundle create_order rejected: %s", exc.response.status_code)
+            results.append((draft, None, "order_failed"))
+            continue
+        except Exception as exc:
+            log.warning("bundle create_order failed: %s", exc)
+            results.append((draft, None, "order_failed"))
+            continue
+        order = result.get("order", result) if isinstance(result, dict) else {}
+        order_id = order.get("id") or order.get("order_id") or "?"
+        LAST_ORDER[user_id] = order_id
+        # Per-user personality (feature 5, 15 Nov 2026): each
+        # placed leg is proof of the user's usual, like a single
+        # placed order.
+        learn_from_placed_order(user_id, draft["service"], draft["quantity"])
+        watch_order(
+            user_id, order_id, draft["service"], draft["quantity"],
+            draft["link"], total=draft["total"],
+        )
+        results.append((draft, order_id, None))
+    return results, None
+
+
+async def handle_post_bundle(update, text, intent, lang, voice=False):
+    """Build a post bundle over turns: the post link, then the
+    quantities (asked once, or the user's default quantity), then
+    the combined Confirm card. A bundle is for ONE post link: a
+    profile/channel link is refused with the video-link question,
+    and the link is never guessed. Nothing is placed before the
+    user confirms the card."""
+    user = update.effective_user
+    intent = intent or {}
+    stored = BUNDLE_DRAFT.get(user.id) or {}
+    links = extract_links(text)
+    link = links[0] if links else stored.get("link")
+    platform = None
+    if link:
+        platform = platform_from_link(link)
+    if platform is None:
+        platform = (
+            (intent.get("platform") or stored.get("platform") or "")
+            .strip().lower() or None
+        )
+    quantities = (
+        bundle_quantities_from_text(text) or stored.get("quantities")
+    )
+    if quantities is None and platform:
+        # The user's default quantity (customizations #12): one
+        # number for all three legs, so they do not repeat it.
+        default_qty = pref_default_quantity(user.id, platform, "views")
+        if default_qty:
+            quantities = {
+                "views": default_qty,
+                "likes": default_qty,
+                "reactions": default_qty,
+            }
+    if not link:
+        BUNDLE_DRAFT[user.id] = {
+            "platform": platform, "quantities": quantities,
+        }
+        await reply_message(
+            update.message,
+            ask_link_text(platform, None, lang)
+            if platform else t("bundle_ask_link", lang),
+            lang, voice=voice,
+        )
+        return
+    # A bundle boosts one POST: a profile/channel link cannot take
+    # views, likes or reactions, so it is refused with the
+    # video-link question instead of placing on the wrong link
+    # (link check, item 5). An unknown link shape passes, as the
+    # validator does — the provider resolves short links.
+    if link_content_kind(link) == "profile":
+        BUNDLE_DRAFT[user.id] = {
+            "platform": platform, "link": None,
+            "quantities": quantities,
+        }
+        await reply_message(
+            update.message,
+            ask_link_text(platform, "views", lang),
+            lang, voice=voice,
+        )
+        return
+    if quantities is None:
+        BUNDLE_DRAFT[user.id] = {
+            "platform": platform, "link": link, "quantities": None,
+        }
+        await reply_message(
+            update.message, t("bundle_ask_quantities", lang),
+            lang, voice=voice,
+        )
+        return
+    BUNDLE_DRAFT.pop(user.id, None)
+    drafts = [
+        {
+            "platform": platform,
+            "service_hint": (
+                f"{platform} {metric}" if platform else metric
+            ),
+            "link": link,
+            "quantity": quantities[metric],
+        }
+        for metric in ("views", "likes", "reactions")
+    ]
+    ready, missing = await resolve_batch_drafts(drafts, user.id)
+    if ready is None:
+        await reply_message(
+            update.message, t("not_understood", lang), lang, voice=voice
+        )
+        return
+    if missing:
+        understood = "\n".join(
+            f"{short_service_name(o['service'].get('name'))} "
+            f"×{o['quantity']} → {o['link']}"
+            for o in ready
+        ) or "—"
+        await reply_message(
+            update.message,
+            t(
+                "batch_missing", lang, understood=understood,
+                missing="\n".join(missing),
+            ),
+            lang, voice=voice,
+        )
+        return
+    await show_bundle_confirm(update.message, user.id, ready, lang, voice=voice)
+
+
+# ----------------------------------------------------- check my post ----
+# Ideas batch 2 #2 (16 Nov 2026): "check my post" tells the user if
+# the post is public, its current views, and whether it is ready for
+# an order. Only a public Telegram channel page can actually be read
+# (the ?embed=1 widget page carries the view count); every other
+# platform's page needs JavaScript or a login, so the bot says plainly
+# it cannot read the counts there — never inventing numbers. A check
+# never starts an order draft.
+
+def is_post_check_request(text: str) -> bool:
+    """True for a post-check request: a link plus "check", "public",
+    "ready for an order", or "how many views/likes does this post
+    have". A bare link is an order, not a check; a price question
+    ("how much are views") has no link and never matches."""
+    if not extract_links(text):
+        return False
+    s = " ".join(normalize_text(text or "").split())
+    # Word-boundary matches: normalize_text keeps "public?" attached
+    # to its punctuation, so a split-word membership test misses it.
+    if re.search(r"\bcheck\b", s):
+        return True
+    if re.search(r"\bpublic\b", s):
+        return True
+    if re.search(r"\bready\b", s) and re.search(r"\border\b", s):
+        return True
+    if "how many" in s and (
+        re.search(r"\bviews\b", s) or re.search(r"\blikes\b", s)
+    ):
+        return True
+    return False
+
+
+def _parse_telegram_post_html(html: str):
+    """The view count from a Telegram ?embed=1 widget page, or None.
+    Pure regex on the widget markup (verified live 16 Nov 2026:
+    tgme_widget_message_views">2.82M</span>). The count is reported
+    exactly as the page shows it ("2.82M") — never converted or
+    guessed. None when the markup is absent or the page has no post
+    widget at all."""
+    if not html:
+        return None
+    match = re.search(
+        r"tgme_widget_message_views[^>]*>([^<]+)<", html
+    )
+    if match is None:
+        return None
+    views = match.group(1).strip()
+    return views or None
+
+
+async def _fetch_telegram_post_stats(link: str):
+    """{"public": True/False/None, "views": str|None} for a Telegram
+    post link, from the public ?embed=1 widget page (10s timeout,
+    browser User-Agent — the plain post URL redirects to the channel
+    page, which carries no counts). True only when the page carries
+    the post widget; False on a 404 (private or deleted); None when
+    the page cannot be read at all (network error, unexpected page)
+    — an unreadable page is never reported as private. Never raises."""
+    url = (link or "").strip()
+    if "?" in url:
+        url = url.split("?", 1)[0]
+    url += "?embed=1"
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0, trust_env=False
+        ) as client:
+            resp = await client.get(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (X11; Linux x86_64) "
+                        "AppleWebKit/537.36 Chrome/120 Safari/537.36"
+                    )
+                },
+            )
+    except Exception as exc:
+        log.warning("post check fetch failed: %s", exc)
+        return {"public": None, "views": None}
+    if resp.status_code == 404:
+        return {"public": False, "views": None}
+    if resp.status_code != 200:
+        return {"public": None, "views": None}
+    html = resp.text or ""
+    if "tgme_widget_message_bubble" not in html:
+        return {"public": None, "views": None}
+    return {"public": True, "views": _parse_telegram_post_html(html)}
+
+
+async def handle_post_check(update, text, lang, voice=False):
+    """Answer a post check in one short reply. The link is validated
+    first (a real post URL on a known platform); a profile/channel
+    link or an unknown link is refused plainly. Telegram posts are
+    checked live on the public page; other platforms' counts cannot
+    be read from here, so the bot says so and confirms the link is
+    the right shape for an order when the post is public."""
+    user = update.effective_user
+    links = extract_links(text)
+    link = links[0] if links else None
+    platform = platform_from_link(link) if link else None
+    if platform is None:
+        await reply_message(
+            update.message, t("post_check_unknown_link", lang),
+            lang, voice=voice,
+        )
+        return
+    disp = _PLATFORM_DISPLAY.get(platform, platform.title())
+    if link_content_kind(link) == "profile":
+        await reply_message(
+            update.message,
+            t("post_check_not_post_link", lang, platform=disp),
+            lang, voice=voice,
+        )
+        return
+    if platform != "telegram":
+        await reply_message(
+            update.message,
+            t("post_check_cant_read", lang, platform=disp),
+            lang, voice=voice,
+        )
+        return
+    stats = await _fetch_telegram_post_stats(link)
+    if stats.get("public") is True:
+        if stats.get("views"):
+            await reply_message(
+                update.message,
+                t(
+                    "post_check_public_views", lang,
+                    views=stats["views"],
+                ),
+                lang, voice=voice,
+            )
+        else:
+            await reply_message(
+                update.message,
+                t("post_check_public_no_counts", lang),
+                lang, voice=voice,
+            )
+        return
+    if stats.get("public") is False:
+        await reply_message(
+            update.message, t("post_check_not_public", lang),
+            lang, voice=voice,
+        )
+        return
+    await reply_message(
+        update.message, t("post_check_unknown", lang),
+        lang, voice=voice,
+    )
 
 
 async def handle_split_text(update, text, split, lang, voice=False):
@@ -22274,6 +24683,7 @@ async def try_reaction_correction(update, text, lang, voice=False):
         _services, platform=_platform,
         service_hint=_hint,
         reaction_emoji=_new_emoji,
+        story=_story_flag(_pending.get("link"), _hint),
     ) if _services else []
     if not _picks:
         _reply = t("no_exact_reaction", lang, emoji=_new_emoji)
@@ -22322,6 +24732,121 @@ async def try_reaction_correction(update, text, lang, voice=False):
     return True
 
 
+async def try_draft_reaction_correction(update, text, lang, voice=False):
+    """A different reaction emoji for the order being BUILT (a
+    PARTIAL draft, no Confirm card yet — screenshot bug, 16 Nov
+    2026: "I want only like reaction" after a bad quantity got
+    "I did not understand" and the draft died). Re-picks the
+    service for that emoji on the draft's platform, KEEPS the link
+    and the rest of the draft, and runs complete_order again — so
+    a stored quantity that is valid for the new service re-shows
+    the Confirm card, and one below the new service's minimum
+    gets the same-emoji lower-min offer (or the plain minimum).
+    Returns True when a correction was handled. Only when the
+    draft is a reactions draft and the new emoji differs from it.
+    The message's OWN fields decide: a link or a quantity in the
+    message is a new order, not a correction — the merged draft
+    still carries the old link and quantity (PARTIAL survives the
+    card), so merged must not be consulted here. The emoji may be
+    named by character or by word ("only laughing", "only love",
+    "only kissing"): the word form needs no "reaction" word here,
+    because the draft already says reactions. Platform-general:
+    a Facebook draft re-picks a Facebook service, never a
+    Telegram one. No exact service for that emoji on that
+    platform: complete_order says so honestly (no_exact_reaction)
+    and keeps the draft — never silently sells another emoji."""
+    user = update.effective_user
+    draft = PARTIAL.get(user.id)
+    if not draft:
+        return False
+    hint = draft.get("service_hint") or ""
+    if "reaction" not in hint.lower() and not draft.get("reaction_emoji"):
+        return False
+    _own = local_intent(text)
+    if _own.get("link") or _own.get("quantity"):
+        return False
+    _new_emoji = reaction_emoji(text) or _reaction_emoji_from_words(text)
+    _old_emoji = draft.get("reaction_emoji") or reaction_emoji(hint)
+    if _new_emoji is None:
+        return False
+    if _old_emoji is not None and _new_emoji == _old_emoji:
+        return False
+    draft["reaction_emoji"] = _new_emoji
+    merged = {k: v for k, v in draft.items() if v is not None}
+    await complete_order(update.message, user.id, merged, lang, voice=voice)
+    log_confusion(user.id, text, "draft reaction correction", "correction")
+    return True
+
+
+# "Not for story its for tg post" (story/post bug, 16 Nov 2026):
+# the user corrects a reactions draft that was picked as story
+# services. The match is deliberately wordy — "post" alone is
+# too common ("post a comment"), so the phrase must say it is a
+# post and not a story, or name a Telegram post outright.
+_STORY_POST_CORRECTION_PHRASES = (
+    "not for story", "not story", "no story", "not a story",
+    "for tg post", "for telegram post", "tg post", "telegram post",
+    "its for post", "it's for post", "its a post", "it's a post",
+    "for post", "post not story", "not story post",
+)
+
+
+async def try_story_post_correction(update, text, lang, voice=False):
+    """'Not for story its for tg post': the reactions draft (or
+    the open Confirm card) is for a POST, not a story. Switches
+    it to post reactions and re-picks a post-reaction service,
+    keeping the link and the quantity. A tg:// link in the draft
+    is dropped at the same time — it is never an order link, so
+    the bot asks for a real post link instead of carding it.
+    Returns True when handled. Only when a reactions draft or a
+    reactions card is open; anything else is not a correction."""
+    user = update.effective_user
+    s = " ".join((text or "").strip().lower().split())
+    if not any(p in s for p in _STORY_POST_CORRECTION_PHRASES):
+        return False
+    _cid, _pending = pending_for_user(user.id)
+    if _pending is not None and "reaction" in str(
+        _pending["service"].get("name") or ""
+    ).lower():
+        # Move the card back to a draft, mark it post, re-run:
+        # complete_order re-picks (post services only, same emoji)
+        # and shows a new card; the old card is dropped first.
+        _platform, _hint = _platform_hint_of_service(_pending["service"])
+        PARTIAL[user.id] = {
+            "platform": _platform,
+            "service_hint": _hint,
+            "link": _pending.get("link"),
+            "quantity": _pending.get("quantity"),
+            "reaction_emoji": reaction_emoji(
+                str(_pending["service"].get("name") or "")
+            ),
+            "story": False,
+        }
+        if str(PARTIAL[user.id].get("link") or "").strip().lower().startswith("tg://"):
+            PARTIAL[user.id]["link"] = None
+        PENDING.pop(_cid, None)
+        await drop_pending_card(update, _pending)
+        await complete_order(
+            update.message, user.id, dict(PARTIAL[user.id]), lang,
+            voice=voice,
+        )
+        log_confusion(user.id, text, "story/post correction", "correction")
+        return True
+    draft = PARTIAL.get(user.id)
+    if draft and (
+        "reaction" in (draft.get("service_hint") or "").lower()
+        or draft.get("reaction_emoji")
+    ):
+        draft["story"] = False
+        if str(draft.get("link") or "").strip().lower().startswith("tg://"):
+            draft["link"] = None
+        merged = {k: v for k, v in draft.items() if v is not None}
+        await complete_order(update.message, user.id, merged, lang, voice=voice)
+        log_confusion(user.id, text, "story/post correction", "correction")
+        return True
+    return False
+
+
 async def handle_change_order(update, text, intent, lang, voice=False):
     """'Change the quantity from 5,000 to 2,000 before it starts.'
 
@@ -22359,7 +24884,14 @@ async def handle_change_order(update, text, intent, lang, voice=False):
         # No number: maybe a different reaction emoji for the
         # pending order ("I want only 🙏 reaction") — that re-picks
         # the service instead of failing with "not understood".
+        # Or for the order still being built (a PARTIAL draft, no
+        # card yet — screenshot bug, 16 Nov 2026): the same
+        # correction, keeping the draft.
         if await try_reaction_correction(update, text, lang, voice=voice):
+            return
+        if await try_draft_reaction_correction(update, text, lang, voice=voice):
+            return
+        if await try_story_post_correction(update, text, lang, voice=voice):
             return
         await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
         return
@@ -23139,13 +25671,45 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     quick = quick_reply_action(text)
     if quick is not None:
         if quick == "order":
+            # Deposit-hijack fix (16 Nov 2026): a parked draft
+            # resumes here — saying "order" continues the saved
+            # order; otherwise a fresh order starts as before.
+            # Only when no draft is being built right now: a
+            # parked draft must never overwrite the live one.
+            if (
+                not PARTIAL.get(user.id)
+                and _resume_parked_draft(user.id) is not None
+            ):
+                await _continue_parked_draft(
+                    update.message, user.id, lang, voice=voice
+                )
+                return
             PARTIAL.pop(user.id, None)
             RECURRING_DRAFT.pop(user.id, None)
             DELAYED_DRAFT.pop(user.id, None)
+            BUNDLE_DRAFT.pop(user.id, None)
+            # Late-reply fix (16 Nov 2026): a plain "order" gets
+            # this instant line, no AI call — the user is told what
+            # to send next (service + link) instead of waiting on
+            # the classifier for a platform question.
             await reply_message(
-                update.message, t("ask_platform", lang), lang, voice=voice,
+                update.message, t("order_prompt", lang), lang, voice=voice,
             )
             return
+        # Any other flow switch parks the open order draft first
+        # (deposit-hijack fix, 16 Nov 2026): the draft is saved,
+        # not lost, and the user is told in one short line. The
+        # deposit switch parks inside handle_deposit_text instead
+        # (it also covers the typed-deposit path), so it is not
+        # parked twice here.
+        if quick != "deposit" and _park_order_draft(user.id):
+            await reply_message(
+                update.message, t("draft_parked", lang), lang, voice=voice,
+            )
+        # A bundle draft is dropped on a flow switch (ideas batch 1
+        # #3): it has no parked resume, so it must not eat the next
+        # message after the user switched away.
+        BUNDLE_DRAFT.pop(user.id, None)
         if quick == "balance":
             await reply_message(
                 update.message, await balance_text(user.id, lang),
@@ -23251,6 +25815,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reply_message(
             update.message, t("paused_services", lang), lang, voice=voice
         )
+        return
+
+    # In-chat invite codes (both-sides referral bonus, 16 Nov 2026):
+    # a typed REF code registers the referrer — it must never reach
+    # the promo branch, which used to answer it with the
+    # invite-friends card (live bug, 19:27 EAT 16 Nov 2026).
+    if intent is None and await handle_invite_code_text(update, text, lang, voice=voice):
         return
 
     # Promo codes (ideas batch 2, feature 1, 15 Nov 2026): a bare
@@ -23495,6 +26066,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     result, dep_draft["amount"], dep_draft["method"], lang
                 )
             )
+            await maybe_send_deposit_qr(update.message, result, lang)
             return
         # A "yes" can also confirm a batch of orders awaiting Confirm:
         # place them all and answer with one short line per order.
@@ -23502,6 +26074,30 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if batch is not None:
             PENDING_BATCH.pop(batch_id, None)
             results, error = await place_batch(batch, user.id)
+            if error:
+                key = error[0]
+                if key == "insufficient":
+                    await update.message.reply_text(
+                        t(
+                            "insufficient",
+                            lang,
+                            balance=format_money(error[1]),
+                            total=format_money(error[2]),
+                        ),
+                        reply_markup=deposit_webapp_keyboard(lang),
+                    )
+                else:
+                    await update.message.reply_text(t(key, lang))
+                return
+            await update.message.reply_text(batch_result_text(results, lang))
+            return
+        # A "yes" can also confirm a post bundle awaiting Confirm:
+        # place its three legs and answer with one short line per
+        # leg (ideas batch 1 #3, 16 Nov 2026).
+        bundle_id, bundle = pending_bundle_for_user(user.id)
+        if bundle is not None:
+            PENDING_BUNDLE.pop(bundle_id, None)
+            results, error = await place_bundle(bundle, user.id)
             if error:
                 key = error[0]
                 if key == "insufficient":
@@ -23656,6 +26252,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # branch below then answers deterministically.
     if intent is None and is_cancel_request(text):
         intent = _empty_intent("cancel")
+    # "My invite link" is deterministic too (late-reply fix, 16 Nov
+    # 2026): it had no fast path, so it waited on the AI. Caught
+    # locally, before the classifier, like the cancel check above —
+    # the invite branch below then answers with the user's own code.
+    if intent is None and is_invite_link_request(text):
+        intent = _empty_intent("invite")
     # Price questions are answered from local detection only, BEFORE
     # the AI classifier (live bug, 14 Nov 2026: the price arrived
     # 68 seconds late because the classifier and the bridge ran
@@ -23681,6 +26283,27 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             update.message, t("telegram_post_link", lang), lang,
             voice=voice,
         )
+        return
+    # Post bundle (ideas batch 1 #3, 16 Nov 2026): "Boost my new
+    # post" orders views + likes + reactions for one post link.
+    # The detector runs before the classifier, so the AI can never
+    # misread a boost as a single-service order. A bundle draft in
+    # progress keeps eating its follow-ups — the link, then the
+    # quantities — but only those: any other message falls through
+    # to the normal flow (and the order branch drops the draft).
+    if is_post_bundle_request(text) or (
+        user.id in BUNDLE_DRAFT
+        and (
+            extract_links(text)
+            or bundle_quantities_from_text(text) is not None
+        )
+    ):
+        await handle_post_bundle(update, text, intent, lang, voice=voice)
+        return
+    # Check my post (ideas batch 2 #2, 16 Nov 2026): a link plus a
+    # check word is a check, not an order — no draft is started.
+    if is_post_check_request(text):
+        await handle_post_check(update, text, lang, voice=voice)
         return
     # `intent` is injected by the photo handler (a picture's link is
     # already classified by Gemini vision, so a second text
@@ -24067,12 +26690,18 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if intent_type == "orders":
         # "Why hasn't it started yet?" gets the real status plus the
         # service's average time; a plain history question gets the
-        # full table (owner, 13 Nov 2026).
+        # full table (owner, 13 Nov 2026). "Show my TikTok orders"
+        # filters the table to that platform (ideas batch 1 #6,
+        # 16 Nov 2026): the platform rides in the intent.
         if is_wait_question(text):
             await handle_order_wait(update, text, lang, voice=voice)
             return
         await reply_message(
-            update.message, await orders_history_text(user.id, lang),
+            update.message,
+            await orders_history_text(
+                user.id, lang,
+                platform=intent.get("platform"),
+            ),
             lang, voice=voice,
         )
         return
@@ -24250,7 +26879,10 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if intent_type == "invite":
         # Invite link (per-user codes, 15 Nov 2026): the user's OWN
         # code + link, derived locally — the AI never invents a code.
-        # The 20% first-deposit bonus wording is unchanged.
+        # Both-sides referral bonus (16 Nov 2026): the card says the
+        # friend AND the code owner get 20% on the friend's first
+        # deposit. This branch is ONLY for "my invite link" requests
+        # — a typed code never lands here (see handle_invite_code_text).
         _own_code = user_invite_code(user.id)
         await reply_message(
             update.message,
@@ -24261,7 +26893,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if intent_type == "greeting":
         await reply_message(
             update.message, t("greeting", lang), lang, voice=voice,
-            reply_markup=quick_reply_keyboard(),
+            reply_markup=hide_reply_keyboard(),
         )
         return
     if intent_type == "source_question":
@@ -24330,7 +26962,16 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # parse_deposit_amount would silently rewrite the amount the user
     # already gave — the draft is left exactly as it was, and the
     # code itself is only read when no draft is open.
-    if intent_type == "unclear" and user.id in DEPOSIT_DRAFT:
+    # Deposit-hijack fix (16 Nov 2026): a bare number also counts
+    # when the classifier called it an "order" — while the deposit
+    # flow is asking for an amount, a number IS the deposit amount
+    # (the open order draft was parked when the flow started, so
+    # the "no order being built" guard below already passes).
+    _bare_number = re.fullmatch(r"[\d,]+", (text or "").strip()) is not None
+    if user.id in DEPOSIT_DRAFT and (
+        intent_type == "unclear"
+        or (_bare_number and intent_type == "order")
+    ):
         phone = normalize_phone(text)
         method = normalize_method(text)
         amount = parse_deposit_amount(text)
@@ -24407,6 +27048,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         DELAYED_DRAFT.pop(user.id, None)
 
     # --- order flow: multi-turn state ---
+    # A bundle draft is dropped here (ideas batch 1 #3): reaching
+    # the normal order flow means the user is ordering something
+    # else — the bundle hook above already ate the bundle's own
+    # follow-ups (link, quantities).
+    BUNDLE_DRAFT.pop(user.id, None)
     # What the user already gave is remembered per user in PARTIAL, so a
     # bare "2000" after a link, or a bare link after a service, completes
     # the order instead of "I did not understand". A message naming a
@@ -24452,11 +27098,25 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         intent["platform"] = None
         intent["service_hint"] = None
     new_platform = (intent.get("platform") or "").strip().lower()
-    if new_platform and stored_platform and new_platform != stored_platform:
+    # Stale-draft fix (16 Nov 2026): the message's own platform
+    # word counts too — the classifier may carry the old platform
+    # forward from an earlier conversation, so a new order on
+    # another platform ("I want tiktok views" after a Telegram
+    # reactions draft) must drop the stored draft even when the
+    # AI's platform agrees with the old one.
+    _msg_platform = _explicit_platform_word(text)
+    if (
+        _msg_platform
+        and stored_platform
+        and _msg_platform != stored_platform
+    ):
+        stored = {}
+    elif new_platform and stored_platform and new_platform != stored_platform:
         stored = {}
     merged = {}
     for key in ("platform", "service_hint", "link", "quantity", "service_id",
-                "named_by_id", "reaction_emoji", "deadline", "drip_span"):
+                "named_by_id", "reaction_emoji", "deadline", "drip_span",
+                "story"):
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
 
@@ -24491,8 +27151,20 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         metric_changed = True
         for key in ("platform", "service_hint", "link", "quantity",
                     "service_id", "named_by_id", "reaction_emoji",
-                    "deadline", "drip_span"):
+                    "deadline", "drip_span", "story"):
             merged[key] = intent.get(key)
+
+    # A link pasted in THIS message always wins over the stored
+    # link and over any link the classifier carried from history
+    # (story/post bug, 16 Nov 2026: a fresh t.me post link did
+    # not replace the stored tg://openmessage link). A tg:// deep
+    # link is never an order link: drop it so the bot asks for a
+    # real post link instead of carding it.
+    _fresh_link = (extract_links(text) or [None])[0]
+    if _fresh_link is not None:
+        merged["link"] = _fresh_link
+    if str(merged.get("link") or "").strip().lower().startswith("tg://"):
+        merged["link"] = None
 
     # A bare number right before the metric ("200 TikTok views") is
     # the quantity even when the AI did not return one (round 7:
@@ -24536,8 +27208,24 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             _canonical_metric(w)
             for w in (merged.get("service_hint") or "").split()
         } - {None}
-        if kind_words != hint_kind_words:
-            platform = (merged.get("platform") or "").strip().lower()
+        # Stale-draft fix (16 Nov 2026): the platform comes from
+        # the message's own words too — a hint the classifier
+        # carried forward from an earlier conversation must not
+        # leave the new order on the old platform. The link still
+        # wins when the message pastes one, so the platform word
+        # is only used when there is no link in the draft.
+        _msg_platform = (
+            _explicit_platform_word(text)
+            if not merged.get("link") else None
+        )
+        _merged_platform = (merged.get("platform") or "").strip().lower()
+        if (
+            kind_words != hint_kind_words
+            or (_msg_platform and _msg_platform != _merged_platform)
+        ):
+            platform = _msg_platform or _merged_platform
+            if _msg_platform:
+                merged["platform"] = _msg_platform
             merged["service_hint"] = (
                 f"{platform} {kind}" if platform else kind
             )
@@ -24901,8 +27589,16 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Confirm ("I want only 🙏 reaction") re-picks the service for
     # that emoji and shows a NEW card — never the old card
     # unchanged (owner, 14 Nov 2026: a 🙏 correction re-showed the
-    # Positive mix card). See try_reaction_correction.
+    # Positive mix card). See try_reaction_correction. And the
+    # same for the order still being built (a PARTIAL draft, no
+    # card yet — screenshot bug, 16 Nov 2026): the draft is kept
+    # and the Confirm card (or the quantity question) is re-shown
+    # for the new emoji.
     if await try_reaction_correction(update, text, lang, voice=voice):
+        return
+    if await try_draft_reaction_correction(update, text, lang, voice=voice):
+        return
+    if await try_story_post_correction(update, text, lang, voice=voice):
         return
 
     # Nothing to work with at all: not understood. (A bare number or a
@@ -25011,7 +27707,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # it can never duplicate a price already in the reply —
         # neither template above carries one.
         if is_price_question(text):
-            _line, _p, _h = await _price_line(
+            _line, _p, _h, _s = await _price_line(
                 user.id, text, merged.get("platform"),
                 merged.get("service_hint"), merged.get("quantity"),
                 lang, reaction_emoji=merged.get("reaction_emoji"),
@@ -25037,7 +27733,38 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             merged["quantity"] = _default_qty
     if not merged.get("quantity"):
         PARTIAL[user.id] = {k: v for k, v in merged.items() if v is not None}
-        await reply_message(update.message, t("ask_quantity", lang), lang, voice=voice)
+        # Reaction picker (ideas batch 1 #1, 16 Nov 2026): a
+        # reactions draft with no emoji chosen yet gets the emoji
+        # buttons on the quantity question, so the user taps
+        # instead of typing. The catalogue fetch failing just
+        # means a plain question — never a failed message.
+        _picker = None
+        _picker_text = t("ask_quantity", lang)
+        if (
+            "reaction" in (merged.get("service_hint") or "").lower()
+            and not merged.get("reaction_emoji")
+            and merged.get("platform")
+        ):
+            try:
+                _picker_services = await paxyo.services()
+            except Exception as exc:
+                log.warning(
+                    "reaction picker services failed: %s", exc
+                )
+                _picker_services = None
+            if _picker_services is not None:
+                _picker = reaction_picker_keyboard(
+                    merged.get("platform"), _picker_services
+                )
+                if _picker is not None:
+                    _picker_text = (
+                        t("reaction_picker_prompt", lang)
+                        + "\n" + t("ask_quantity", lang)
+                    )
+        await reply_message(
+            update.message, _picker_text, lang, voice=voice,
+            reply_markup=_picker,
+        )
         return
 
     # Complete order: fetch services, use the named service (or the
@@ -25315,7 +28042,10 @@ def _media_ai_fallback(emoji, lang: str) -> str:
     Mood-aware (a wave greets, frustration is heard), one line per
     language — the old rotating canned replies are gone (owner,
     14 Nov 2026: the AI replies first). The delay line, when one
-    is owed, is appended separately by media_reply."""
+    is owed, is appended separately by media_reply. The unknown-
+    mood default is the neutral rule-5 line (16 Nov 2026): NEVER
+    a "fun" guess — an unreadable GIF is not funny, it is just
+    unread."""
     mood = media_mood(emoji)
     lines = {
         "greeting": {
@@ -25331,8 +28061,8 @@ def _media_ai_fallback(emoji, lang: str) -> str:
             "am": "እንኳን ደህና መጡ! 😊 ሌላ ምን ይፈልጋሉ?",
         },
     }.get(mood) or {
-        "en": "😄 Haha, love it! What would you like to order?",
-        "am": "😄 በጣም ጥሩ ነው! ምን ማዘዝ ይፈልጋሉ?",
+        "en": t("gif_mood_unclear", "en"),
+        "am": t("gif_mood_unclear", "am"),
     }
     return lines.get(lang) or lines["en"]
 
@@ -25442,8 +28172,176 @@ async def media_order_context(user_id: int) -> dict:
     }
 
 
+# ------------------------------------------------- GIF / sticker mood -----
+# Media & GIF Reaction Handling (William, 16 Nov 2026): the bot
+# must WATCH a GIF, sticker or image and reply to its mood — never
+# a generic "fun" line. Gemini vision classifies the media into
+# one of four moods; anything it cannot classify (or cannot read
+# at all) is "unclear" and gets the neutral rule-5 reply. One word
+# back from the model keeps the call cheap; frames are small and
+# few (one frame for a GIF, the image itself for a sticker).
+GIF_MOOD_PROMPT = (
+    "Look at this image — one frame from a GIF or a sticker a "
+    "customer just sent in a chat. What emotion does it show? "
+    "Reply with exactly one word and nothing else: angry, "
+    "confused, happy, sad, or unclear. Angry covers frustrated, "
+    "annoyed and yelling; confused covers waiting, impatient and "
+    "puzzled; happy covers excited, celebrating and thankful; sad "
+    "covers disappointed and crying. Use unclear only when no "
+    "emotion can be read at all."
+)
+
+GIF_MOODS = ("angry", "confused", "happy", "sad", "unclear")
+
+
+def _parse_gif_mood(text: str) -> str:
+    """One mood word from the vision reply, or "unclear" when it
+    names no known mood. Liberal on purpose: the model may answer
+    "angry!" or a short sentence — the first known word wins. Pure."""
+    low = (text or "").strip().lower()
+    if not low:
+        return "unclear"
+    for mood in GIF_MOODS:
+        if re.search(r"\b" + re.escape(mood) + r"\b", low):
+            return mood
+    return "unclear"
+
+
+async def classify_media_mood(image_bytes: bytes,
+                              mime_type: str = "image/jpeg") -> str:
+    """One mood word from Gemini vision for one frame/image, or
+    "unclear" when vision fails, answers empty, or names no known
+    mood. Never raises — the caller answers neutrally instead."""
+    if not image_bytes:
+        return "unclear"
+    try:
+        raw = await gemini_vision(
+            image_bytes, prompt=GIF_MOOD_PROMPT, mime_type=mime_type
+        )
+    except Exception as exc:
+        _log_ai_failure("gif mood vision failed", exc)
+        return "unclear"
+    return _parse_gif_mood(raw)
+
+
+async def _extract_gif_frame(video_bytes: bytes):
+    """One small JPEG frame from a GIF/MP4 animation (or a video
+    sticker): the middle frame when ffprobe can read the duration,
+    else half a second in, else the first frame. Returns None when
+    ffmpeg is missing (Dockerfile installs it; without it the GIF
+    simply cannot be watched), the bytes are not a video, or
+    anything fails. Never raises; the video bytes are written to
+    one temp file and deleted afterwards."""
+    if not video_bytes or len(video_bytes) > MAX_PHOTO_BYTES:
+        return None
+    if shutil.which("ffmpeg") is None:
+        return None
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(video_bytes)
+            tmp = f.name
+        ts = 0.5
+        try:
+            probe = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error", "-show_entries",
+                "format=duration", "-of", "csv=p=0", tmp,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await asyncio.wait_for(probe.communicate(), timeout=10)
+            dur = float((out or b"").decode().strip() or 0)
+            if dur > 0:
+                ts = dur / 2
+        except Exception:
+            pass
+        for attempt_ts in (ts, 0.0):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-ss", str(attempt_ts), "-i", tmp,
+                    "-frames:v", "1", "-vf", "scale=480:-1",
+                    "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=15
+                )
+            except Exception:
+                continue
+            if out:
+                return out
+        return None
+    except Exception as exc:
+        log.warning("gif frame extraction failed: %s", exc)
+        return None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+async def _download_media_file(obj):
+    """The bytes of a Telegram file object (animation / sticker),
+    or None when there is no file, it is too big, or the download
+    fails. Never raises."""
+    if obj is None:
+        return None
+    try:
+        size = getattr(obj, "file_size", None)
+        if isinstance(size, int) and size > MAX_PHOTO_BYTES:
+            return None
+        f = await obj.get_file()
+        data = bytes(await f.download_as_bytearray())
+    except Exception as exc:
+        log.warning("media download failed: %s", exc)
+        return None
+    if not data or len(data) > MAX_PHOTO_BYTES:
+        return None
+    return data
+
+
+async def describe_media_mood(kind: str, message) -> str:
+    """The mood of a GIF or sticker the user just sent, from vision:
+    "angry" / "confused" / "happy" / "sad" / "unclear". A GIF is an
+    MP4 animation, so one frame is pulled with ffmpeg; a video
+    sticker (.webm) the same way; a static sticker (.webp) goes to
+    vision as-is. An animated (.tgs) sticker has no raster image
+    to read, so it is "unclear". "unclear" also covers every
+    failure — no file, no ffmpeg, vision down — so the caller can
+    answer neutrally instead of guessing. Never raises."""
+    if kind == "gif":
+        data = await _download_media_file(
+            getattr(message, "animation", None)
+        )
+        if data is None:
+            return "unclear"
+        frame = await _extract_gif_frame(data)
+        if frame is None:
+            return "unclear"
+        return await classify_media_mood(frame)
+    if kind == "sticker":
+        sticker = getattr(message, "sticker", None)
+        if sticker is None:
+            return "unclear"
+        if getattr(sticker, "is_animated", False) is True:
+            return "unclear"
+        data = await _download_media_file(sticker)
+        if data is None:
+            return "unclear"
+        if getattr(sticker, "is_video", False) is True:
+            frame = await _extract_gif_frame(data)
+            if frame is None:
+                return "unclear"
+            return await classify_media_mood(frame)
+        return await classify_media_mood(data, mime_type="image/webp")
+    return "unclear"
+
+
 async def media_reply(update, emoji, lang: str, voice: bool = False,
-                      kind: str = "emoji") -> str:
+                      kind: str = "emoji", mood: str = None) -> str:
     """Answer one media reaction (GIF, sticker, bare emoji) and
     return the text sent. DeepSeek (the normal AI chain, same as
     free chat) reacts FIRST, naturally, like a person — the prompt
@@ -25456,11 +28354,31 @@ async def media_reply(update, emoji, lang: str, voice: bool = False,
     right after an order was placed (owner, 14 Nov 2026). Reads
     order state only — it never clears a draft or a Confirm card.
     Photos are NOT routed here: they are read by Gemini vision
-    (route_photo_result) and keep working as before."""
+    (route_photo_result) and keep working as before.
+
+    Media & GIF Reaction Handling (16 Nov 2026): for a GIF or a
+    sticker the reply comes from the VISION mood (the `mood`
+    argument, classified by describe_media_mood) — never from the
+    blind text AI, which could only guess "fun". A known mood gets
+    its matching line; "unclear" (vision could not read it) falls
+    back to the emoji mood when the sticker carries one, else the
+    neutral rule-5 line. Bare emoji keep the old path: the AI
+    reacts first, the deterministic fallback covers it being down.
+    """
     user = update.effective_user
-    text = await media_ai_reply(kind, emoji, lang)
-    if not text:
+    if kind in ("gif", "sticker") and mood in (
+        "angry", "confused", "happy", "sad",
+    ):
+        text = t(f"gif_mood_{mood}", lang)
+    elif kind in ("gif", "sticker"):
+        # Vision could not read it: the sticker's emoji still
+        # speaks when it carries a known mood (a 😡 sticker is
+        # frustration), otherwise the neutral line — never a guess.
         text = _media_ai_fallback(emoji, lang)
+    else:
+        text = await media_ai_reply(kind, emoji, lang)
+        if not text:
+            text = _media_ai_fallback(emoji, lang)
     ctx = await media_order_context(user.id)
     line = delay_line(ctx, lang)
     if line:
@@ -25483,9 +28401,12 @@ async def media_reply_for_text(update, emoji, lang: str, voice: bool = False) ->
 async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A GIF (owner, 13 Nov 2026): never silent, never
     'I did not understand'. A caption is the user's message and is
-    handled normally; otherwise the AI reacts first, naturally —
-    and only a genuinely delayed or failed order adds one short
-    line about that order (owner, 14 Nov 2026)."""
+    handled normally; otherwise the GIF is WATCHED first (16 Nov
+    2026 — vision classifies its mood, 1 frame via ffmpeg) and the
+    reply matches the mood — an angry GIF is never called "fun",
+    and a GIF vision cannot read gets the neutral line. Only a
+    genuinely delayed or failed order adds one short line about
+    that order (owner, 14 Nov 2026)."""
     if _update_seen(update):
         return
     caption = (update.message.caption or "").strip()
@@ -25494,13 +28415,18 @@ async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     lang = LAST_LANG.get(user.id) or lang_of("", user.language_code)
-    await media_reply(update, None, lang, kind="gif")
+    mood = await describe_media_mood("gif", update.message)
+    await media_reply(update, None, lang, kind="gif", mood=mood)
 
 
 async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A sticker (owner, 13 Nov 2026): same as a GIF — a caption is
-    the user's message; otherwise the AI reacts first, naturally,
-    to the sticker (and its emoji), like a GIF."""
+    the user's message; otherwise the sticker is watched first
+    (16 Nov 2026): a static sticker goes to vision as webp, a
+    video sticker via one ffmpeg frame, an animated (.tgs) sticker
+    cannot be read. When vision cannot read it, the sticker's own
+    emoji still speaks when it carries a known mood — otherwise
+    the neutral line, never a "fun" guess."""
     if _update_seen(update):
         return
     caption = (update.message.caption or "").strip()
@@ -25511,7 +28437,8 @@ async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = LAST_LANG.get(user.id) or lang_of("", user.language_code)
     sticker = getattr(update.message, "sticker", None)
     emoji = getattr(sticker, "emoji", None) if sticker else None
-    await media_reply(update, emoji, lang, kind="sticker")
+    mood = await describe_media_mood("sticker", update.message)
+    await media_reply(update, emoji, lang, kind="sticker", mood=mood)
 
 
 # ------------------------------------------------------------ photos ------
@@ -25538,6 +28465,27 @@ def receipt_keyboard(lang: str) -> InlineKeyboardMarkup:
         [[InlineKeyboardButton(t("check_deposit_button", lang),
                                callback_data="checkdep:")]]
     )
+
+
+def _usable_photo_link(link):
+    """The vision-read link, normalized to a usable post/profile
+    URL, or None. A scheme-less "instagram.com/someone" gets
+    https://; a bare username, a link with no recognisable
+    platform domain, or anything the order flow cannot place is
+    never injected — the caller asks for the link instead. The
+    link is never guessed: only what vision actually read, with
+    its scheme completed."""
+    raw = str(link or "").strip()
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = "https://" + raw.lstrip("/")
+    found = extract_links(raw)
+    if not found:
+        return None
+    if platform_from_link(found[0]) is None:
+        return None
+    return found[0]
 
 
 async def route_photo_result(update, result: dict, lang: str):
@@ -25570,30 +28518,63 @@ async def route_photo_result(update, result: dict, lang: str):
         return
     if want == "order":
         link = result.get("link")
+        platform = result.get("platform")
+        metric = result.get("metric")
+        # The hint for the draft: the platform the LINK belongs to
+        # wins over vision's platform word (the link decides, as in
+        # the text flow); the metric rides along when vision saw one.
         if link:
-            # The link is already classified by vision: inject the
-            # intent so the order flow starts without a second
-            # Gemini call. Platform from the link's domain, so the
-            # flow goes straight to "how many?".
-            intent = {
-                "intent": "order",
-                "platform": platform_from_link(link),
-                "service_hint": None,
-                "link": link,
-                "quantity": None,
-                "interval_minutes": None,
-                "amount": None,
-                "method": None,
-                "phone": None,
+            usable = _usable_photo_link(link)
+            if usable is not None:
+                link_platform = platform_from_link(usable)
+                hint = None
+                if metric:
+                    hint = " ".join(
+                        p for p in (link_platform, metric) if p
+                    ) or None
+                # The link is already classified by vision: inject the
+                # intent so the order flow starts without a second
+                # Gemini call. Platform from the link's domain, so the
+                # flow goes straight to "how many?".
+                intent = {
+                    "intent": "order",
+                    "platform": link_platform,
+                    "service_hint": hint,
+                    "link": usable,
+                    "quantity": None,
+                    "interval_minutes": None,
+                    "amount": None,
+                    "method": None,
+                    "phone": None,
+                }
+                await handle_order_text(
+                    update, None, usable, intent=intent
+                )
+                return
+            # A link vision read but that is not a usable post/profile
+            # URL is never injected — fall through to the no-link
+            # path below, which asks for the link instead.
+        hint = " ".join(
+            p for p in (platform, metric) if p
+        ) or None
+        if platform or metric:
+            # No usable link, but the picture shows what the order is
+            # for: keep the platform/metric in the draft and ask for
+            # the link with the per-type question — never guess a link.
+            PARTIAL[user.id] = {
+                k: v for k, v in {
+                    "platform": platform, "service_hint": hint,
+                }.items() if v is not None
             }
-            await handle_order_text(
-                update, None, link, intent=intent
-            )
-            return
         username = result.get("username")
         if username:
             await update.message.reply_text(
                 t("photo_order_username", lang, username=username)
+            )
+            return
+        if platform or metric:
+            await update.message.reply_text(
+                ask_link_text(platform, hint, lang)
             )
             return
         await update.message.reply_text(t("photo_unreadable", lang))
@@ -25767,6 +28748,51 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(t("ask_platform", lang))
         return
 
+    if action == "react":
+        # Reaction picker (ideas batch 1 #1, 16 Nov 2026): the user
+        # tapped an emoji button on the quantity question. The
+        # draft's emoji becomes the tapped one and the draft
+        # continues — a Confirm card when the quantity is already
+        # valid, else the plain quantity question (the choice is
+        # made, so no picker this time). No exact service for the
+        # tapped emoji is complete_order's honest
+        # no_exact_reaction line, never a silent different emoji.
+        # A stale button (the draft is gone) gets an honest line.
+        draft = PARTIAL.get(user.id)
+        if (
+            not draft
+            or "reaction" not in (draft.get("service_hint") or "").lower()
+        ):
+            await query.edit_message_text(t("reaction_picker_gone", lang))
+            return
+        touch_partial_activity(user.id)
+        draft["reaction_emoji"] = arg
+        merged = {
+            k: draft.get(k)
+            for k in (
+                "platform", "service_hint", "link", "quantity",
+                "service_id", "named_by_id", "reaction_emoji",
+                "story",
+            )
+        }
+        await query.edit_message_text(
+            t("reaction_picker_picked", lang, emoji=arg)
+        )
+        if not merged.get("quantity"):
+            PARTIAL[user.id] = {
+                k: v for k, v in merged.items() if v is not None
+            }
+            await reply_message(
+                query.message, t("ask_quantity", lang), lang,
+            )
+            return
+        await complete_order(
+            query.message, user.id, merged, lang,
+            named_service_id=merged.get("service_id"),
+            show_full_name=bool(merged.get("named_by_id")),
+        )
+        return
+
     if action == "resume_draft":
         # Abandoned-order nudge (feature 4, 15 Nov 2026): the user
         # tapped "Resume my order" on the nudge. Re-ask for the
@@ -25898,6 +28924,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result, draft["amount"], draft["method"], lang
             )
         )
+        await maybe_send_deposit_qr(query.message, result, lang)
         return
 
     if action == "reorder":
@@ -26439,6 +29466,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ),
                     reply_markup=deposit_webapp_keyboard(lang),
                 )
+            elif key == "bad_link":
+                # Link check (item 5): do not place — the card is
+                # replaced with the right-link question, and the
+                # draft (minus the bad link) is restored so the
+                # user can continue by sending just the link.
+                _platform, _hint = _restore_draft_after_bad_link(
+                    pending, user.id
+                )
+                await query.edit_message_text(
+                    ask_link_text(_platform, _hint, lang)
+                )
+            elif key == "bad_quantity":
+                _svc = pending.get("service") or {}
+                await query.edit_message_text(
+                    t(
+                        "bad_quantity", lang,
+                        service=short_service_name(_svc.get("name")),
+                        min=_svc.get("min"), max=_svc.get("max"),
+                    )
+                )
             else:
                 await query.edit_message_text(t(key, lang))
             return
@@ -26562,6 +29609,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result, dep_draft["amount"], dep_draft["method"], lang
             )
         )
+        await maybe_send_deposit_qr(query.message, result, lang)
         return
 
     batch = PENDING_BATCH.pop(arg, None)
@@ -26575,6 +29623,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Confirm tap: place every order in the batch and replace the
         # card with one short line per order.
         results, error = await place_batch(batch, user.id)
+        if error:
+            key = error[0]
+            if key == "insufficient":
+                await query.edit_message_text(
+                    t(
+                        "insufficient",
+                        lang,
+                        balance=format_money(error[1]),
+                        total=format_money(error[2]),
+                    ),
+                    reply_markup=deposit_webapp_keyboard(lang),
+                )
+            else:
+                await query.edit_message_text(t(key, lang))
+            return
+        await query.edit_message_text(batch_result_text(results, lang))
+        return
+
+    bundle = PENDING_BUNDLE.pop(arg, None)
+    if bundle is not None:
+        if bundle["user_id"] != user.id:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        if action == "cancel":
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        # Confirm tap: place the bundle's three legs and replace the
+        # card with one short line per leg (ideas batch 1 #3).
+        results, error = await place_bundle(bundle, user.id)
         if error:
             key = error[0]
             if key == "insufficient":
@@ -26671,7 +29748,11 @@ async def notify_user(app, user_id: int, text: str, reply_markup=None):
         return
     try:
         await app.bot.send_message(
-            chat_id=user_id, text=text, reply_markup=reply_markup
+            chat_id=user_id, text=text,
+            reply_markup=(
+                reply_markup if reply_markup is not None
+                else hide_reply_keyboard()
+            ),
         )
     except Exception as exc:
         log.warning("notify_user %s failed: %s", user_id, exc)
@@ -26710,6 +29791,24 @@ async def notify_admins(app, text: str):
     the others or kill the scheduler loop."""
     for admin_id in sorted(ADMIN_TELEGRAM_IDS):
         await notify_user(app, admin_id, text)
+
+
+def _service_pause_admin_text(service, cancel_count, paused_until):
+    """One line for William when a service is auto-paused
+    (cancel-cutting item 2, 16 Nov 2026): which service, how
+    many provider cancels triggered it, until when it is paused.
+    English only, no provider name — the service is identified
+    by its name and number, as the customer sees it."""
+    name = short_service_name((service or {}).get("name")) or (
+        f"service {(service or {}).get('service')}"
+    )
+    when = paused_until or "24 hours from now"
+    count = cancel_count if cancel_count is not None else 3
+    return (
+        f"Service paused: {name} — {count} provider cancels in "
+        f"24 hours. Paused until {when}. It will be skipped in "
+        "picking until then."
+    )
 
 
 async def run_one_schedule(app, sched, services_by_id):
@@ -27075,6 +30174,100 @@ def _price_watch_alert_text(changes) -> str:
     return "\n".join(lines)
 
 
+def _snapshot_ids(snapshot):
+    """Combined ids present in a price-watch snapshot, with the
+    same bare-int -> GOP normalisation _price_watch_changes uses."""
+    ids = set()
+    for sid in (snapshot or {}):
+        key = str(sid)
+        if ":" not in key:
+            try:
+                key = f"gop:{int(key)}"
+            except (TypeError, ValueError):
+                continue
+        ids.add(key)
+    return ids
+
+
+async def _alert_faster_services(app, snapshot, services):
+    """New faster service alert (ideas batch 2 #6, 16 Nov 2026):
+    a service that is NEW in the refreshed catalogue and FASTER
+    than a user's usual service for the same platform+metric earns
+    that user one alert. Hooked into the price-watch snapshot
+    comparison, so it runs only when the catalogue was really
+    refreshed — and never on the bootstrap cycle, where every
+    service is new. Notification only: it never changes an order
+    (the fastest-first pick already prefers the new service on
+    the next order). One alert per user per service, ever
+    (FASTER_SERVICE_ALERTED); the snapshot save is the primary
+    guard — a service stops being new once it is snapshotted.
+    Never raises."""
+    try:
+        known = _snapshot_ids(snapshot)
+        new_services = []
+        for s in services or []:
+            if not isinstance(s, dict):
+                continue
+            if service_combined_id(s) in known:
+                continue
+            try:
+                bare = int(s.get("service") or 0)
+            except (TypeError, ValueError):
+                continue
+            if bare <= 0:
+                continue
+            if bare in BLACKLISTED_SERVICES and service_provider(s) == "gop":
+                continue
+            if not s.get("active", True):
+                continue
+            if parse_average_time(s.get("average_time")) is None:
+                # No claimed time — it cannot be shown faster.
+                continue
+            new_services.append(s)
+        if not new_services or not USER_TRAITS:
+            return
+        for user_id, traits in list(USER_TRAITS.items()):
+            usual_id = traits.get("usual_service_id")
+            platform = traits.get("usual_platform")
+            metric = traits.get("usual_metric")
+            if not usual_id or not platform or not metric:
+                continue
+            usual = find_service_by_id(services, usual_id)
+            if usual is None:
+                continue
+            usual_minutes = parse_average_time(
+                usual.get("average_time"))
+            if usual_minutes is None:
+                continue
+            for s in new_services:
+                s_platform, _hint = _platform_hint_of_service(s)
+                s_metric = _trait_slug(kind_from_text(
+                    f"{s.get('name') or ''} {s.get('category') or ''}"
+                ) or "")
+                if s_platform != platform or s_metric != metric:
+                    continue
+                s_minutes = parse_average_time(s.get("average_time"))
+                if s_minutes is None or s_minutes >= usual_minutes:
+                    continue
+                key = (int(user_id), service_combined_id(s))
+                if key in FASTER_SERVICE_ALERTED:
+                    continue
+                FASTER_SERVICE_ALERTED.add(key)
+                lang = LAST_LANG.get(int(user_id)) or "en"
+                await notify_user(app, int(user_id), t(
+                    "faster_service_alert", lang,
+                    platform=platform, metric=metric,
+                    service=short_service_name(s.get("name"))
+                    or s.get("name") or "service",
+                    new_time=s.get("average_time"),
+                    usual_service=short_service_name(usual.get("name"))
+                    or usual.get("name") or "your usual service",
+                    usual_time=usual.get("average_time"),
+                ))
+    except Exception as exc:
+        log.warning("faster service alert failed: %s", exc)
+
+
 async def run_price_watch_cycle(app):
     """One provider price-change watch pass (feature 6, 15 Nov
     2026): when the catalogue was REALLY refreshed since the last
@@ -27153,6 +30346,13 @@ async def run_price_watch_cycle(app):
         changes = _price_watch_changes(snapshot, services)
         if changes:
             await notify_admins(app, _price_watch_alert_text(changes))
+        # New faster service alert (ideas batch 2 #6, 16 Nov 2026):
+        # a service that is new in this refresh and faster than a
+        # user's usual service for the same platform+metric earns
+        # that user one alert. Runs on the same snapshot comparison,
+        # before the new snapshot is saved — and never on the
+        # bootstrap cycle above, where every service is new.
+        await _alert_faster_services(app, snapshot, services)
         try:
             saved = await paxyo.save_price_snapshot(new_map)
         except Exception as exc:
@@ -27174,6 +30374,45 @@ async def run_price_watch_cycle(app):
         log.warning("price watch cycle failed: %s", exc)
 
 
+async def _provider_balance_step(app, provider, balance, state):
+    """One provider's step of the low-balance state machine (feature
+    7, 15 Nov 2026; two providers since item 12, 16 Nov 2026):
+    at or above the low threshold ($3) is ok; dropping below it
+    alerts ONCE ("low"); while below it there are no repeats;
+    crossing back above it resets to ok; dropping below $1.00
+    while already low alerts ONCE more ("critically low"). The
+    alert is the SAME alert as before (reused, not a second one) —
+    it now carries the provider slug so William knows which
+    balance to top up. Returns the new state. Never raises."""
+    if balance >= PROVIDER_LOW_BALANCE_USD:
+        return "ok"
+    if balance >= PROVIDER_CRITICAL_BALANCE_USD:
+        if state == "ok":
+            await notify_admins(
+                app,
+                PROVIDER_BALANCE_LOW_TEXT.format(
+                    balance=f"{balance:.2f}", provider=provider
+                ),
+            )
+            return "low"
+        if state == "critical":
+            # Climbed back out of critical into low: no alert,
+            # but a later drop below $1 alerts again.
+            return "low"
+        return state
+    # Below $1.00: one critical alert, however we got here — a jump
+    # straight from ok sends only this one, not both.
+    if state != "critical":
+        await notify_admins(
+            app,
+            PROVIDER_BALANCE_CRITICAL_TEXT.format(
+                balance=f"{balance:.2f}", provider=provider
+            ),
+        )
+        return "critical"
+    return state
+
+
 async def run_provider_balance_cycle(app, now=None):
     """One low-provider-balance check (feature 7, 15 Nov 2026):
     at most one check per hour, from admin_stats()'s
@@ -27184,8 +30423,17 @@ async def run_provider_balance_cycle(app, now=None):
     above it resets to ok; dropping below $1.00 while already low
     alerts ONCE more ("critically low"). A missing field or a 404
     means the watch is off — a log warning, never a crash, never
-    an alert. Never raises."""
+    an alert. Never raises.
+    Two providers since item 12 (16 Nov 2026): the same check
+    runs for the second provider's smm_balance_usd (server/
+    api-admin-stats.php converts its INR balance to USD). Each
+    provider keeps its own state, and each alerts once per
+    crossing with the same alert text — the guard (see
+    _provider_balance_health) reads the states, never the alert.
+    A stats reply without smm_balance_usd (endpoint not updated
+    yet) leaves the second provider's state untouched."""
     global _PROVIDER_BALANCE_LAST_CHECK, _PROVIDER_BALANCE_STATE
+    global _PROVIDER_BALANCE_STATE_SMM
     try:
         import time
 
@@ -27215,33 +30463,20 @@ async def run_provider_balance_cycle(app, now=None):
                 "is not a number: %r", stats.get("provider_balance_usd")
             )
             return
-        state = _PROVIDER_BALANCE_STATE
-        if balance >= PROVIDER_LOW_BALANCE_USD:
-            _PROVIDER_BALANCE_STATE = "ok"
-            return
-        if balance >= PROVIDER_CRITICAL_BALANCE_USD:
-            if state == "ok":
-                _PROVIDER_BALANCE_STATE = "low"
-                await notify_admins(
-                    app,
-                    PROVIDER_BALANCE_LOW_TEXT.format(
-                        balance=f"{balance:.2f}"
-                    ),
+        _PROVIDER_BALANCE_STATE = await _provider_balance_step(
+            app, "gop", balance, _PROVIDER_BALANCE_STATE
+        )
+        if "smm_balance_usd" in stats:
+            try:
+                smm_balance = float(stats.get("smm_balance_usd"))
+            except (TypeError, ValueError):
+                log.warning(
+                    "provider balance watch off: smm_balance_usd "
+                    "is not a number: %r", stats.get("smm_balance_usd")
                 )
-            elif state == "critical":
-                # Climbed back out of critical into low: no alert,
-                # but a later drop below $1 alerts again.
-                _PROVIDER_BALANCE_STATE = "low"
-            return
-        # Below $1.00: one critical alert, however we got here —
-        # a jump straight from ok sends only this one, not both.
-        if state != "critical":
-            _PROVIDER_BALANCE_STATE = "critical"
-            await notify_admins(
-                app,
-                PROVIDER_BALANCE_CRITICAL_TEXT.format(
-                    balance=f"{balance:.2f}"
-                ),
+                return
+            _PROVIDER_BALANCE_STATE_SMM = await _provider_balance_step(
+                app, "smm", smm_balance, _PROVIDER_BALANCE_STATE_SMM
             )
     except Exception as exc:
         log.warning("provider balance cycle failed: %s", exc)
