@@ -5398,30 +5398,45 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
 
     async def test_code_while_draft_open_does_not_hijack(self):
         # An order is being built (waiting for its link): the code
-        # is left alone — the draft survives untouched, no validate.
+        # is validated AND the draft is parked, never swallowed as
+        # the link — mid-order understanding, 16 Nov 2026. (The
+        # old version of this test pinned the guard that ignored
+        # the code while a draft was open; that guard was the bug.)
         msg, fake = await self._turns([
             ("I want 1000 TikTok views",
              intent_of("order", platform="tiktok",
                        service_hint="tiktok views", quantity=1000)),
             ("PAXYO20", intent_of("unclear")),
         ])
-        self.assertEqual(fake.promo_validates, [])
-        self.assertEqual(bot.VALIDATED_PROMO, {})
-        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
-        self.assertEqual(bot.PARTIAL[1].get("quantity"), 1000)
-        self.assertIn("link", msg.text_sent[1].lower())
+        self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1],
+            {"code": "PAXYO20", "percent": 20})
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(
+            bot.PARKED_DRAFT[1].get("platform"), "tiktok")
+        self.assertEqual(bot.PARKED_DRAFT[1].get("quantity"), 1000)
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[1].lower())
+        self.assertIn("Code accepted", msg.text_sent[2])
 
     async def test_code_while_deposit_draft_open_does_not_hijack(self):
-        # A deposit is being built (waiting for its phone): the code
-        # does not jump the queue — the draft keeps its amount.
+        # A deposit is being built (waiting for its phone): the
+        # code is validated, and the deposit draft keeps its amount
+        # — mid-order understanding, 16 Nov 2026. (The old version
+        # of this test pinned the guard that ignored the code while
+        # a draft was open; that guard was the bug.)
         msg, fake = await self._turns([
             ("I want to deposit 100 by telebirr",
              intent_of("deposit", amount=100, method="telebirr")),
             ("PAXYO20", intent_of("unclear")),
         ])
-        self.assertEqual(fake.promo_validates, [])
-        self.assertEqual(bot.VALIDATED_PROMO, {})
+        self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1],
+            {"code": "PAXYO20", "percent": 20})
         self.assertEqual(bot.DEPOSIT_DRAFT[1].get("amount"), 100.0)
+        self.assertIn("Code accepted", msg.text_sent[-1])
 
     async def test_offer_asked_for_ambiguous_token(self):
         # "PAXYO20 please" is code-shaped but not bare: the bot
@@ -17877,15 +17892,24 @@ class TestPriceFastPath(_LanguageRoundBase):
         # A bare "how much are the views?" while a TikTok views
         # draft is being built is about TikTok views — not the
         # faster, cheaper Instagram views in the same catalogue.
+        # Mid-order understanding (16 Nov 2026): the price is
+        # answered AND the open draft is parked first, so the
+        # parked line comes before the price.
         bot.PARTIAL[1] = {"platform": "tiktok", "service_hint": "views"}
         msg = await self._send(
             "how much are the views?",
             paxyo=TwoPlatformViewsPaxyo(),
         )
-        reply = msg.text_sent[0]
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[0].lower())
+        reply = msg.text_sent[1]
         self.assertIn("TikTok", reply)
         self.assertIn("18.90", reply)
         self.assertNotIn("Instagram", reply)
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(
+            bot.PARKED_DRAFT[1].get("platform"), "tiktok")
 
     async def test_link_plus_price_word_answers_cheapest_for_link(self):
         # Ideas batch 1 #2 (16 Nov 2026): a video link + "how much
@@ -18060,13 +18084,24 @@ class TestStaleDraftPrice(_LanguageRoundBase):
                 service_hint="telegram reactions",
             )),
         ])
-        self.assertEqual(len(msg.text_sent), 3)
-        self.assertIn("video", msg.text_sent[1].lower())
-        reply = msg.text_sent[2]
+        # Mid-order understanding (16 Nov 2026): the "Hi"
+        # parks the seeded reactions draft (parked line + greeting),
+        # the order turn asks for the link, and the price turn parks
+        # the TikTok draft (parked line + price) — five replies.
+        self.assertEqual(len(msg.text_sent), 5)
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[0].lower())
+        self.assertIn("video", msg.text_sent[2].lower())
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[3].lower())
+        reply = msg.text_sent[4]
         self.assertIn("TikTok", reply)
         self.assertIn("18.90", reply)
         self.assertNotIn("37.80", reply)
         self.assertNotIn("Reactions", reply)
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(
+            bot.PARKED_DRAFT[1].get("service_hint"), "tiktok views")
 
     async def test_new_order_with_stale_classifier_hint_still_switches(self):
         # Even when the classifier itself carries the old
@@ -18135,12 +18170,23 @@ class TestStaleDraftPrice(_LanguageRoundBase):
             await bot.handle_order_text(
                 update, None, "How much is the price"
             )
-        self.assertEqual(len(msg.text_sent), 3)
-        reply = msg.text_sent[2]
+        # Mid-order understanding (16 Nov 2026): same five
+        # replies as the fast-path version — the "Hi" parks the
+        # seeded draft, the price turn parks the TikTok draft.
+        self.assertEqual(len(msg.text_sent), 5)
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[0].lower())
+        self.assertIn("video", msg.text_sent[2].lower())
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[3].lower())
+        reply = msg.text_sent[4]
         self.assertIn("TikTok", reply)
         self.assertIn("18.90", reply)
         self.assertNotIn("37.80", reply)
         self.assertNotIn("Reactions", reply)
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(
+            bot.PARKED_DRAFT[1].get("service_hint"), "tiktok views")
 
 
 class TestWidenFreeAnswers(_LanguageRoundBase):
@@ -26935,9 +26981,13 @@ class TestAbandonedNudge(unittest.IsolatedAsyncioTestCase):
             link="https://tiktok.com/@x/video/1",
         )
         # Any message from the user — even one that does not touch
-        # the draft — means they are not quiet.
+        # the draft — means they are not quiet. Mid-order
+        # understanding (16 Nov 2026): the greeting is answered and
+        # the draft is parked, so it leaves PARTIAL — and the nudge
+        # cycle only iterates PARTIAL, so nothing is nudged.
         await self._send("hello", intent_of("greeting"))
-        self.assertIn(1, bot.PARTIAL)
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertIn(1, bot.PARKED_DRAFT)
         app = await self._cycle()
         self.assertEqual(app.bot.sent, [])
         self.assertIsNone(bot.PARTIAL_ACTIVITY[1]["nudged_at"])
@@ -33663,6 +33713,352 @@ class TestCustomizationDataset(_SmartLoopBase):
             source = fh.read()
         self.assertNotRegex(source, r"(?i)godofpanel")
         self.assertNotRegex(source, r"(?i)smmsocialmedia")
+
+
+class TestMidOrderUnderstanding(unittest.IsolatedAsyncioTestCase):
+    """Mid-order understanding (16 Nov 2026, widened scope): ANY
+    message typed while an order draft is open — a balance
+    question, "my orders", a price question, a greeting, "help",
+    "my invite link", a support request, an invite code, a promo
+    code — is answered by its normal handler, and the open draft
+    is parked (saved, resumable with "order") instead of being
+    swallowed as order input. Only genuine order input (a link, a
+    quantity, a platform/service choice, a reaction-emoji
+    correction, Confirm/Cancel) continues the draft."""
+
+    LINK = "https://www.tiktok.com/@x/video/123"
+    FRIEND_CODE = "REF21I3V91B"  # owner 123456789
+    WILLIAM = 779060335
+
+    def setUp(self):
+        for store in (
+            bot.USER_TRAITS, bot.USUAL_SERVICE,
+            bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.PENDING, bot.PENDING_REFILL, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PARKED_DRAFT,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.LAST_DEPOSIT,
+            bot.PENDING_BATCH, bot.SPLIT_DRAFT, bot.FASTEST_FALLBACK,
+            bot.BUDGET_OPTIONS, bot.SEEN_UPDATES, bot.RECEIPT_OFFER,
+            bot.OFF_TOPIC_COUNT, bot.OFFENSE_COUNT, bot.HUMOR_INDEX,
+            bot.CANCELLED_DRAFT, bot.LAST_LANG, bot.VALIDATED_PROMO,
+            bot.PROMO_DEPOSIT, bot.PROMO_OFFER, bot.QUOTED_SERVICE,
+            bot.NUDGE_SERVICE, bot.FRIDAY_PENDING, bot.FRIDAY_OFFERED,
+            bot.FRIDAY_LINK,
+        ):
+            store.clear()
+        bot.CHAT_HISTORY.clear()
+        bot._CHAT_HISTORY_LOADED = False
+
+    def tearDown(self):
+        for store in (
+            bot.PARTIAL, bot.PARKED_DRAFT, bot.PENDING,
+            bot.DEPOSIT_DRAFT, bot.CHAT_HISTORY, bot.VALIDATED_PROMO,
+            bot.QUOTED_SERVICE,
+        ):
+            store.clear()
+
+    async def _run(self, msg, update, turns, fake_paxyo):
+        # Turns are (text, intent-or-None): an intent is only
+        # consumed when the turn reaches the classifier, so a turn
+        # answered before it (price, invite link, support, a code)
+        # passes None and the intents stay aligned to the calls.
+        intents = [intent for _, intent in turns if intent is not None]
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(side_effect=intents),
+        ), mock.patch("bot.paxyo", fake_paxyo), mock.patch(
+            "bot.speak_reply"
+        ):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+
+    async def _probe(self, setup, setup_check, probe_text,
+                     probe_intent, probe_check, paxyo=None,
+                     user=None, resume=True):
+        # Three phases on one message, so text_sent accumulates in
+        # order: the setup turns (setup check asserts the draft/card
+        # state right then), the probe turn (probe check asserts the
+        # parked state right then — a later resume restores PARTIAL
+        # and a new card, so those must not be asserted afterwards),
+        # then the "order" resume turn.
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        fake_paxyo = paxyo or FakePaxyo()
+        self._uid = update.effective_user.id
+        await self._run(msg, update, setup, fake_paxyo)
+        setup_check(msg)
+        await self._run(msg, update, [(probe_text, probe_intent)],
+                        fake_paxyo)
+        probe_check(msg)
+        if resume:
+            await self._run(msg, update, [("order", None)], fake_paxyo)
+        return msg, fake_paxyo
+
+    def _link_step(self):
+        return [("I want tiktok views", intent_of(
+            "order", platform="tiktok", service_hint="views"))]
+
+    def _qty_step(self):
+        return [("I want tiktok views for " + self.LINK, intent_of(
+            "order", platform="tiktok", service_hint="views",
+            link=self.LINK))]
+
+    def _card(self):
+        return [(
+            "I want 1000 tiktok views for " + self.LINK, intent_of(
+                "order", platform="tiktok", service_hint="views",
+                link=self.LINK, quantity=1000))]
+
+    def _assert_setup_link_step(self, msg):
+        self.assertIn("send the link", msg.text_sent[0].lower())
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
+
+    def _assert_setup_qty_step(self, msg):
+        self.assertIn("How many", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1].get("link"), self.LINK)
+
+    def _assert_setup_card(self, msg):
+        self.assertIn("18.90", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    def _assert_parked(self, msg):
+        # Right after the probe turn (before any resume): the
+        # parked line was sent first, the draft left PARTIAL, and
+        # the parked copy keeps the order's pieces.
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[1].lower())
+        self.assertEqual(bot.PARTIAL.get(self._uid), None)
+        self.assertIn(self._uid, bot.PARKED_DRAFT)
+
+    def _assert_parked_qty(self, msg):
+        self._assert_parked(msg)
+        self.assertEqual(
+            bot.PARKED_DRAFT[self._uid].get("link"), self.LINK)
+
+    def _assert_parked_card(self, msg):
+        # The Confirm card moved back to a draft and was parked:
+        # no card is pending any more, and the parked copy keeps
+        # the link and the quantity.
+        self._assert_parked(msg)
+        self.assertEqual(len(bot.PENDING), 0)
+        self.assertEqual(
+            bot.PARKED_DRAFT[self._uid].get("link"), self.LINK)
+        self.assertEqual(
+            bot.PARKED_DRAFT[self._uid].get("quantity"), 1000)
+
+    # -- link step ---------------------------------------------------
+
+    async def test_balance_mid_order_link_step(self):
+        msg, _ = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "what is my balance", intent_of("balance"),
+            self._assert_parked)
+        self.assertIn("Balance:", msg.text_sent[2])
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_orders_mid_order_link_step(self):
+        msg, _ = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "show me my orders", intent_of("orders"),
+            self._assert_parked,
+            paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER]))
+        self.assertIn("1827", msg.text_sent[2])
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_price_mid_order_link_step(self):
+        msg, _ = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "how much is TikTok views", None, self._assert_parked,
+            paxyo=TikTokPaxyo())
+        self.assertIn("18.90", msg.text_sent[2])
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_greeting_mid_order_link_step(self):
+        msg, _ = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "hi", intent_of("greeting"), self._assert_parked)
+        self.assertIn("Hello!", msg.text_sent[2])
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_help_mid_order_link_step(self):
+        msg, _ = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "help", intent_of("help"), self._assert_parked)
+        self.assertIn("How it works:", msg.text_sent[2])
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_invite_link_mid_order_link_step(self):
+        msg, _ = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "my invite link", None, self._assert_parked)
+        self.assertIn("Invite your friends", msg.text_sent[2])
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_support_mid_order_link_step(self):
+        msg, _ = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "I need support", None, self._assert_parked)
+        self.assertIn("t.me/paxyo", msg.text_sent[2])
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_invite_code_mid_order_link_step(self):
+        msg, fake = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            self.FRIEND_CODE, None, self._assert_parked)
+        self.assertIn("You're in!", msg.text_sent[2])
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": self.FRIEND_CODE},
+        ])
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    async def test_promo_code_mid_order_link_step(self):
+        msg, fake = await self._probe(
+            self._link_step(), self._assert_setup_link_step,
+            "PAXYO20", None, self._assert_parked,
+            paxyo=FakePaxyo(promo_codes=TestPromoCodes.VALID))
+        self.assertIn("Code accepted", msg.text_sent[2])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1],
+            {"code": "PAXYO20", "percent": 20})
+        self.assertIn("send the link", msg.text_sent[-1].lower())
+
+    # -- quantity step -----------------------------------------------
+
+    async def test_balance_mid_order_quantity_step(self):
+        msg, _ = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "what is my balance", intent_of("balance"),
+            self._assert_parked_qty)
+        self.assertIn("Balance:", msg.text_sent[2])
+        self.assertEqual(bot.PARTIAL[1].get("link"), self.LINK)
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_orders_mid_order_quantity_step(self):
+        msg, _ = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "show me my orders", intent_of("orders"),
+            self._assert_parked_qty,
+            paxyo=FakePaxyo(recent=[FakePaxyo.RECENT_ORDER]))
+        self.assertIn("1827", msg.text_sent[2])
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_price_mid_order_quantity_step(self):
+        msg, _ = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "how much is TikTok views", None, self._assert_parked_qty,
+            paxyo=TikTokPaxyo())
+        self.assertIn("18.90", msg.text_sent[2])
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_greeting_mid_order_quantity_step(self):
+        msg, _ = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "hi", intent_of("greeting"), self._assert_parked_qty)
+        self.assertIn("Hello!", msg.text_sent[2])
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_help_mid_order_quantity_step(self):
+        msg, _ = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "help", intent_of("help"), self._assert_parked_qty)
+        self.assertIn("How it works:", msg.text_sent[2])
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_invite_link_mid_order_quantity_step(self):
+        msg, _ = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "my invite link", None, self._assert_parked_qty)
+        self.assertIn("Invite your friends", msg.text_sent[2])
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_support_mid_order_quantity_step(self):
+        msg, _ = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "I need support", None, self._assert_parked_qty)
+        self.assertIn("t.me/paxyo", msg.text_sent[2])
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_invite_code_mid_order_quantity_step(self):
+        msg, fake = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            self.FRIEND_CODE, None, self._assert_parked_qty)
+        self.assertIn("You're in!", msg.text_sent[2])
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": self.FRIEND_CODE},
+        ])
+        self.assertEqual(bot.PARTIAL[1].get("link"), self.LINK)
+        self.assertIn("How many", msg.text_sent[-1])
+
+    async def test_promo_code_mid_order_quantity_step(self):
+        msg, fake = await self._probe(
+            self._qty_step(), self._assert_setup_qty_step,
+            "PAXYO20", None, self._assert_parked_qty,
+            paxyo=FakePaxyo(promo_codes=TestPromoCodes.VALID))
+        self.assertIn("Code accepted", msg.text_sent[2])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1],
+            {"code": "PAXYO20", "percent": 20})
+        self.assertIn("How many", msg.text_sent[-1])
+
+    # -- Confirm card pending ----------------------------------------
+
+    async def test_balance_mid_order_card_pending(self):
+        msg, _ = await self._probe(
+            self._card(), self._assert_setup_card,
+            "what is my balance", intent_of("balance"),
+            self._assert_parked_card, paxyo=TikTokPaxyo())
+        self.assertIn("Balance:", msg.text_sent[2])
+        # "order" rebuilds the Confirm card.
+        self.assertIn("18.90", msg.text_sent[-1])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_invite_code_mid_order_card_pending(self):
+        msg, fake = await self._probe(
+            self._card(), self._assert_setup_card,
+            self.FRIEND_CODE, None, self._assert_parked_card,
+            paxyo=TikTokPaxyo())
+        self.assertIn("You're in!", msg.text_sent[2])
+        self.assertEqual(fake.referrals_recorded, [
+            {"telegram_id": 1, "code": self.FRIEND_CODE},
+        ])
+        self.assertIn("18.90", msg.text_sent[-1])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_promo_code_mid_order_card_pending(self):
+        msg, fake = await self._probe(
+            self._card(), self._assert_setup_card,
+            "PAXYO20", None, self._assert_parked_card,
+            paxyo=TikTokPaxyo(promo_codes=TestPromoCodes.VALID))
+        self.assertIn("Code accepted", msg.text_sent[2])
+        self.assertEqual(
+            bot.VALIDATED_PROMO[1],
+            {"code": "PAXYO20", "percent": 20})
+        self.assertIn("18.90", msg.text_sent[-1])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_own_code_mid_order_card_pending(self):
+        msg, fake = await self._probe(
+            self._card(), self._assert_setup_card,
+            "REFCVTYSVA3", None, self._assert_parked_card,
+            paxyo=TikTokPaxyo(), user=FakeUser(user_id=self.WILLIAM),
+            resume=False)
+        self.assertEqual(
+            msg.text_sent[2],
+            "That's your own code — share it with a friend instead.")
+        self.assertEqual(fake.referrals_recorded, [])
+
+    async def test_invalid_code_mid_order_card_pending(self):
+        msg, fake = await self._probe(
+            self._card(), self._assert_setup_card,
+            "REF21I3V91C", None, self._assert_parked_card,
+            paxyo=TikTokPaxyo(), resume=False)
+        self.assertEqual(
+            msg.text_sent[2],
+            "I don't recognise that code — check it and try again.")
+        self.assertEqual(fake.referrals_recorded, [])
 
 
 if __name__ == "__main__":

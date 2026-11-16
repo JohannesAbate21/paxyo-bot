@@ -9032,6 +9032,52 @@ def _resume_parked_draft(user_id: int):
         return None
     PARTIAL[user_id] = draft
     return draft
+
+
+async def _park_open_order(update, user_id: int) -> bool:
+    """Park the order open for this user so a side message can be
+    answered without hijacking it (mid-order understanding, 16 Nov
+    2026): a Confirm card moves back to a PARTIAL draft (same
+    fields the link-check refusal restores, plus the good link,
+    drip span and deadline) and its card is dropped so its buttons
+    cannot place the old service, then the draft is parked; a
+    half-built draft is parked as-is. Returns True when an order
+    draft or card was parked. Other flows (deposit, delayed,
+    recurring, split, budget) are left untouched — the reply does
+    not consume them, so the user's next message continues them."""
+    _cid, _pending = pending_for_user(user_id)
+    if _pending is not None:
+        _platform, _hint = _platform_hint_of_service(
+            _pending.get("service") or {}
+        )
+        PARTIAL[user_id] = {
+            k: v for k, v in {
+                "platform": _pending.get("platform") or _platform,
+                "service_hint": _pending.get("service_hint") or _hint,
+                "reaction_emoji": _pending.get("reaction_emoji"),
+                "link": _pending.get("link"),
+                "quantity": _pending.get("quantity"),
+                "deadline": _pending.get("deadline"),
+                "drip_span": (_pending.get("drip") or {}).get("span_min"),
+            }.items() if v is not None
+        }
+        PENDING.pop(_cid, None)
+        await drop_pending_card(update, _pending)
+    return _park_order_draft(user_id)
+
+
+async def _park_order_and_note(update, user_id: int, lang: str,
+                               voice=False) -> bool:
+    """Park the open order (see _park_open_order) and tell the user
+    in one short line when something was parked. Returns True when
+    something was parked. The parked line goes first; the caller's
+    own reply follows (flow-switch shape, like the Deposit tap)."""
+    if await _park_open_order(update, user_id):
+        await reply_message(
+            update.message, t("draft_parked", lang), lang, voice=voice,
+        )
+        return True
+    return False
 # Abandoned-order nudge (feature 4, 15 Nov 2026): a half-built
 # NORMAL order draft (PARTIAL) whose owner goes quiet for ~30
 # minutes gets ONE nudge with a Resume button. telegram_id ->
@@ -20842,6 +20888,26 @@ def _promo_busy(user_id: int) -> bool:
             return True
     return False
 
+# Intents that are side questions, not order input (mid-order
+# understanding, 16 Nov 2026): a message with one of these intents
+# typed while an order is open is answered by its normal branch,
+# and the open order is parked first (see the guard before the
+# conversational-intent branches). Deliberately NOT here: order
+# input (order, delayed_order, recurring, batch, change_order,
+# refill, split_payment, budget, usual, goal, max_for_balance,
+# discount, free_sample, price_pushback, safety, refund_policy,
+# geo_target, content_help), cancel (it drops the draft),
+# deposit (its flow parks already), and free chat (off_topic /
+# unclear — it keeps the draft by design, and "unclear" feeds the
+# order-flow tail). paxyo_info / how_to stay out too: their
+# answers can be about the order being built, so the draft stays.
+_SIDE_QUESTION_INTENTS = frozenset((
+    "settings", "balance", "orders", "deposit_status", "help",
+    "how_to_order", "miniapp", "social", "invite", "greeting",
+    "source_question", "reseller", "contact", "paused_services",
+    "support_issue",
+))
+
 
 def is_promo_decline(text: str) -> bool:
     """True when the message declines the open promo-code question
@@ -20952,9 +21018,11 @@ async def handle_invite_code_text(update, text: str, lang: str, voice=False) -> 
     """In-chat invite codes (both-sides referral bonus, 16 Nov
     2026): a user types a friend's invite code in the chat. True
     when the message carried an invite code and has been answered;
-    False when it was not a code at all, or a draft/Confirm card is
-    open (the code must not hijack it — same guard as the promo
-    branch). Runs BEFORE the promo branch: a REF code is
+    False when it was not a code at all. A code typed while an
+    order is open is understood, not swallowed as the link
+    (live bug, 22:45 EAT 16 Nov 2026): the open order is parked
+    first (saved, resumable with "order"). Runs BEFORE the promo
+    branch: a REF code is
     promo-shaped, and typing one must NEVER show the invite-friends
     card — that card is only for \"my invite link\" requests (live
     bug, 19:27 EAT 16 Nov 2026: typing REFCVTYSVA3 showed the card
@@ -20965,11 +21033,14 @@ async def handle_invite_code_text(update, text: str, lang: str, voice=False) -> 
     gets an honest \"try again later\", never a false confirmation.
     """
     user = update.effective_user
-    if _promo_busy(user.id):
-        return False
     code = extract_invite_code(text)
     if code is None:
         return False
+    # Mid-order understanding (16 Nov 2026): a code typed while an
+    # order is open is understood, not swallowed as the link — the
+    # open order is parked first (saved, resumable with "order")
+    # and the code is answered normally.
+    await _park_order_and_note(update, user.id, lang, voice=voice)
     # Own code: checked locally — no server call, exact by derivation.
     if code == user_invite_code(user.id):
         await reply_message(
@@ -21053,24 +21124,25 @@ async def handle_promo_text(update, text: str, lang: str, voice=False) -> bool:
     """The promo-code branch of handle_order_text: True when the
     message was a promo code (or a question about one) and has been
     answered, False when it was not a code at all. Runs before the
-    classifier, with the other deterministic local guards — but
-    only when nothing is being built and no Confirm card is
-    pending, so a code typed mid-order or mid-deposit never hijacks
-    that draft. A REF token never reaches here: the invite-code
-    handler above already answered it (or left it alone while busy)
-    — a typed invite code is registered, never shown the
-    invite-friends card and never validated as a promo code."""
+    classifier, with the other deterministic local guards. A code
+    typed while an order is open is understood, not swallowed as
+    the link (mid-order understanding, 16 Nov 2026): the open
+    order is parked first (saved, resumable with "order"). A REF
+    token never reaches here: the invite-code handler above already
+    answered it — a typed invite code is registered, never shown
+    the invite-friends card and never validated as a promo code."""
     user = update.effective_user
-    if _promo_busy(user.id):
-        return False
     code = extract_promo_code(text)
+    offer = extract_promo_offer(text)
+    if code is None and offer is None:
+        return False
+    await _park_order_and_note(update, user.id, lang, voice=voice)
     if code is not None:
         # A fresh code supersedes any pending "Is this a promo
         # code?" question — the user just gave the real one.
         PROMO_OFFER.pop(user.id, None)
         await handle_promo_code(update, code, lang, voice=voice)
         return True
-    offer = extract_promo_offer(text)
     if offer is not None:
         PROMO_OFFER[user.id] = offer
         await reply_message(
@@ -25632,6 +25704,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # anything else: a settings command never leaks into an order,
     # and the parser never matches an order message.
     if await handle_settings_text(update.message, user.id, text, lang, voice):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         return
 
     # Declining the Friday offer by typing "no" / "not today"
@@ -25803,11 +25876,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # supplier. Both answers are one short line with the contact,
     # so asking again just repeats it.
     if intent is None and is_reseller_request(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await reply_message(
             update.message, t("reseller_contact", lang), lang, voice=voice
         )
         return
     if intent is None and is_contact_request(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await reply_message(
             update.message, t("contact_owner", lang), lang, voice=voice
         )
@@ -25819,6 +25894,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # not become a generic chat reply or an order. One short line,
     # no date, no price, never a social-media service instead.
     if intent is None and is_paused_services_request(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await reply_message(
             update.message, t("paused_services", lang), lang, voice=voice
         )
@@ -26199,6 +26275,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # — deterministic, before the classifier, so it is never read
     # as an order for the first service on the list.
     if intent is None and is_browse_services_request(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await handle_browse_services(update, text, lang, voice=voice)
         return
 
@@ -26206,6 +26283,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # them: deflect at once, without calling Gemini. Skipped when the
     # intent was injected by the photo handler (already classified).
     if intent is None and is_source_question(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await reply_message(update.message, t("source_question", lang), lang, voice=voice)
         return
 
@@ -26214,6 +26292,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # otherwise guess the rule or the percentage. A 404 answers
     # honestly that the bonus isn't switched on yet.
     if intent is None and is_loyalty_question(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await reply_message(
             update.message,
             await loyalty_answer_text(
@@ -26277,8 +26356,19 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # which may resolve it from the AI's intent instead.
     if intent is None and is_price_question(text):
         _local = local_intent(text)
+        # Mid-order understanding (16 Nov 2026): only a draft
+        # that was ALREADY open gets parked. price_answer_text
+        # remembers the question itself as a draft (_remember_
+        # price_question), and that just-created memory is not an
+        # unfinished order — parking it would tell the user an
+        # order was saved when none was being built.
+        _had_draft = bool(PARTIAL.get(user.id)) or (
+            pending_for_user(user.id)[1] is not None
+        )
         price = await price_answer_text(user.id, text, _local, lang)
         if price is not None:
+            if _had_draft:
+                await _park_order_and_note(update, user.id, lang, voice=voice)
             await reply_message(update.message, price, lang, voice=voice)
             return
     # How to get a Telegram post link: a deterministic answer,
@@ -26286,6 +26376,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # getting the steps wrong, and the free answer was
     # desktop-flavoured). Never a free AI reply for this one.
     if intent is None and is_telegram_post_link_question(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await reply_message(
             update.message, t("telegram_post_link", lang), lang,
             voice=voice,
@@ -26310,6 +26401,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Check my post (ideas batch 2 #2, 16 Nov 2026): a link plus a
     # check word is a check, not an order — no draft is started.
     if is_post_check_request(text):
+        await _park_order_and_note(update, user.id, lang, voice=voice)
         await handle_post_check(update, text, lang, voice=voice)
         return
     # `intent` is injected by the photo handler (a picture's link is
@@ -26416,8 +26508,16 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # gate let the classifier decide whether a price question got
     # its price at all).
     if is_price_question(text):
+        # Same draft snapshot as the fast path above: only a draft
+        # that was already open gets parked, never the memory the
+        # price computation itself just wrote.
+        _had_draft = bool(PARTIAL.get(user.id)) or (
+            pending_for_user(user.id)[1] is not None
+        )
         price = await price_answer_text(user.id, text, intent, lang)
         if price is not None:
+            if _had_draft:
+                await _park_order_and_note(update, user.id, lang, voice=voice)
             await reply_message(update.message, price, lang, voice=voice)
             return
     if is_ban_question(text):
@@ -26520,6 +26620,18 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     lang, voice=voice,
                 )
                 return
+
+    # Mid-order side questions (16 Nov 2026, widened scope): a
+    # balance / orders / help / greeting / ... question typed while
+    # an order is open is answered by its normal branch below —
+    # but first the open order is parked, so the answer never
+    # hijacks it and "order" resumes it afterwards. The round-5
+    # direct answers above already ran with the draft intact
+    # (order questions, price, terms), and the Friday offer gate
+    # already refused while a draft is open — this guard only
+    # covers the side-question intents listed above.
+    if intent_type in _SIDE_QUESTION_INTENTS:
+        await _park_order_and_note(update, user.id, lang, voice=voice)
 
     # --- conversational intents: answered before the order flow ---
     if intent_type == "cancel":
@@ -26967,8 +27079,10 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # mid-deposit is NONE of those (ideas batch 2, feature 1, 15 Nov
     # 2026): "PAXYO20" carries the number 20, and without this guard
     # parse_deposit_amount would silently rewrite the amount the user
-    # already gave — the draft is left exactly as it was, and the
-    # code itself is only read when no draft is open.
+    # already gave — the draft is left exactly as it was. The code
+    # itself is answered by handle_promo_text before the classifier
+    # (mid-order understanding, 16 Nov 2026), so it never reaches
+    # this branch at all.
     # Deposit-hijack fix (16 Nov 2026): a bare number also counts
     # when the classifier called it an "order" — while the deposit
     # flow is asking for an amount, a number IS the deposit amount
