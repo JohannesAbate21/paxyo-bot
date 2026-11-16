@@ -230,9 +230,9 @@ function can_cancel_reply($row) {
 // --- provider calls (ADAPTER — see A2/A3/A4; one spot to fix) ---------------
 
 function can_provider_key() {
-    // TO VERIFY (A3): keep only the constant bot.php actually uses
-    // for the provider key when placing orders; delete the rest.
-    foreach (['GODOPANEL_API_KEY', 'GOD_OF_PANEL_API_KEY', 'PROVIDER_API_KEY', 'PANEL_API_KEY'] as $name) {
+    // VERIFIED 16 Nov 2026: bot.php uses GOP_API_KEY (config_secret.php
+    // line 18, loaded via db.php); checked first, the rest are fallbacks.
+    foreach (['GOP_API_KEY', 'GODOPANEL_API_KEY', 'GOD_OF_PANEL_API_KEY', 'PROVIDER_API_KEY', 'PANEL_API_KEY'] as $name) {
         if (defined($name) && constant($name) !== '') return (string)constant($name);
     }
     $env = getenv('GODOFPANEL_API_KEY');
@@ -241,6 +241,7 @@ function can_provider_key() {
 }
 
 function can_provider_base() {
+    if (defined('GOP_API_URL') && GOP_API_URL !== '') return rtrim(GOP_API_URL, '/');
     if (defined('GODOPANEL_API_URL') && GODOPANEL_API_URL !== '') return rtrim(GODOPANEL_API_URL, '/');
     $env = getenv('GODOFPANEL_API_URL');
     if ($env !== false && $env !== '') return rtrim($env, '/');

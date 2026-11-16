@@ -270,9 +270,10 @@ function frf_has_refund_row($db, $order_id) {
 }
 
 // --- GodOfPanel status read -------------------------------------------
-// ADAPTER (A2/A3): keep only the constant bot.php actually uses.
+// ADAPTER (A2/A3): VERIFIED 16 Nov 2026 — bot.php uses GOP_API_KEY
+// (config_secret.php line 18, loaded via db.php); checked first.
 function frf_gop_key() {
-    foreach (['GODOPANEL_API_KEY', 'GOD_OF_PANEL_API_KEY',
+    foreach (['GOP_API_KEY', 'GODOPANEL_API_KEY', 'GOD_OF_PANEL_API_KEY',
               'PROVIDER_API_KEY', 'PANEL_API_KEY'] as $name) {
         if (defined($name) && constant($name) !== '') {
             return (string)constant($name);

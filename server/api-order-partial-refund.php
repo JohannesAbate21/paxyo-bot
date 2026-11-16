@@ -220,7 +220,7 @@ function par_partial_reply($row) {
 // --- provider calls (ADAPTER — see A3/A4/A5; one spot to fix) ---------------
 
 function par_provider_key() {
-    foreach (['GODOPANEL_API_KEY', 'GOD_OF_PANEL_API_KEY', 'PROVIDER_API_KEY', 'PANEL_API_KEY'] as $name) {
+    foreach (['GOP_API_KEY', 'GODOPANEL_API_KEY', 'GOD_OF_PANEL_API_KEY', 'PROVIDER_API_KEY', 'PANEL_API_KEY'] as $name) {
         if (defined($name) && constant($name) !== '') return (string)constant($name);
     }
     $env = getenv('GODOFPANEL_API_KEY');
@@ -229,6 +229,7 @@ function par_provider_key() {
 }
 
 function par_provider_base() {
+    if (defined('GOP_API_URL') && GOP_API_URL !== '') return rtrim(GOP_API_URL, '/');
     if (defined('GODOPANEL_API_URL') && GODOPANEL_API_URL !== '') return rtrim(GODOPANEL_API_URL, '/');
     $env = getenv('GODOFPANEL_API_URL');
     if ($env !== false && $env !== '') return rtrim($env, '/');
