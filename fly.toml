@@ -1,0 +1,29 @@
+# Fly.io config for the Paxyo Order bot (@paxorder_bot).
+# ONE machine only, shared-cpu-1x 512 MB, US region (iad) — about
+# $3.69/month, waived to $0 while the bill stays under $5.
+# No volume, no database, no dedicated IP, no second machine.
+# The bot is a webhook worker: it must stay awake, so the machine
+# never auto-stops (auto_stop_machines = "off", min_machines_running = 1).
+app = "paxorder-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  PAXYO_API_BASE = "https://paxyo.et/api/bot"
+  GEMINI_MODEL = "gemini-3.5-flash"
+
+[[http_service]]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["app"]
