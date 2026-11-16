@@ -109,7 +109,7 @@
 //     milestone, from Paxyo's margin (the same economics as the
 //     referral bonus).
 //   - STATUS: only orders with status exactly 'completed' count.
-//     This matches api-admin-stats.php (SUM(total) WHERE status =
+//     This matches api-admin-stats.php (SUM(charge) WHERE status =
 //     'completed') and api-order-ratings.php ("only status
 //     'completed' counts as finished"). api-order-rescue.php ALSO
 //     treats 'complete' / 'success' / 'paid' as finished spellings

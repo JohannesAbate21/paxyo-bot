@@ -12,7 +12,7 @@
 //        Top 10 by profit, all time. Profit and revenue come from
 //        COMPLETED orders only (a placed-but-unfinished order has
 //        earned nothing yet), using the same economics as the
-//        admin-stats endpoint: revenue = SUM(total) of completed
+//        admin-stats endpoint: revenue = SUM(charge) of completed
 //        orders, profit = revenue x 220/420 (the owner buys 1 USD
 //        for 200 ETB and sells at 420 ETB — see A2). Because the
 //        margin is uniform across services (every service sells at
@@ -185,7 +185,7 @@ function bot_prf_profitable() {
         ? ', MAX(service_name) AS svc_name'
         : '';
 
-    $sql = "SELECT `$svc_col` AS svc, COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue, $qty_expr AS quantity $name_expr "
+    $sql = "SELECT `$svc_col` AS svc, COUNT(*) AS orders, COALESCE(SUM(charge), 0) AS revenue, $qty_expr AS quantity $name_expr "
         . "FROM orders WHERE status = 'completed' GROUP BY `$svc_col` ORDER BY revenue DESC LIMIT 10";
     try {
         $res = $db->query($sql);
@@ -225,6 +225,6 @@ function bot_prf_profitable() {
 //      orders, quantity, revenue_etb, profit_etb}, ...]} with at most
 //      10 rows, ordered by profit_etb descending. Cross-check one
 //      row against the admin panel: its revenue_etb must equal the
-//      SUM(total) of that service's completed orders, and its
+//      SUM(charge) of that service's completed orders, and its
 //      profit_etb must equal revenue_etb x 220/420 (rounded to 2dp).
 // ============================================================================

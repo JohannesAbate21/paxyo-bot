@@ -66,7 +66,7 @@
 //   * orders       = orders PLACED today (created_at inside today
 //                    EAT), any status.
 //   * completed    = orders with status 'completed' created today.
-//   * revenue_etb  = SUM(total) of the completed orders today.
+//   * revenue_etb  = SUM(charge) of the completed orders today.
 //   * new_users    = auth rows created today.
 //   * top_service  = name of the most-ordered service today, and
 //                    top_quantity = total quantity ordered of it
@@ -465,7 +465,7 @@ function bot_admin_stats() {
     // Gross revenue today: sum of totals of completed orders only.
     $revenue = (float)adm_scalar(
         $db,
-        "SELECT COALESCE(SUM(total), 0) FROM orders WHERE status = 'completed' AND created_at >= ? AND created_at < ?",
+        "SELECT COALESCE(SUM(charge), 0) FROM orders WHERE status = 'completed' AND created_at >= ? AND created_at < ?",
         'ss', [$start, $end], 0
     );
 

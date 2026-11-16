@@ -16,7 +16,7 @@
 //        "last week" is the week before it. users = auth rows created
 //        in the week; orders = orders placed in the week (any status);
 //        completed = orders with status 'completed' in the week;
-//        revenue_etb = SUM(total) of completed orders in the week
+//        revenue_etb = SUM(charge) of completed orders in the week
 //        (same definition as admin-stats); net_profit_etb = revenue
 //        x 220/420 (same economics as admin-stats — see A2);
 //        deposits_count / deposits_etb = completed deposits in the
@@ -208,7 +208,7 @@ function wkl_week_figures($db, $win) {
     );
     $revenue = (float)wkl_scalar(
         $db,
-        "SELECT COALESCE(SUM(total), 0) FROM orders WHERE status = 'completed' AND created_at >= ? AND created_at < ?",
+        "SELECT COALESCE(SUM(charge), 0) FROM orders WHERE status = 'completed' AND created_at >= ? AND created_at < ?",
         'ss', [$start, $end], 0
     );
     $users = 0;
@@ -339,7 +339,7 @@ function bot_wkl_weekly_sent() {
 //      "changes":{...}}. Cross-check one figure against the admin
 //      panel: this_week.orders must equal the orders placed since
 //      Monday 00:00 EAT, and this_week.revenue_etb must equal the
-//      SUM(total) of this week's completed orders.
+//      SUM(charge) of this week's completed orders.
 //   # 2. The sent marker for a PAST Monday (e.g. 2026-11-09):
 //   curl -s "https://paxyo.et/api/bot/admin/weekly-sent?date=2026-11-09" \
 //     -H "X-Bot-Secret: $S"
