@@ -22,9 +22,14 @@
 //     -> NOT an endpoint. Call it from the first-deposit credit
 //        point (see "BONUS HOOK" below). On a user's FIRST completed
 //        deposit it credits 20% of that deposit to the REFERRER's
-//        Paxyo balance, once only. It must run INSIDE the same
-//        database transaction as the deposit credit, so a rollback
-//        undoes the bonus too.
+//        Paxyo balance AND 20% to the referred user (the invitee)
+//        themselves, once only, each side guarded by its own paid
+//        flag (bonus_paid / invitee_bonus_paid). The shared code
+//        (referrer 0) pays the invitee only — there is no referrer
+//        to pay. It must run INSIDE the same database transaction as
+//        the deposit credit, so a rollback undoes the bonuses too.
+//        Both sides confirmed by William, 19:27 EAT 16 Nov 2026
+//        (was referrer-only before; open question (b) below).
 //
 // TABLES (created automatically on first call, utf8mb4):
 //   bot_referrals  id AUTO_INCREMENT PK, referrer_telegram_id BIGINT
@@ -34,7 +39,15 @@
 //                  VARCHAR(16), bonus_paid TINYINT DEFAULT 0,
 //                  bonus_amount DECIMAL(12,2) NULL,
 //                  bonus_deposit_id INT NULL,
-//                  bonus_paid_at TIMESTAMP NULL, created_at.
+//                  bonus_paid_at TIMESTAMP NULL,
+//                  invitee_bonus_paid TINYINT DEFAULT 0,
+//                  invitee_bonus_amount DECIMAL(12,2) NULL,
+//                  invitee_bonus_deposit_id INT NULL,
+//                  invitee_bonus_paid_at TIMESTAMP NULL, created_at.
+//                  (The invitee_* columns were added 16 Nov 2026 for
+//                  the both-sides bonus; ref_ensure_tables() adds
+//                  them to tables created by the older file, so no
+//                  separate migration step is needed.)
 //
 // ---------------------------------------------------------------------------
 // CODE-DERIVATION ALGORITHM — READ THIS FIRST (bot-side builder too)
@@ -145,9 +158,12 @@
 //     already 'completed' at the moment the hook runs. The hook
 //     counts completed deposits excluding the one being credited.
 //   - The bonus is 20% of the referred user's FIRST deposit amount,
-//     rounded to 2 decimals, credited to the REFERRER's auth.balance.
-//     It is Paxyo balance (same as a refund), never cash — the
-//     balance cannot be withdrawn as cash, per the Paxyo terms.
+//     rounded to 2 decimals, credited TWICE: once to the
+//     REFERRER's auth.balance and once to the referred user's own
+//     auth.balance (both sides, 16 Nov 2026). The shared code pays
+//     the invitee only. It is Paxyo balance (same as a refund),
+//     never cash — the balance cannot be withdrawn as cash, per
+//     the Paxyo terms.
 //   - If the referrer's auth row is missing when the hook runs (user
 //     deleted, or a forged code for an id that never signed up), the
 //     bonus is NOT marked paid and NO balance is changed — the row
@@ -163,16 +179,19 @@
 //       available locally. Assume NO bonus is paid today until the
 //       live test below proves the hook works. Do NOT tell users a
 //       bonus is guaranteed until then.
-//   (b) WHO GETS THE 20%? The task for this file says the REFERRER
-//       gets 20% of the referred user's first deposit. But the bot's
-//       current wording ("20% bonus on their first deposit", launch
-//       post "invite your friends with code REF3723FB335 for a 20%
-//       bonus on their first deposit!") reads as if the NEW USER gets
-//       20% extra on their own first deposit. Those are two different
-//       bonuses. This file implements the REFERRER-paid version only.
-//       If William meant the invitee-paid version (or both), that is
-//       a separate hook (credit the referred user +20% at deposit
-//       time) and needs his explicit yes before anyone builds it.
+//   (b) WHO GETS THE 20%? RESOLVED — BOTH (William, 19:27 EAT
+//       16 Nov 2026): on the referred user's FIRST deposit, the
+//       new user gets 20% of their own deposit AND the code owner
+//       gets 20% too. Example: first deposit 100 ETB -> new user
+//       +20 ETB, code owner +20 ETB; Paxyo pays 40 ETB total, once
+//       only, first deposit only. The hook below pays both sides
+//       (invitee side first, referrer side second, each guarded by
+//       its own paid flag). The shared code REF3723FB335 pays the
+//       invitee only — there is no referrer to pay — which is what
+//       the launch post promised ("20% bonus on their first
+//       deposit"). Before 16 Nov 2026 the hook paid the referrer
+//       only; the invitee_* columns and the invitee half were
+//       added then.
 //   (c) ARE THERE OTHER DEPOSIT-CREDIT PATHS BESIDES bot_dep_status()?
 //       The website checkout flow (webhook_handler.php and/or
 //       recheck_deposit.php) may credit balances independently of the
@@ -313,10 +332,38 @@ function ref_ensure_tables($db) {
         bonus_amount DECIMAL(12,2) NULL,
         bonus_deposit_id INT NULL,
         bonus_paid_at TIMESTAMP NULL,
+        invitee_bonus_paid TINYINT(1) NOT NULL DEFAULT 0,
+        invitee_bonus_amount DECIMAL(12,2) NULL,
+        invitee_bonus_deposit_id INT NULL,
+        invitee_bonus_paid_at TIMESTAMP NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uq_ref_referred (referred_telegram_id),
         INDEX idx_ref_referrer (referrer_telegram_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    // Both-sides bonus (16 Nov 2026): tables created by the older
+    // file lack the invitee_* columns — add them in place (same
+    // SHOW COLUMNS pattern as api-order-dripfeed.php). No separate
+    // migration step: the first call after install fixes the table.
+    $have = [];
+    $res = $db->query('SHOW COLUMNS FROM bot_referrals');
+    if ($res) {
+        while ($row = $res->fetch_assoc()) {
+            $have[strtolower((string)$row['Field'])] = true;
+        }
+        $res->close();
+    }
+    if (empty($have['invitee_bonus_paid'])) {
+        $db->query('ALTER TABLE bot_referrals ADD COLUMN invitee_bonus_paid TINYINT(1) NOT NULL DEFAULT 0');
+    }
+    if (empty($have['invitee_bonus_amount'])) {
+        $db->query('ALTER TABLE bot_referrals ADD COLUMN invitee_bonus_amount DECIMAL(12,2) NULL');
+    }
+    if (empty($have['invitee_bonus_deposit_id'])) {
+        $db->query('ALTER TABLE bot_referrals ADD COLUMN invitee_bonus_deposit_id INT NULL');
+    }
+    if (empty($have['invitee_bonus_paid_at'])) {
+        $db->query('ALTER TABLE bot_referrals ADD COLUMN invitee_bonus_paid_at TIMESTAMP NULL');
+    }
 }
 
 function ref_row($row) {
@@ -459,16 +506,66 @@ function bot_ref_stats() {
 // MUST be called INSIDE the deposit-credit transaction, AFTER the
 // deposit row is marked 'completed' and the depositor's own balance
 // is credited, BEFORE commit. See "BONUS HOOK" in the header.
-// Returns ['paid'=>bool, 'bonus'=>float, 'referrer'=>int, 'reason'=>string].
+// BOTH SIDES (William, 19:27 EAT 16 Nov 2026): on a referred
+// user's FIRST completed deposit, the invitee gets +20% of their own
+// deposit AND the referrer gets +20% of it. The two sides are
+// independent: each is guarded by its own paid flag, so a retry
+// after a partial failure pays only the side that is still unpaid,
+// and a second deposit pays nothing. The shared code (referrer 0)
+// pays the invitee only — there is no referrer to pay.
+// Returns ['paid'=>bool (referrer paid, legacy key), 'bonus'=>float,
+// 'referrer'=>int, 'referrer_paid'=>bool, 'referrer_bonus'=>float,
+// 'invitee_paid'=>bool, 'invitee_bonus'=>float, 'reason'=>string].
 // It never throws for a missing referral / missing referrer — those
 // are normal "no bonus due" outcomes, not errors.
+
+function ref_credit_bonus_side($db, $referred_id, $tg_id, $bonus, $deposit_id,
+    $flag_col, $amount_col, $dep_col, $at_col) {
+    // Credit $bonus to $tg_id's Paxyo balance and mark this side paid
+    // for the referral row. Returns true only when BOTH landed; a
+    // credit whose flag could not be set is reversed inside this same
+    // transaction, so no money moves without the flag. The column
+    // names are internal constants from the caller, never user input.
+    // A missing auth row (0-row credit) just returns false and leaves
+    // the side unpaid for reconciliation — it never throws.
+    $stmt = $db->prepare('UPDATE auth SET balance = balance + ? WHERE tg_id = ?');
+    $stmt->bind_param('di', $bonus, $tg_id);
+    $stmt->execute();
+    $credited = $stmt->affected_rows;
+    $stmt->close();
+    if ($credited !== 1) return false;
+    $stmt = $db->prepare("UPDATE bot_referrals SET $flag_col = 1, $amount_col = ?, $dep_col = ?, $at_col = NOW() WHERE referred_telegram_id = ? AND $flag_col = 0");
+    $stmt->bind_param('dii', $bonus, $deposit_id, $referred_id);
+    $stmt->execute();
+    $marked = $stmt->affected_rows;
+    $stmt->close();
+    if ($marked !== 1) {
+        // Near-impossible (the FOR UPDATE lock in the caller
+        // serialises concurrent hook runs for this user), but if it
+        // ever happens the credit must not stand alone: reverse it
+        // inside this same transaction so no money moves without
+        // the flag.
+        $stmt = $db->prepare('UPDATE auth SET balance = balance - ? WHERE tg_id = ?');
+        $stmt->bind_param('di', $bonus, $tg_id);
+        $stmt->execute();
+        $stmt->close();
+        return false;
+    }
+    return true;
+}
 
 function ref_maybe_credit_bonus($db, $telegram_id, $deposit_id, $amount) {
     $telegram_id = (int)$telegram_id;
     $deposit_id = (int)$deposit_id;
     $amount = (float)$amount;
+    $out = [
+        'paid' => false, 'bonus' => 0.0, 'referrer' => 0,
+        'referrer_paid' => false, 'referrer_bonus' => 0.0,
+        'invitee_paid' => false, 'invitee_bonus' => 0.0,
+        'reason' => 'invalid arguments',
+    ];
     if ($telegram_id <= 0 || $deposit_id <= 0 || $amount <= 0) {
-        return ['paid' => false, 'bonus' => 0.0, 'referrer' => 0, 'reason' => 'invalid arguments'];
+        return $out;
     }
 
     // 1. First deposit only: any OTHER completed deposit disqualifies.
@@ -478,8 +575,14 @@ function ref_maybe_credit_bonus($db, $telegram_id, $deposit_id, $amount) {
     $n = (int)($stmt->get_result()->fetch_assoc()['n'] ?? 0);
     $stmt->close();
     if ($n > 0) {
-        return ['paid' => false, 'bonus' => 0.0, 'referrer' => 0, 'reason' => 'not the first deposit'];
+        $out['reason'] = 'not the first deposit';
+        return $out;
     }
+
+    // The invitee_* columns must exist before the row below is read
+    // (a table created by the older file gains them here — cheap,
+    // and this point is only reached on a first deposit).
+    ref_ensure_tables($db);
 
     // 2. Lock the referral row: two concurrent rechecks for the same
     //    deposit cannot both pay. (The caller already holds the
@@ -490,52 +593,64 @@ function ref_maybe_credit_bonus($db, $telegram_id, $deposit_id, $amount) {
     $ref = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     if (!$ref) {
-        return ['paid' => false, 'bonus' => 0.0, 'referrer' => 0, 'reason' => 'no referral recorded'];
+        $out['reason'] = 'no referral recorded';
+        return $out;
     }
     $referrer = (int)$ref['referrer_telegram_id'];
-    if ($referrer <= 0) {
-        return ['paid' => false, 'bonus' => 0.0, 'referrer' => 0, 'reason' => 'shared code — no bonus'];
-    }
-    if ((int)$ref['bonus_paid'] === 1) {
-        return ['paid' => false, 'bonus' => 0.0, 'referrer' => $referrer, 'reason' => 'bonus already paid'];
-    }
+    $out['referrer'] = $referrer;
 
-    // 3. 20% of the first deposit, rounded to 2 decimals.
+    // 3. 20% of the first deposit, rounded to 2 decimals — the same
+    //    amount for both sides.
     $bonus = round($amount * 0.20, 2);
     if ($bonus <= 0) {
-        return ['paid' => false, 'bonus' => 0.0, 'referrer' => $referrer, 'reason' => 'bonus rounds to zero'];
+        $out['reason'] = 'bonus rounds to zero';
+        return $out;
+    }
+    $out['bonus'] = $bonus;
+
+    // 4. Invitee side: +20% of their own first deposit, on top of
+    //    the deposit itself (their auth row exists — the deposit just
+    //    credited it). Runs even for the shared code (referrer 0):
+    //    there is no referrer to pay, but the invitee still gets
+    //    their 20% — the launch post's promise.
+    $invitee_already = ((int)($ref['invitee_bonus_paid'] ?? 0) === 1);
+    if (!$invitee_already) {
+        if (ref_credit_bonus_side($db, $telegram_id, $telegram_id, $bonus, $deposit_id,
+            'invitee_bonus_paid', 'invitee_bonus_amount', 'invitee_bonus_deposit_id', 'invitee_bonus_paid_at')) {
+            $out['invitee_paid'] = true;
+            $out['invitee_bonus'] = $bonus;
+        }
     }
 
-    // 4. Credit the REFERRER's Paxyo balance. If they have no auth
-    //    row, change nothing and leave bonus_paid=0 for reconciliation.
-    $stmt = $db->prepare('UPDATE auth SET balance = balance + ? WHERE tg_id = ?');
-    $stmt->bind_param('di', $bonus, $referrer);
-    $stmt->execute();
-    $credited = $stmt->affected_rows;
-    $stmt->close();
-    if ($credited !== 1) {
-        return ['paid' => false, 'bonus' => $bonus, 'referrer' => $referrer, 'reason' => 'referrer has no account — bonus left unpaid'];
+    // 5. Referrer side: the original 20% (15 Nov 2026). Skipped for
+    //    the shared code (referrer 0: nobody to pay). Runs even when
+    //    the invitee side failed — the two sides are independent,
+    //    and a retry pays only the side still unpaid.
+    $referrer_already = ((int)$ref['bonus_paid'] === 1);
+    if ($referrer > 0 && !$referrer_already) {
+        if (ref_credit_bonus_side($db, $telegram_id, $referrer, $bonus, $deposit_id,
+            'bonus_paid', 'bonus_amount', 'bonus_deposit_id', 'bonus_paid_at')) {
+            $out['referrer_paid'] = true;
+            $out['referrer_bonus'] = $bonus;
+            $out['paid'] = true;
+        }
     }
 
-    // 5. Mark paid — guarded by bonus_paid=0 so a retry can never
-    //    double-pay even if this function is called twice.
-    $stmt = $db->prepare("UPDATE bot_referrals SET bonus_paid = 1, bonus_amount = ?, bonus_deposit_id = ?, bonus_paid_at = NOW() WHERE referred_telegram_id = ? AND bonus_paid = 0");
-    $stmt->bind_param('dii', $bonus, $deposit_id, $telegram_id);
-    $stmt->execute();
-    $marked = $stmt->affected_rows;
-    $stmt->close();
-    if ($marked !== 1) {
-        // Near-impossible (the FOR UPDATE lock above serialises
-        // concurrent hook runs for this user), but if it ever happens
-        // the credit must not stand alone: reverse it inside this
-        // same transaction so no money moves without the flag.
-        $stmt = $db->prepare('UPDATE auth SET balance = balance - ? WHERE tg_id = ?');
-        $stmt->bind_param('di', $bonus, $referrer);
-        $stmt->execute();
-        $stmt->close();
-        return ['paid' => false, 'bonus' => $bonus, 'referrer' => $referrer, 'reason' => 'bonus_paid flag could not be set — credit reversed'];
+    $invitee_done = $out['invitee_paid'] || $invitee_already;
+    $referrer_done = ($referrer <= 0) || $out['referrer_paid'] || $referrer_already;
+    if ($out['invitee_paid'] || $out['referrer_paid']) {
+        $out['reason'] = ($invitee_done && $referrer_done)
+            ? 'ok'
+            : ($invitee_done
+                ? 'invitee paid; referrer bonus could not be credited'
+                : 'referrer paid; invitee bonus could not be credited');
+    } elseif ($invitee_done && $referrer_done) {
+        // A retry after both sides already paid: nothing was due.
+        $out['reason'] = 'bonus already paid';
+    } else {
+        $out['reason'] = 'no bonus could be credited';
     }
-    return ['paid' => true, 'bonus' => $bonus, 'referrer' => $referrer, 'reason' => 'ok'];
+    return $out;
 }
 
 // ============================================================================
@@ -600,14 +715,22 @@ function ref_maybe_credit_bonus($db, $telegram_id, $deposit_id, $amount) {
 //   #    ONLY when William authorises one: after a referred user makes
 //   #    their first deposit and it completes, check:
 //   #      SELECT referrer_telegram_id, bonus_paid, bonus_amount,
-//   #             bonus_deposit_id FROM bot_referrals
+//   #             bonus_deposit_id,
+//   #             invitee_bonus_paid, invitee_bonus_amount,
+//   #             invitee_bonus_deposit_id FROM bot_referrals
 //   #       WHERE referred_telegram_id=<the new user>;
 //   #    -> expect bonus_paid=1, bonus_amount = 20% of the deposit,
-//   #       bonus_deposit_id = that deposit's id; and the referrer's
-//   #       auth.balance increased by exactly that amount. There is NO
-//   #    safe curl-only test for the hook — it only fires on a real
-//   #    completed deposit, by design. Do NOT fake one by hand-editing
-//   #    a deposits row to 'completed': that would credit a balance.
+//   #       bonus_deposit_id = that deposit's id; AND
+//   #       invitee_bonus_paid=1, invitee_bonus_amount = the same
+//   #       20%, invitee_bonus_deposit_id = the same deposit id.
+//   #       Both the referrer's and the new user's auth.balance
+//   #       increased by exactly that amount. A shared-code user
+//   #       (referrer 0) expects invitee_bonus_paid=1 and
+//   #       bonus_paid=0. A SECOND deposit for the same user must
+//   #       change nothing. There is NO safe curl-only test for the
+//   #       hook — it only fires on a real completed deposit, by
+//   #       design. Do NOT fake one by hand-editing a deposits row
+//   #       to 'completed': that would credit a balance.
 //   Then DELETE the test rows and confirm they are gone:
 //   mysql -e "DELETE FROM bot_referrals WHERE referred_telegram_id IN (779060335, 779060336); SELECT COUNT(*) FROM bot_referrals WHERE referred_telegram_id IN (779060335, 779060336);"
 //   (use the same MySQL credentials db.php uses; never print them.)

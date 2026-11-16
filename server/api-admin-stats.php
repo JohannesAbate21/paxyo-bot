@@ -66,7 +66,7 @@
 //   * orders       = orders PLACED today (created_at inside today
 //                    EAT), any status.
 //   * completed    = orders with status 'completed' created today.
-//   * revenue_etb  = SUM(charge) of the completed orders today.
+//   * revenue_etb  = SUM(total) of the completed orders today.
 //   * new_users    = auth rows created today.
 //   * top_service  = name of the most-ordered service today, and
 //                    top_quantity = total quantity ordered of it
@@ -417,6 +417,36 @@ function adm_provider_balance() {
     return (float)$res['balance'];
 }
 
+// --- second-provider balance (cancel-cutting, item 12, 16 Nov 2026) --------
+// The SMM panel's balance, converted to USD (float), or null when it
+// cannot be read. The panel bills in INR, so the reply is
+// {"balance": "73.85", "currency": "INR"}; the conversion uses a
+// fixed approximate rate (95 INR per USD — the panel's own rate
+// drifts a few rupees either way, and the guard only needs to know
+// whether the balance is nearly empty, so an approximate figure is
+// enough; never use this figure for money, only for the $3/$1
+// low-balance thresholds the bot already uses). Reads through
+// smm_provider_raw() from api-order-smm.php when that file is
+// installed (guarded by function_exists — when it is not installed
+// the field is simply omitted, exactly like provider_balance_usd
+// when its provider cannot be reached). Never throws.
+function adm_smm_balance_usd() {
+    if (!function_exists('smm_provider_raw')) return null;
+    try {
+        $res = smm_provider_raw('balance', []);
+    } catch (Throwable $e) {
+        return null;
+    }
+    if (!is_array($res) || !isset($res['balance']) || !is_numeric($res['balance'])) return null;
+    $balance_inr = (float)$res['balance'];
+    // Only convert when the reply is INR (or carries no currency
+    // — the panel bills in INR); a USD reply is already dollars.
+    $currency = strtoupper(trim((string)($res['currency'] ?? 'INR')));
+    if ($currency === 'USD') return round($balance_inr, 2);
+    if ($currency !== 'INR') return null;
+    return round($balance_inr / 95.0, 2);
+}
+
 // --- GET /api/bot/admin/stats ------------------------------------------------
 
 function bot_admin_stats() {
@@ -465,7 +495,7 @@ function bot_admin_stats() {
     // Gross revenue today: sum of totals of completed orders only.
     $revenue = (float)adm_scalar(
         $db,
-        "SELECT COALESCE(SUM(charge), 0) FROM orders WHERE status = 'completed' AND created_at >= ? AND created_at < ?",
+        "SELECT COALESCE(SUM(total), 0) FROM orders WHERE status = 'completed' AND created_at >= ? AND created_at < ?",
         'ss', [$start, $end], 0
     );
 
@@ -586,6 +616,16 @@ function bot_admin_stats() {
     $provider_balance = adm_provider_balance();
     if ($provider_balance !== null) {
         $out['provider_balance_usd'] = round($provider_balance, 2);
+    }
+    // Second provider (cancel-cutting, item 12, 16 Nov 2026): the
+    // bot's balance guard reads smm_balance_usd the same way it
+    // reads provider_balance_usd (same $3/$1 thresholds, same
+    // alert). Omitted when the SMM file is not installed or the
+    // panel cannot be reached — the guard then reads SMM as
+    // healthy rather than blocking orders on a missing number.
+    $smm_balance = adm_smm_balance_usd();
+    if ($smm_balance !== null) {
+        $out['smm_balance_usd'] = round($smm_balance, 2);
     }
     if ($day === 'yesterday') {
         $out['day'] = 'yesterday';

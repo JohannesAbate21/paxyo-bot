@@ -18,11 +18,14 @@
 //   1. A fail-refund row already exists for this order_id -> return
 //      it. (This is what makes a retry / duplicate call safe.)
 //   2. Load the order. It must belong to telegram_id. A completed
-//      order is NEVER touched; an already cancelled / refunded
-//      order gets an honest 409 and no second refund. A stored
-//      status of "failed" is NOT refused here — the live provider
-//      word below is authoritative, and the stored word may be
-//      stale.
+//      order is NEVER touched; an already refunded order, or a
+//      cancelled order that a cancel path already refunded (a row
+//      in bot_order_rescues / bot_order_cancels), gets an honest
+//      409 and no second refund. A stored 'cancelled' with NO such
+//      row is a PROVIDER-cancelled order, never refunded — it may
+//      proceed (cancel-cutting, 16 Nov 2026). A stored status of
+//      "failed" is NOT refused here — the live provider word below
+//      is authoritative, and the stored word may be stale.
 //   3. Read the provider's LIVE status for the provider order id
 //      (GodOfPanel via godofpanel_call() with a direct-call
 //      fallback; SMM via smm_order_status(), guarded by
@@ -56,12 +59,27 @@
 //
 // WHY "failed" ONLY — never "canceled"/"cancelled" from the BOT's
 // side: the bot only calls this endpoint when the WATCH saw the
-// provider word "failed". A user-cancelled order (round-3 cancel
-// feature) is refunded by the cancel endpoint instead, and
-// re-placing it would undo the user's own cancel. A "refunded"
-// order is already refunded. The live-word check here is the
-// second guard: even if the watch was wrong, a provider word of
-// "completed" or "processing" refuses the refund.
+// provider word "failed" (or, since the cancel-cutting build of
+// 16 Nov 2026, "cancelled"/"canceled" from the PROVIDER — see the
+// note below). A user-cancelled order (round-3 cancel feature) is
+// refunded by the cancel endpoint instead, and re-placing it would
+// undo the user's own cancel. A "refunded" order is already
+// refunded. The live-word check here is the second guard: even if
+// the watch was wrong, a provider word of "completed" or
+// "processing" refuses the refund.
+//
+// CANCEL-CUTTING (16 Nov 2026): a PROVIDER-cancelled order IS
+// refundable here now — but ONLY when no refund was already paid
+// for it. The stored status of a bot-cancelled order (stall
+// rescue, auto-cancel) is also 'cancelled', and its refund lives
+// in bot_order_rescues; a user-cancelled order's refund lives in
+// bot_order_cancels. So a stored 'cancelled'/'canceled' is
+// refunded here only when NEITHER table has a row for this order
+// (frf_has_refund_row below); when either has one the order was
+// already refunded and this call 409s, exactly as before. The
+// live-word check (failed / canceled / cancelled) still runs
+// after this, so a stored 'cancelled' whose provider word is
+// anything else still refuses.
 //
 // TABLE (created automatically on first call, utf8mb4):
 //   bot_order_fail_refunds  id AUTO_INCREMENT PK, order_id BIGINT
@@ -226,6 +244,31 @@ function frf_pick($row, $candidates) {
     return null;
 }
 
+// Was this order ALREADY refunded by a cancel path? A bot-requested
+// cancel (stall rescue, auto-cancel) records in bot_order_rescues;
+// a user-requested cancel records in bot_order_cancels (round-3
+// cancel file, api-order-cancel.php — parked, may not be installed).
+// Either row means "already refunded": a stored 'cancelled' order
+// with a row here must never be refunded again. A missing table
+// (file never installed) reads as "no row", never a 500.
+function frf_has_refund_row($db, $order_id) {
+    foreach (['bot_order_rescues', 'bot_order_cancels'] as $table) {
+        try {
+            $stmt = $db->prepare(
+                "SELECT order_id FROM $table WHERE order_id = ? LIMIT 1"
+            );
+            $stmt->bind_param('i', $order_id);
+            $stmt->execute();
+            $found = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if ($found) return true;
+        } catch (Throwable $e) {
+            continue;
+        }
+    }
+    return false;
+}
+
 // --- GodOfPanel status read -------------------------------------------
 // ADAPTER (A2/A3): keep only the constant bot.php actually uses.
 function frf_gop_key() {
@@ -325,7 +368,16 @@ function bot_fail_refund_order($order_id) {
     }
     $status = strtolower(trim((string)($row['status'] ?? '')));
     if (in_array($status, FRF_FINAL_WORDS, true)) {
-        frf_fail(409, 'Order is already ' . $status . ' and cannot be refunded again.');
+        // Cancel-cutting (16 Nov 2026): a stored 'cancelled' /
+        // 'canceled' is refundable ONLY when no cancel path already
+        // refunded it (no bot_order_rescues / bot_order_cancels
+        // row) — that is a provider-cancelled order, never
+        // refunded. Any other final word, or a cancelled order
+        // with a refund row, still 409s.
+        $cancelled_word = in_array($status, ['cancelled', 'canceled'], true);
+        if (!($cancelled_word && !frf_has_refund_row($db, $order_id))) {
+            frf_fail(409, 'Order is already ' . $status . ' and cannot be refunded again.');
+        }
     }
 
     $service_id = (int)(frf_pick($row, ['service_id', 'provider_service_id']) ?? 0);
@@ -395,11 +447,18 @@ function bot_fail_refund_order($order_id) {
     $stmt->close();
     $fresh_status = strtolower(trim((string)($fresh['status'] ?? '')));
     if (!$fresh || in_array($fresh_status, FRF_FINAL_WORDS, true)) {
-        $db->rollback();
-        frf_fail(409, 'Order is no longer refundable (status: ' . ($fresh_status !== '' ? $fresh_status : 'unknown') . '). No refund was made.');
+        // Same provider-cancelled exception as the step-2 check
+        // above: a stored 'cancelled' with no refund row may still
+        // be refunded (the live word was already verified as
+        // failed / canceled / cancelled).
+        $fresh_cancelled = in_array($fresh_status, ['cancelled', 'canceled'], true);
+        if (!($fresh_cancelled && !frf_has_refund_row($db, $order_id))) {
+            $db->rollback();
+            frf_fail(409, 'Order is no longer refundable (status: ' . ($fresh_status !== '' ? $fresh_status : 'unknown') . '). No refund was made.');
+        }
     }
 
-    $stmt = $db->prepare("UPDATE orders SET status = 'refunded' WHERE id = ? AND status IN ('pending','processing','in progress','inprogress','queued','failed')");
+    $stmt = $db->prepare("UPDATE orders SET status = 'refunded' WHERE id = ? AND status IN ('pending','processing','in progress','inprogress','queued','failed','cancelled','canceled')");
     $stmt->bind_param('i', $order_id);
     $stmt->execute();
     $order_changed = $stmt->affected_rows;
