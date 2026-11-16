@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<!--
+  Paxyo deposit popup (owner, 16 Nov 2026): the pre-filled deposit page
+  @paxorder_bot opens INSIDE Telegram as a Web App after the user
+  confirms a deposit in chat. The bot creates the deposit first and
+  passes everything in the URL query — this page NEVER asks for a
+  website login, NEVER holds a secret or API key, and NEVER creates
+  a deposit itself. It only displays the pre-filled summary and opens
+  the Chapa checkout the server returned.
+
+  Install: copy to public_html/deposit-app.html on paxyo.et
+  (https://paxyo.et/deposit-app.html). The bot opens it as
+  DEPOSIT_POPUP_URL; the server sends Chapa's return_url here
+  (?paid=1) after payment.
+
+  Views (?paid=1 shows the success view, anything else the summary):
+  - summary: amount / method / phone / deposit id + "Proceed to payment".
+  - pay: the Chapa checkout inside an iframe, with an always-visible
+    "Open payment page" fallback (Telegram.WebApp.openLink, or a new
+    tab outside Telegram) — a blocked iframe can never leave a dead
+    page, because the fallback is always on screen.
+  - paid: "Payment done" + back-to-chat guidance (the bot's "I paid"
+    recheck credits the balance; this page never claims it directly).
+  - no checkout_url and not paid: open-from-the-bot guidance.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paxyo deposit</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --blue: #3275dd; --ink: #1a1a1a; --muted: #666; --line: #e4e4e4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: var(--ink); background: #fff; }
+  .wrap { max-width: 480px; margin: 0 auto; padding: 20px 16px 32px; }
+  .logo { color: var(--blue); font-weight: 800; font-size: 22px; letter-spacing: .3px; }
+  h1 { font-size: 20px; margin: 18px 0 4px; }
+  p { color: var(--muted); line-height: 1.5; margin: 6px 0; }
+  .amount { font-size: 34px; font-weight: 800; margin: 10px 0 2px; }
+  .amount small { font-size: 16px; font-weight: 600; color: var(--muted); }
+  .rows { border-top: 1px solid var(--line); margin: 16px 0; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .row .k { color: var(--muted); }
+  .row .v { font-weight: 600; text-align: right; word-break: break-all; }
+  .btn { display: block; width: 100%; border: 0; border-radius: 12px; background: var(--blue); color: #fff; font-size: 17px; font-weight: 700; padding: 15px 12px; cursor: pointer; text-align: center; text-decoration: none; margin-top: 14px; }
+  .btn.secondary { background: #eef3fd; color: var(--blue); }
+  .btn.ghost { background: #fff; color: var(--blue); border: 1px solid var(--line); }
+  .note { font-size: 13px; }
+  #pay, #paid, #nourl { display: none; }
+  #frame { width: 100%; height: 62vh; border: 1px solid var(--line); border-radius: 12px; margin-top: 12px; }
+  .check { font-size: 44px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">Paxyo</div>
+
+  <div id="summary">
+    <h1>Deposit</h1>
+    <p>Everything is already filled in — just proceed to payment.</p>
+    <div class="amount"><span id="sum-amount">—</span> <small>ETB</small></div>
+    <div class="rows">
+      <div class="row"><span class="k">Method</span><span class="v" id="sum-method">—</span></div>
+      <div class="row"><span class="k">Phone</span><span class="v" id="sum-phone">—</span></div>
+      <div class="row"><span class="k">Deposit ID</span><span class="v" id="sum-id">—</span></div>
+    </div>
+    <button class="btn" id="proceed">Proceed to payment</button>
+    <p class="note">You will pay on Chapa's secure page. Your balance updates automatically once the payment succeeds.</p>
+  </div>
+
+  <div id="pay">
+    <h1>Payment</h1>
+    <p>Pay on Chapa's page below. If it does not load, use the button under it — the chat stays open either way.</p>
+    <iframe id="frame" title="Chapa payment page" allow="payment *"></iframe>
+    <button class="btn secondary" id="openlink">Payment page not loading? Open it here</button>
+    <button class="btn ghost" id="back">← Back to summary</button>
+  </div>
+
+  <div id="paid">
+    <div class="check">✅</div>
+    <h1>Payment done</h1>
+    <p>Your balance updates once the payment is confirmed.</p>
+    <p>In the chat, tap <b>“I paid — check it”</b> to see your new balance.</p>
+    <a class="btn" href="https://t.me/paxorder_bot" id="back-chat">Back to chat</a>
+    <button class="btn ghost hidden" id="close">Close</button>
+  </div>
+
+  <div id="nourl">
+    <h1>Deposit</h1>
+    <p>This page opens from the Paxyo bot with your deposit already filled in. Please start a deposit in the chat first.</p>
+    <a class="btn" href="https://t.me/paxorder_bot">Open @paxorder_bot</a>
+  </div>
+</div>
+
+<script>
+(function () {
+  var tg = (window.Telegram && Telegram.WebApp) ? Telegram.WebApp : null;
+  if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+
+  var q = new URLSearchParams(window.location.search);
+  function param(name) { var v = q.get(name); return v === null ? "" : v; }
+
+  var METHOD_LABELS = {
+    telebirr: "Telebirr", cbe: "CBE Birr",
+    cbebirr: "CBE Birr", mpesa: "M-Pesa"
+  };
+  var checkoutUrl = param("checkout_url");
+  var paid = param("paid") === "1";
+  var summary = document.getElementById("summary");
+  var pay = document.getElementById("pay");
+  var paidView = document.getElementById("paid");
+  var nourl = document.getElementById("nourl");
+
+  function show(el) {
+    summary.style.display = "none";
+    pay.style.display = "none";
+    paidView.style.display = "none";
+    nourl.style.display = "none";
+    el.style.display = "block";
+    if (tg) { try { tg.expand(); } catch (e) {} }
+  }
+  // All values go in via textContent — never innerHTML — so a
+  // crafted query string cannot inject markup or scripts.
+  function setText(id, value) {
+    document.getElementById(id).textContent = value || "—";
+  }
+
+  if (paid) {
+    show(paidView);
+    var closeBtn = document.getElementById("close");
+    if (tg) {
+      closeBtn.classList.remove("hidden");
+      closeBtn.addEventListener("click", function () { tg.close(); });
+    }
+    document.getElementById("back-chat").addEventListener("click", function (ev) {
+      if (tg) { ev.preventDefault(); tg.openTelegramLink("https://t.me/paxorder_bot"); }
+    });
+    return;
+  }
+
+  if (!checkoutUrl || !/^https?:\/\//i.test(checkoutUrl)) {
+    show(nourl);
+    return;
+  }
+
+  setText("sum-amount", param("amount"));
+  setText("sum-method", METHOD_LABELS[(param("method") || "").toLowerCase()] || param("method"));
+  setText("sum-phone", param("phone"));
+  setText("sum-id", param("deposit_id"));
+  show(summary);
+
+  var frame = document.getElementById("frame");
+  var loaded = false;
+  frame.addEventListener("load", function () { loaded = true; });
+  document.getElementById("proceed").addEventListener("click", function () {
+    frame.src = checkoutUrl;
+    show(pay);
+    // If Chapa blocks framing the iframe stays blank (some browsers
+    // still fire load on a blocked frame), so the fallback button is
+    // always visible — and after 8s without a load it is highlighted.
+    setTimeout(function () {
+      if (!loaded) {
+        var btn = document.getElementById("openlink");
+        btn.style.outline = "2px solid #3275dd";
+        btn.scrollIntoView({ block: "center" });
+      }
+    }, 8000);
+  });
+  document.getElementById("openlink").addEventListener("click", function () {
+    if (tg && tg.openLink) { tg.openLink(checkoutUrl); }
+    else { window.open(checkoutUrl, "_blank"); }
+  });
+  document.getElementById("back").addEventListener("click", function () {
+    frame.removeAttribute("src");
+    loaded = false;
+    show(summary);
+  });
+})();
+</script>
+</body>
+</html>
