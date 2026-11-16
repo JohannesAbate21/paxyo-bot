@@ -4594,10 +4594,12 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(webapp)
         self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
 
-    async def test_success_push_has_no_webapp_button(self):
-        # The fake's success shape returns steps (Dial / Pay to /
-        # checkout link), not a push: either way the instructions
-        # carry no Web App button — it only appears on failure.
+    async def test_success_with_checkout_url_has_popup_button(self):
+        # Deposit popup (owner, 16 Nov 2026): a confirmed deposit
+        # whose server record carries a checkout URL opens the
+        # pre-filled popup — the old "no button on success" rule is
+        # replaced: the popup button IS the success reply now (the
+        # old test pinned no button at all and is updated here).
         fake = FakePaxyo()
         await self._send(
             "deposit 10 telebirr 099387383",
@@ -4607,8 +4609,20 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
         query = await self._confirm(fake)
         self.assertIn("Dial *847#", query.edited[0])
         self.assertIn("https://checkout.chapa.co/pay/dep-1", query.edited[0])
-        self.assertIsNone(query.edited_markups[0])
         self.assertEqual(len(fake.deposits_created), 1)
+        markup = query.edited_markups[0]
+        self.assertIsNotNone(markup)
+        rows = markup.inline_keyboard
+        self.assertEqual(len(rows), 3)
+        popup = rows[0][0]
+        self.assertIsNotNone(popup.web_app)
+        self.assertIn("deposit-app.html", popup.web_app.url)
+        self.assertIn("deposit_id=dep-1", popup.web_app.url)
+        self.assertIn("checkout.chapa.co", popup.web_app.url)
+        self.assertIn("10.00 ETB", popup.text)
+        self.assertEqual(
+            rows[1][0].url, "https://checkout.chapa.co/pay/dep-1")
+        self.assertEqual(rows[2][0].callback_data, "checkdep:")
 
     async def test_insufficient_balance_offers_webapp(self):
         # Not enough balance for a batch: the refusal carries the
@@ -4760,6 +4774,242 @@ class TestDepositQr(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake.deposits_created), 1)
         self.assertIn("10.00 ETB", query.edited[0])
         self.assertEqual(query.message.photos_sent, [])
+
+
+class PushedPaxyo(FakePaxyo):
+    """FakePaxyo whose create_deposit answers like a successful
+    Chapa Direct Charge push: pushed=true, no checkout URL."""
+
+    async def create_deposit(self, telegram_id, amount, method, phone,
+                             promo_code=None):
+        self.deposits_created.append({
+            "telegram_id": telegram_id, "amount": amount,
+            "method": method, "phone": phone, "promo_code": promo_code,
+        })
+        return {
+            "deposit_id": "dep-1", "pushed": True, "auth_type": "ussd",
+            "status": "pending",
+        }
+
+
+class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
+    """Deposit popup (owner, 16 Nov 2026): after Confirm, when the
+    server returned a checkout URL, the bot sends a Web App button
+    opening the pre-filled deposit popup (server/deposit-app.html)
+    — amount, method, phone and deposit id already filled in, one
+    "Proceed to payment" tap. A USSD push gets no popup button (the
+    prompt is on the phone) but keeps the "I paid" recheck button;
+    a 502 still falls back to the old login-page Web App."""
+
+    def setUp(self):
+        for store in (
+            bot.PENDING, bot.PENDING_REFILL, bot.USER_TRAITS,
+            bot.USUAL_SERVICE, bot._USUAL_COUNTS, bot._TONE_SIGNALS,
+            bot._TRAITS_FROM_SERVER, bot._LAST_TRAITS_SAVE,
+            bot.CANCELLED_DRAFT, bot.LAST_ORDER, bot.PARTIAL,
+            bot.PENDING_RECURRING, bot.RECURRING_DRAFT,
+            bot.DEPOSIT_DRAFT, bot.PENDING_DEPOSIT, bot.PENDING_BATCH,
+            bot.LAST_DEPOSIT, bot.FAILED_DEPOSIT,
+        ):
+            store.clear()
+
+    def tearDown(self):
+        for store in (
+            bot.PENDING_DEPOSIT, bot.DEPOSIT_DRAFT, bot.LAST_DEPOSIT,
+            bot.FAILED_DEPOSIT,
+        ):
+            store.clear()
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply") as speak:
+            await bot.handle_order_text(update, None, text)
+        self.assertEqual(msg.voice_sent, [])  # text in -> text only
+        return msg
+
+    async def _confirm(self, fake):
+        # The full-sentence deposit, then the Confirm tap.
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of(
+                "deposit", amount=10, method="telebirr",
+                phone="099387383",
+            )),
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None,
+                "let me deposit 10 br by telebirr and my phone "
+                "number is 099387383",
+            )
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        query = FakeQuery(
+            f"confirm:{confirm_id}", message_text="Please confirm:")
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        return query
+
+    async def _run_callback(self, data, paxyo=None):
+        query = FakeQuery(data, message_text="Deposit")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    def _popup_button(self, markup):
+        """The row-0 Web App button of a popup keyboard, or None."""
+        if markup is None:
+            return None
+        rows = markup.inline_keyboard
+        if not rows or not rows[0]:
+            return None
+        button = rows[0][0]
+        return button if getattr(button, "web_app", None) else None
+
+    def test_popup_url_constant(self):
+        self.assertEqual(
+            bot.DEPOSIT_POPUP_URL, "https://paxyo.et/deposit-app.html")
+        self.assertTrue(bot.DEPOSIT_POPUP_URL.startswith("https://"))
+
+    def test_popup_url_prefills_deposit(self):
+        result = {
+            "deposit_id": "dep-1",
+            "checkout_url": "https://checkout.chapa.co/pay/dep-1",
+        }
+        url = bot.deposit_popup_url(
+            result, 10, "telebirr", "25199387383")
+        self.assertTrue(url.startswith(bot.DEPOSIT_POPUP_URL + "?"))
+        self.assertIn("deposit_id=dep-1", url)
+        self.assertIn("checkout.chapa.co", url)
+        self.assertIn("amount=10.00", url)
+        self.assertIn("method=telebirr", url)
+        self.assertIn("phone=25199387383", url)
+
+    def test_popup_url_prefills_mpesa_method(self):
+        result = {
+            "deposit_id": "dep-9",
+            "checkout_url": "https://checkout.chapa.co/pay/dep-9",
+        }
+        url = bot.deposit_popup_url(result, 50, "mpesa", "251911223344")
+        self.assertIn("method=mpesa", url)
+        self.assertIn("deposit_id=dep-9", url)
+
+    def test_popup_url_none_without_checkout_url(self):
+        for bad in (None, {}, {"checkout_url": None},
+                    {"checkout_url": ""},
+                    {"checkout_url": "not a url"},
+                    {"checkout_url": "ftp://example.com/x"}):
+            self.assertIsNone(bot.deposit_popup_url(bad, 10, "telebirr", "25199387383"))
+
+    def test_popup_keyboard_rows(self):
+        result = {
+            "deposit_id": "dep-1",
+            "checkout_url": "https://checkout.chapa.co/pay/dep-1",
+        }
+        draft = {"amount": 10, "method": "telebirr", "phone": "25199387383"}
+        markup = bot.deposit_popup_keyboard(result, draft, "en")
+        rows = markup.inline_keyboard
+        self.assertEqual(len(rows), 3)
+        self.assertIn("10.00 ETB", rows[0][0].text)
+        self.assertIn("deposit-app.html", rows[0][0].web_app.url)
+        self.assertEqual(
+            rows[1][0].url, "https://checkout.chapa.co/pay/dep-1")
+        self.assertIsNone(rows[1][0].web_app)
+        self.assertEqual(rows[2][0].callback_data, "checkdep:")
+        self.assertIn("I paid", rows[2][0].text)
+
+    def test_popup_keyboard_none_without_checkout_url(self):
+        draft = {"amount": 10, "method": "telebirr", "phone": "25199387383"}
+        self.assertIsNone(
+            bot.deposit_popup_keyboard({"deposit_id": "dep-1"}, draft, "en"))
+
+    async def test_confirm_with_checkout_url_sends_popup_button(self):
+        query = await self._confirm(FakePaxyo())
+        self.assertIn("10.00 ETB", query.edited[0])
+        popup = self._popup_button(query.edited_markups[0])
+        self.assertIsNotNone(popup)
+        self.assertIn("deposit-app.html", popup.web_app.url)
+        self.assertIn("deposit_id=dep-1", popup.web_app.url)
+        # The QR photo still goes out alongside the popup button.
+        self.assertEqual(len(query.message.photos_sent), 1)
+
+    async def test_text_yes_with_checkout_url_sends_popup_button(self):
+        fake = FakePaxyo()
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        intents = [
+            intent_of("deposit", amount=10, method="telebirr", phone="099387383"),
+            intent_of("unclear"),
+        ]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, "deposit 10 telebirr 099387383")
+            await bot.handle_order_text(update, None, "yes")
+        self.assertEqual(len(msg.text_sent), 2)
+        popup = self._popup_button(msg.markups[1])
+        self.assertIsNotNone(popup)
+        self.assertIn("deposit-app.html", popup.web_app.url)
+        self.assertIn("deposit_id=dep-1", popup.web_app.url)
+
+    async def test_pushed_result_has_no_popup_button(self):
+        query = await self._confirm(PushedPaxyo())
+        self.assertIn("on its way to your phone", query.edited[0])
+        markup = query.edited_markups[0]
+        self.assertIsNotNone(markup)
+        # One row only: the "I paid" recheck — no Web App button,
+        # so the old Confirm/Cancel buttons are gone too.
+        rows = markup.inline_keyboard
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(self._popup_button(markup))
+        self.assertEqual(rows[0][0].callback_data, "checkdep:")
+        self.assertIn("I paid", rows[0][0].text)
+        self.assertEqual(query.message.photos_sent, [])
+
+    async def test_confirm_without_checkout_url_has_paid_only_keyboard(self):
+        query = await self._confirm(NoCheckoutUrlPaxyo())
+        self.assertNotIn("Open:", query.edited[0])
+        self.assertIsNone(self._popup_button(query.edited_markups[0]))
+        rows = query.edited_markups[0].inline_keyboard
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0].callback_data, "checkdep:")
+
+    async def test_retrydep_with_checkout_url_sends_popup_button(self):
+        bot.FAILED_DEPOSIT[1] = {
+            "user_id": 1, "amount": 10, "method": "telebirr",
+            "phone": "099387383",
+        }
+        query = await self._run_callback("retrydep", paxyo=FakePaxyo())
+        self.assertTrue(query.answered)
+        self.assertEqual(len(query.edited), 1)
+        popup = self._popup_button(query.edited_markups[0])
+        self.assertIsNotNone(popup)
+        self.assertIn("deposit-app.html", popup.web_app.url)
+        self.assertEqual(bot.FAILED_DEPOSIT, {})
+
+    async def test_502_still_offers_old_webapp_not_popup(self):
+        fake = FakePaxyo(
+            deposit_error="You are not allowed for direct charges, "
+                          "please contact us!",
+            deposit_error_status=502,
+        )
+        # _confirm sends the sentence itself, then taps Confirm.
+        query = await self._confirm(fake)
+        self.assertIn("couldn't be sent", query.edited[0])
+        markup = query.edited_markups[0]
+        # The fallback is still the old login-page Web App, not the
+        # popup (there is no checkout URL to pre-fill).
+        rows = markup.inline_keyboard
+        self.assertEqual(rows[0][0].web_app.url, bot.DEPOSIT_WEBAPP_URL)
+        for row in rows:
+            for button in row:
+                url = getattr(getattr(button, "web_app", None), "url", "") or ""
+                self.assertNotIn("deposit-app.html", url)
 
 
 class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
