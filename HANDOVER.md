@@ -1053,3 +1053,10 @@ Built by the customizations coordinator, 15 Nov 2026, on top of the split-test c
 ### What was NOT changed
 - No approved behavior changed: fastest-first picking, rescue pricing (never above confirmed total), split-test rules, exact-emoji rule, reply language, secrecy, cancel-cutting items 1/2/4/5 only (no refill preference), GIF/media 5-category rules, both-sides 20% referral, quote-must-match-ordered-service. No test was weakened to pass — the only test edits are the two stale-wording assertions and the setUp/tearDown store clears.
 - No test could not be fixed: nothing is left needing a William decision from this triage.
+
+## SMM never skipped for low balance — 16 Nov 2026, ~22:00 EAT (William's instruction)
+- William: "Don't skip smms even if its low balance its enough for test if will recharge once we launch so if i test order it should go both godofpanel and smms."
+- Change (bot.py only, no server change): `_provider_balance_health()` now always returns `"smm": True` — the picking guard never drops SMM services for a low balance. GOP is still guarded when IT is low. The low-balance ALERTS still fire for SMM (`_provider_balance_step`, $3 low / $1 critical) — only the picking guard ignores its state. A placement that fails for insufficient SMM balance still rescues to the other provider via the existing rescue path.
+- SMM balance at the time: $0.78 (73.84 INR) — covers test orders under 5 ETB; William recharges at launch.
+- Test: new `test_smm_never_skipped_for_low_balance` in TestCancelCuttingRanking (SMM critical/low still healthy; GOP low still guarded; faster SMM pick not demoted). Suite: 1,590 tests, ALL GREEN (verified by me, 88s).
+- Deploy: bot.py + test_bot_offline.py + this file pushed to GitHub (commit pending) → Fly.io GitHub Actions deploy.

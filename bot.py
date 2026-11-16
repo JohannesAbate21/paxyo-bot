@@ -9279,11 +9279,18 @@ def _provider_balance_health():
     """Provider slug -> True when its balance is healthy (item 12,
     16 Nov 2026): the balance-guard reading of the probe's state
     machine. A provider whose state is "ok" is healthy; "low" or
-    "critical" is not. Pure, sync — the probe refreshes the states
-    hourly in the scheduler, and picks read them from here."""
+    "critical" is not. SMM is the exception (William, 16 Nov 2026):
+    never skipped for a low balance — $0.78 covers test orders and
+    he recharges at launch, so a test order must be able to land
+    on either provider; a placement that fails for insufficient
+    balance still rescues to the other provider. The low-balance
+    ALERTS still fire for SMM (see _provider_balance_step) — only
+    the picking guard ignores its state. Pure, sync — the probe
+    refreshes the states hourly in the scheduler, and picks read
+    them from here."""
     return {
         "gop": _PROVIDER_BALANCE_STATE == "ok",
-        "smm": _PROVIDER_BALANCE_STATE_SMM == "ok",
+        "smm": True,
     }
 # Round 3 (15 Nov 2026) — cancel order (12): confirm_id -> the
 # placed order awaiting a cancel Confirm

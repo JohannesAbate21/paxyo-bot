@@ -272,6 +272,38 @@ class TestCancelCuttingRanking(unittest.TestCase):
             services, platform="instagram", balance_health=None)
         self.assertEqual([s["service"] for s in picks][0], 874)
 
+    def test_smm_never_skipped_for_low_balance(self):
+        # William, 16 Nov 2026: SMM is never skipped for a low
+        # balance — $0.78 covers test orders, he recharges at
+        # launch, so a test order must be able to land on either
+        # provider. The low-balance alerts still fire (see
+        # _provider_balance_step); only the picking guard ignores
+        # the SMM state. GOP is still guarded when IT is low.
+        try:
+            bot._PROVIDER_BALANCE_STATE = "ok"
+            bot._PROVIDER_BALANCE_STATE_SMM = "critical"
+            self.assertEqual(
+                bot._provider_balance_health(),
+                {"gop": True, "smm": True})
+            bot._PROVIDER_BALANCE_STATE_SMM = "low"
+            self.assertEqual(
+                bot._provider_balance_health(),
+                {"gop": True, "smm": True})
+            bot._PROVIDER_BALANCE_STATE = "low"
+            bot._PROVIDER_BALANCE_STATE_SMM = "ok"
+            self.assertEqual(
+                bot._provider_balance_health(),
+                {"gop": False, "smm": True})
+            # A low SMM never demotes the faster SMM pick.
+            services = [SAMPLE_SERVICES[0], self._smm()]
+            picks = bot.pick_services(
+                services, platform="instagram",
+                balance_health=bot._provider_balance_health())
+            self.assertEqual([s["service"] for s in picks][0], 874)
+        finally:
+            bot._PROVIDER_BALANCE_STATE = "ok"
+            bot._PROVIDER_BALANCE_STATE_SMM = "ok"
+
     def test_drop_risky_never_empties_cheapest_pick(self):
         kept = bot._drop_risky_candidates(
             SAMPLE_SERVICES[:2],
