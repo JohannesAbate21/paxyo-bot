@@ -15,7 +15,7 @@ primary_region = "iad"
   PAXYO_API_BASE = "https://paxyo.et/api/bot"
   GEMINI_MODEL = "gemini-3.5-flash"
 
-[[http_service]]
+[http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = "off"
