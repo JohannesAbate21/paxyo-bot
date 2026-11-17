@@ -3741,6 +3741,21 @@ def _platform_word_to_canonical(word):
         return w
     return None
 
+
+def _bare_platform_word(text: str):
+    """Canonical platform when the message is essentially just a
+    platform word ("Twitter", "TikTok", "X"), else None. A real
+    question about a platform ("what is Twitter?", "how does
+    Twitter work?") has more words, so it never matches — the
+    word alone is the user naming the platform they want to
+    order on. "max" is not a platform word (see
+    _platform_word_to_canonical), so a bare "max" never matches.
+    """
+    s = normalize_text(text or "").strip().strip("?!.,").strip()
+    if not s or any(ch.isspace() for ch in s):
+        return None
+    return _platform_word_to_canonical(s)
+
 def _platform_from_words(words, text=""):
     """Canonical platform for a set of user-typed words, or None.
 
@@ -14383,10 +14398,16 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
     # With no current draft either, ask which service instead of
     # guessing an old one.
     _own_platform, _own_metric = detect_platform_metric(text)
+    _context_metric_only = False
     if _own_platform is None and _own_metric is None:
         platform, hint = _conversation_context(user_id)
         if not platform and not hint:
             return t("price_ask_service", lang)
+        if not platform and hint:
+            # The question names nothing itself — it is about the
+            # order being built, whose metric is known but whose
+            # platform is not (see the guard below).
+            _context_metric_only = True
     _links = extract_links(text)
     if _links:
         # One-line price check (ideas batch 1 #2, 16 Nov 2026): a
@@ -14433,6 +14454,18 @@ async def price_answer_text(user_id: int, text: str, intent: dict, lang: str):
         if cheapest is not None:
             _remember_quote(user_id, cheapest, platform, hint)
             return _service_price_line(cheapest, quantity, lang)
+    if _context_metric_only:
+        # Wrong-platform guard (17 Nov 2026): the price question
+        # names nothing itself, so it is about the order being
+        # built — but that draft has a metric and no platform.
+        # Quoting the fastest service for the metric would pick
+        # it on ANY platform (live fault: Facebook Followers
+        # 87.43 was quoted for an X/Twitter followers order).
+        # Ask which service instead. Genuine global-cheapest
+        # questions already returned above, and a question that
+        # names its own metric (or a draft with a platform)
+        # never sets this flag.
+        return t("price_ask_service", lang)
     line, platform, hint, _quoted = await _price_line(
         user_id, text, platform, hint, quantity, lang,
         reaction_emoji=reaction_emoji(text), services=services,
@@ -27920,6 +27953,35 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reply_message(update.message, t("source_question", lang), lang, voice=voice)
         return
     if intent_type == "paxyo_info":
+        # Bare platform word (17 Nov 2026): the classifier read
+        # "Twitter" as an info question, so the platform never
+        # reached the draft — and the next "How much is it"
+        # quoted Facebook Followers for an X order. When the
+        # message is just the platform word and local_intent
+        # agrees it is an order on that platform, remember the
+        # platform in the draft so the following turns inherit
+        # it. Never overwrites a draft on another platform, and
+        # never seeds while a Confirm card is open. A real info
+        # question ("what is Twitter?") has more words and never
+        # matches the bare-word check at all.
+        _bare_platform = _bare_platform_word(text)
+        if _bare_platform is not None:
+            _own = local_intent(text)
+            if (
+                _own.get("intent") == "order"
+                and _own.get("platform") == _bare_platform
+            ):
+                _cid, _pending = pending_for_user(user.id)
+                _draft = PARTIAL.get(user.id) or {}
+                _draft_platform = (
+                    (_draft.get("platform") or "").strip().lower() or None
+                )
+                if _pending is None and _draft_platform in (
+                    None, _bare_platform,
+                ):
+                    PARTIAL[user.id] = {
+                        **_draft, "platform": _bare_platform,
+                    }
         _paxyo_answer = await answer_paxyo_question(text, lang, user_id=user.id)
         _turn_log("answer", _t0)
         await reply_message(

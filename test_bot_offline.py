@@ -20231,6 +20231,178 @@ class TestStaleDraftPrice(_LanguageRoundBase):
             bot.PARKED_DRAFT[1].get("service_hint"), "tiktok views")
 
 
+class TwoPlatformFollowersPaxyo(FakePaxyo):
+    """Facebook Followers (fast, 87.43) + X/Twitter Followers
+    (slower, 1,260.00) — the live 17 Nov 2026 screenshot pair:
+    a platform-less followers price quoted Facebook 87.43 for
+    an X order, because the fastest followers service on ANY
+    platform won the lookup."""
+
+    FOLLOWER_SERVICES = [
+        {
+            "service": 4001, "name": "Facebook Followers | Fast",
+            "category": "Facebook Followers", "type": "Default",
+            "rate_etb_per_1000": 87.43, "min": 10, "max": 100000,
+            "average_time": "1 minute", "active": True,
+        },
+        {
+            "service": 4002, "name": "X / Twitter Followers",
+            "category": "X / Twitter Followers", "type": "Default",
+            "rate_etb_per_1000": 1260.00, "min": 10, "max": 100000,
+            "average_time": "10 minutes", "active": True,
+        },
+    ]
+
+    async def services(self):
+        return list(self.FOLLOWER_SERVICES)
+
+
+class TestWrongPlatformPrice(_LanguageRoundBase):
+    """Live bug, 17 Nov 2026 ~23:41 EAT (screenshot): "Twitter"
+    -> "Follower" -> "How much is it" quoted Facebook Followers
+    87.43 ETB/1000 instead of X/Twitter Followers 1,260.00. The
+    classifier read the bare platform word as an info question,
+    so the platform never reached the draft, and the price
+    lookup ran with platform=None and picked the fastest
+    followers service on ANY platform. Two fixes: the guard
+    (a platform-less price lookup asks which service) and the
+    seed (a bare platform word is remembered in the draft)."""
+
+    async def _turns(self, turns, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        # The simple-chat fast path (17 Nov 2026) answers a plain
+        # greeting locally, so those turns never call the classifier:
+        # the mocked intents line up with the turns that do.
+        intents = [
+            intent for text, intent in turns
+            if bot.simple_chat_intent(text) is None
+        ]
+        with mock.patch(
+            "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
+        ), mock.patch("bot.paxyo", paxyo or TwoPlatformFollowersPaxyo()), mock.patch(
+            "bot.speak_reply"
+        ), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(return_value=(
+                "We offer followers, likes, views, comments and more."
+            )),
+        ):
+            for text, _ in turns:
+                await bot.handle_order_text(update, None, text)
+        return msg
+
+    def test_bare_platform_word(self):
+        self.assertEqual(bot._bare_platform_word("Twitter"), "x")
+        self.assertEqual(bot._bare_platform_word("Twitter?"), "x")
+        self.assertEqual(bot._bare_platform_word("TikTok"), "tiktok")
+        self.assertEqual(bot._bare_platform_word("X"), "x")
+        self.assertEqual(bot._bare_platform_word("FB"), "facebook")
+        self.assertIsNone(bot._bare_platform_word("what is Twitter?"))
+        self.assertIsNone(
+            bot._bare_platform_word("how does Twitter work?"))
+        self.assertIsNone(bot._bare_platform_word("Twitter followers"))
+        self.assertIsNone(bot._bare_platform_word("max"))
+        self.assertIsNone(bot._bare_platform_word(""))
+        self.assertIsNone(bot._bare_platform_word("hello"))
+
+    async def test_platformless_followers_draft_asks_which_service(self):
+        # The guard: a followers draft with NO platform must never
+        # be quoted the fastest followers price on any platform.
+        bot.PARTIAL[1] = {"service_hint": "followers"}
+        msg = await self._turns([
+            ("How much is it", intent_of("price")),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[0].lower())
+        self.assertIn("Which service?", msg.text_sent[1])
+        self.assertNotIn("ETB per 1000", "".join(msg.text_sent))
+        self.assertNotIn("Facebook", "".join(msg.text_sent))
+        self.assertNotIn("87.43", "".join(msg.text_sent))
+
+    async def test_screenshot_flow_quotes_twitter_followers(self):
+        # The exact screenshot flow: bare platform word, then the
+        # metric, then the price — the quote must be X/Twitter's.
+        bot.PARKED_DRAFT.clear()
+        msg = await self._turns([
+            ("Twitter", intent_of("paxyo_info")),
+            ("Follower", intent_of(
+                "order", platform=None, service_hint="followers",
+            )),
+            ("How much is it", intent_of("price")),
+        ])
+        self.assertEqual(len(msg.text_sent), 4)
+        self.assertIn("followers, likes, views", msg.text_sent[0])
+        self.assertIn(
+            "Please send your X profile link.", msg.text_sent[1])
+        self.assertIn(
+            "unfinished order is saved", msg.text_sent[2].lower())
+        reply = msg.text_sent[3]
+        self.assertIn("1,260.00", reply)
+        self.assertIn("Twitter", reply)
+        self.assertNotIn("87.43", reply)
+        self.assertNotIn("Facebook", reply)
+        self.assertEqual(bot.PARKED_DRAFT[1].get("platform"), "x")
+
+    async def test_cheapest_question_still_answers_globally(self):
+        # A genuine cheapest question is answered from the
+        # cheapest service on ANY platform — the guard below it
+        # must not swallow that.
+        msg = await self._turns([
+            ("what is the cheapest followers", intent_of("price")),
+        ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("87.43", msg.text_sent[0])
+        self.assertIn("Facebook", msg.text_sent[0])
+
+    async def test_draft_with_platform_still_quotes_that_platform(self):
+        bot.PARTIAL[1] = {"platform": "x", "service_hint": "followers"}
+        msg = await self._turns([
+            ("How much is it", intent_of("price")),
+        ])
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertIn("1,260.00", msg.text_sent[1])
+        self.assertNotIn("Facebook", msg.text_sent[1])
+        self.assertNotIn("87.43", msg.text_sent[1])
+
+    async def test_no_draft_price_question_still_asks_which_service(self):
+        msg = await self._turns([
+            ("How much is it", intent_of("price")),
+        ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Which service?", msg.text_sent[0])
+        self.assertNotIn("ETB per 1000", msg.text_sent[0])
+
+    async def test_info_question_does_not_seed_platform(self):
+        # "what is Twitter?" is a real info question: the answer
+        # still comes back, but no platform is remembered.
+        msg = await self._turns([
+            ("what is Twitter?", intent_of("paxyo_info")),
+        ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("followers, likes, views", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL, {})
+
+    async def test_seed_does_not_overwrite_other_platform_draft(self):
+        bot.PARTIAL[1] = {
+            "platform": "tiktok", "service_hint": "views",
+        }
+        msg = await self._turns([
+            ("Twitter", intent_of("paxyo_info")),
+        ])
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertEqual(bot.PARTIAL[1].get("platform"), "tiktok")
+        self.assertEqual(bot.PARTIAL[1].get("service_hint"), "views")
+
+    async def test_seed_does_not_run_with_pending_card(self):
+        bot.PENDING["c1"] = make_pending()
+        msg = await self._turns([
+            ("Twitter", intent_of("paxyo_info")),
+        ])
+        self.assertEqual(bot.PARTIAL, {})
+
+
 class TestWidenFreeAnswers(_LanguageRoundBase):
     """Owner rule, 14 Nov 2026 (course correction): DeepSeek answers
     how-to and general questions FREELY — no big canned Q&A list.
