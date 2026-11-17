@@ -721,6 +721,8 @@ class FakePaxyo:
     def __init__(self, balance=1000.0, recent=None, schedules=None, due=None,
                  deposit_none=False, deposit_error=None,
                  deposit_error_status=400,
+                 payment_none=False, payment_error=None,
+                 payment_error_status=502,
                  deposits=None, deposits_none=False, status="pending",
                  session=None, delayed=None, delayed_due=None,
                  delayed_none=False, claim_ok=True,
@@ -882,6 +884,18 @@ class FakePaxyo:
         self._deposit_none = deposit_none
         self._deposit_error = deposit_error
         self._deposit_error_status = deposit_error_status
+        # Payment start (owner, 17 Nov 2026): the bot exchanges
+        # the popup token for the checkout right after Confirm —
+        # payment_none=True returns None (the real client does
+        # that on a 404), payment_error=<message> raises the HTTP
+        # error the real client raises (status
+        # payment_error_status, default 502). payment_starts
+        # records every (deposit_id, token) call, so tests can
+        # prove the exchange ran with the token only.
+        self.payment_starts = []
+        self._payment_none = payment_none
+        self._payment_error = payment_error
+        self._payment_error_status = payment_error_status
         self._deposits = list(deposits) if deposits is not None else []
         self._deposits_none = deposits_none
         self.deposit_status_checked = []
@@ -1598,6 +1612,35 @@ class FakePaxyo:
             "popup_token": "tok-dep-1",
             "pushed": False,
             "auth_type": "popup",
+            "status": "pending",
+        }
+
+    async def start_deposit_payment(self, deposit_id, token):
+        """Mirror POST /deposits/{id}/payment (owner, 17 Nov
+        2026): the bot exchanges the one-time token for the
+        checkout right after Confirm — token only, no method,
+        no phone. Returns the checkout URL, like the server's
+        no-method/no-phone exchange."""
+        if self._payment_none:
+            return None
+        if self._payment_error is not None:
+            req = bot.httpx.Request(
+                "POST",
+                "https://paxyo.et/api/bot/deposits/dep-1/payment",
+            )
+            resp = bot.httpx.Response(
+                self._payment_error_status,
+                json={"error": self._payment_error}, request=req
+            )
+            raise bot.httpx.HTTPStatusError(
+                "bad request", request=req, response=resp
+            )
+        self.payment_starts.append((deposit_id, token))
+        return {
+            "deposit_id": deposit_id,
+            "pushed": False,
+            "auth_type": "checkout",
+            "checkout_url": "https://checkout.chapa.co/pay/dep-1",
             "status": "pending",
         }
 
@@ -4641,11 +4684,12 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(webapp)
         self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
 
-    async def test_success_with_popup_token_has_popup_button(self):
-        # Deposit popup (owner, 17 Nov 2026): a confirmed deposit
-        # whose server record carries a popup token opens the
-        # popup — the popup button IS the success reply, and the
-        # checkout URL never appears in the chat or the button.
+    async def test_success_with_token_opens_checkout_directly(self):
+        # Deposit checkout (owner, 17 Nov 2026): a confirmed
+        # deposit starts the payment in the bot and the success
+        # reply is ONE URL button opening the Chapa checkout
+        # directly — no popup form any more, and the checkout URL
+        # never appears as message text, only as the button target.
         fake = FakePaxyo()
         await self._send(
             "deposit 10 telebirr 099387383",
@@ -4657,17 +4701,16 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("checkout.chapa.co", query.edited[0])
         self.assertNotIn("Dial", query.edited[0])
         self.assertEqual(len(fake.deposits_created), 1)
+        self.assertEqual(fake.payment_starts, [("dep-1", "tok-dep-1")])
         markup = query.edited_markups[0]
         self.assertIsNotNone(markup)
         rows = markup.inline_keyboard
         self.assertEqual(len(rows), 1)
-        popup = rows[0][0]
-        self.assertIsNotNone(popup.web_app)
-        self.assertIn("deposit-app.html", popup.web_app.url)
-        self.assertIn("deposit_id=dep-1", popup.web_app.url)
-        self.assertIn("token=", popup.web_app.url)
-        self.assertNotIn("checkout.chapa.co", popup.web_app.url)
-        self.assertIn("10.00 ETB", popup.text)
+        button = rows[0][0]
+        self.assertIsNone(getattr(button, "web_app", None))
+        self.assertEqual(
+            button.url, "https://checkout.chapa.co/pay/dep-1")
+        self.assertIn("10.00 ETB", button.text)
 
     async def test_insufficient_balance_offers_webapp(self):
         # Not enough balance for a batch: the refusal carries the
@@ -4832,15 +4875,15 @@ class PushedPaxyo(FakePaxyo):
 
 
 class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
-    """Deposit popup (owner, 17 Nov 2026): after Confirm, when the
-    server returned a popup token, the bot sends ONE Web App button
-    opening the deposit popup (server/deposit-app.html) — deposit
-    id + token + amount only. The popup collects the method + phone
-    and exchanges the token for the checkout, so the checkout URL
-    never appears in the chat, in a button, or in the popup URL.
-    No popup token means no button at all (and no "I paid" button
-    any more — the credit watcher tells the user it landed); a 502
-    still falls back to the old login-page Web App."""
+    """Deposit checkout (owner, 17 Nov 2026): after Confirm the
+    bot starts the payment itself (token only — no method, no
+    phone) and sends ONE URL button opening the Chapa checkout
+    directly. Chapa collects the method + phone on its own page,
+    so there is no popup form any more. The checkout URL is the
+    button target only — it never appears as message text. No
+    checkout URL means no button at all (and no "I paid" button
+    any more — the credit watcher tells the user it landed); a
+    502 still falls back to the old login-page Web App."""
 
     def setUp(self):
         for store in (
@@ -4902,73 +4945,71 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
             await bot.on_callback(update, None)
         return query
 
-    def _popup_button(self, markup):
-        """The row-0 Web App button of a popup keyboard, or None."""
+    def _pay_button(self, markup):
+        """The row-0 URL button of a checkout keyboard, or None."""
         if markup is None:
             return None
         rows = markup.inline_keyboard
         if not rows or not rows[0]:
             return None
         button = rows[0][0]
-        return button if getattr(button, "web_app", None) else None
+        return button if getattr(button, "url", None) else None
 
-    def test_popup_url_constant(self):
-        self.assertEqual(
-            bot.DEPOSIT_POPUP_URL, "https://paxyo.et/deposit-app.html")
-        self.assertTrue(bot.DEPOSIT_POPUP_URL.startswith("https://"))
-
-    def test_popup_url_carries_token_not_checkout(self):
-        result = {"deposit_id": "dep-1", "popup_token": "tok-abc"}
-        url = bot.deposit_popup_url(result, 10)
-        self.assertTrue(url.startswith(bot.DEPOSIT_POPUP_URL + "?"))
-        self.assertIn("deposit_id=dep-1", url)
-        self.assertIn("token=tok-abc", url)
-        self.assertIn("amount=10.00", url)
-        # No checkout URL, no method, no phone — anywhere.
-        self.assertNotIn("checkout.chapa.co", url)
-        self.assertNotIn("method=", url)
-        self.assertNotIn("phone=", url)
-
-    def test_popup_url_none_without_token(self):
-        for bad in (None, {}, {"deposit_id": "dep-1"},
-                    {"popup_token": "tok-abc"},
-                    {"deposit_id": "", "popup_token": "tok-abc"},
-                    {"deposit_id": "dep-1", "popup_token": ""}):
-            self.assertIsNone(bot.deposit_popup_url(bad, 10))
-
-    def test_popup_keyboard_rows(self):
-        result = {"deposit_id": "dep-1", "popup_token": "tok-abc"}
+    def test_checkout_keyboard_rows(self):
+        result = {
+            "deposit_id": "dep-1",
+            "checkout_url": "https://checkout.chapa.co/pay/dep-1",
+        }
         draft = {"amount": 10}
-        markup = bot.deposit_popup_keyboard(result, draft, "en")
+        markup = bot.deposit_checkout_keyboard(result, draft, "en")
         rows = markup.inline_keyboard
         self.assertEqual(len(rows), 1)
         self.assertIn("10.00 ETB", rows[0][0].text)
-        self.assertIn("deposit-app.html", rows[0][0].web_app.url)
-        self.assertIn("token=tok-abc", rows[0][0].web_app.url)
+        self.assertEqual(
+            rows[0][0].url, "https://checkout.chapa.co/pay/dep-1")
         for row in rows:
             for button in row:
-                self.assertIsNone(getattr(button, "url", None))
+                self.assertIsNone(getattr(button, "web_app", None))
                 self.assertIsNone(getattr(button, "callback_data", None))
 
-    def test_popup_keyboard_none_without_token(self):
+    def test_checkout_keyboard_none_without_url(self):
         draft = {"amount": 10}
-        self.assertIsNone(
-            bot.deposit_popup_keyboard({"deposit_id": "dep-1"}, draft, "en"))
+        for bad in (None, {}, {"deposit_id": "dep-1"},
+                    {"checkout_url": ""},
+                    {"checkout_url": "http://checkout.chapa.co/pay/dep-1"},
+                    {"checkout_url": "not a url"}):
+            self.assertIsNone(
+                bot.deposit_checkout_keyboard(bad, draft, "en"))
 
-    async def test_confirm_with_token_sends_popup_button(self):
+    def test_checkout_keyboard_never_shows_url_as_text(self):
+        # The URL is the button target only: the button text is
+        # just "Pay 10.00 ETB" — the URL string is nowhere in it.
+        markup = bot.deposit_checkout_keyboard(
+            {"checkout_url": "https://checkout.chapa.co/pay/dep-1"},
+            {"amount": 10}, "en",
+        )
+        self.assertNotIn(
+            "checkout.chapa.co", markup.inline_keyboard[0][0].text)
+
+    async def test_confirm_sends_checkout_button(self):
         query = await self._confirm(FakePaxyo())
         self.assertIn("10.00 ETB", query.edited[0])
         self.assertNotIn("checkout.chapa.co", query.edited[0])
-        popup = self._popup_button(query.edited_markups[0])
-        self.assertIsNotNone(popup)
-        self.assertIn("deposit-app.html", popup.web_app.url)
-        self.assertIn("deposit_id=dep-1", popup.web_app.url)
-        self.assertIn("token=", popup.web_app.url)
-        # No QR photo any more: the checkout URL never reaches
-        # the chat, so there is nothing to encode.
+        pay = self._pay_button(query.edited_markups[0])
+        self.assertIsNotNone(pay)
+        self.assertEqual(pay.url, "https://checkout.chapa.co/pay/dep-1")
+        # No QR photo any more: the checkout URL is a button
+        # target, so there is nothing to encode.
         self.assertEqual(len(query.message.photos_sent), 0)
 
-    async def test_text_yes_with_token_sends_popup_button(self):
+    async def test_payment_started_with_token_only(self):
+        # The bot exchanges the token for the checkout right
+        # after Confirm — token only, no method, no phone.
+        fake = FakePaxyo()
+        await self._confirm(fake)
+        self.assertEqual(fake.payment_starts, [("dep-1", "tok-dep-1")])
+
+    async def test_text_yes_sends_checkout_button(self):
         fake = FakePaxyo()
         msg = FakeMessage()
         update = FakeUpdate(msg)
@@ -4982,18 +5023,17 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
             await bot.handle_order_text(update, None, "deposit 10 telebirr 099387383")
             await bot.handle_order_text(update, None, "yes")
         self.assertEqual(len(msg.text_sent), 2)
-        popup = self._popup_button(msg.markups[1])
-        self.assertIsNotNone(popup)
-        self.assertIn("deposit-app.html", popup.web_app.url)
-        self.assertIn("deposit_id=dep-1", popup.web_app.url)
-        self.assertIn("token=", popup.web_app.url)
+        pay = self._pay_button(msg.markups[1])
+        self.assertIsNotNone(pay)
+        self.assertEqual(pay.url, "https://checkout.chapa.co/pay/dep-1")
 
-    async def test_pushed_result_has_no_popup_button(self):
+    async def test_no_token_has_no_pay_button(self):
         query = await self._confirm(PushedPaxyo())
-        # A push has no token, so no popup button — and no "I paid"
-        # button either (the credit watcher reports the landing).
+        # A push has no token, so no payment is started and no
+        # pay button — and no "I paid" button either (the credit
+        # watcher reports the landing).
         self.assertIsNone(query.edited_markups[0])
-        self.assertIsNone(self._popup_button(query.edited_markups[0]))
+        self.assertIsNone(self._pay_button(query.edited_markups[0]))
         self.assertNotIn("I paid", query.edited[0])
         self.assertEqual(query.message.photos_sent, [])
 
@@ -5001,21 +5041,21 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
         query = await self._confirm(NoCheckoutUrlPaxyo())
         self.assertNotIn("Open:", query.edited[0])
         self.assertIsNone(query.edited_markups[0])
-        self.assertIsNone(self._popup_button(query.edited_markups[0]))
+        self.assertIsNone(self._pay_button(query.edited_markups[0]))
 
-    async def test_retrydep_with_token_sends_popup_button(self):
+    async def test_retrydep_sends_checkout_button(self):
         bot.FAILED_DEPOSIT[1] = {
             "user_id": 1, "amount": 10,
         }
         query = await self._run_callback("retrydep", paxyo=FakePaxyo())
         self.assertTrue(query.answered)
         self.assertEqual(len(query.edited), 1)
-        popup = self._popup_button(query.edited_markups[0])
-        self.assertIsNotNone(popup)
-        self.assertIn("deposit-app.html", popup.web_app.url)
+        pay = self._pay_button(query.edited_markups[0])
+        self.assertIsNotNone(pay)
+        self.assertEqual(pay.url, "https://checkout.chapa.co/pay/dep-1")
         self.assertEqual(bot.FAILED_DEPOSIT, {})
 
-    async def test_502_still_offers_old_webapp_not_popup(self):
+    async def test_502_still_offers_old_webapp_not_checkout(self):
         fake = FakePaxyo(
             deposit_error="You are not allowed for direct charges, "
                           "please contact us!",
@@ -5025,22 +5065,39 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
         query = await self._confirm(fake)
         self.assertIn("couldn't be sent", query.edited[0])
         markup = query.edited_markups[0]
-        # The fallback is still the old login-page Web App, not the
-        # popup (there is no token to open it with) — one button
-        # row only now, plus the retry row.
+        # The fallback is still the old login-page Web App, not a
+        # checkout button (there is no checkout URL to open) — one
+        # button row only now, plus the retry row.
         rows = markup.inline_keyboard
         self.assertEqual(rows[0][0].web_app.url, bot.DEPOSIT_WEBAPP_URL)
         for row in rows:
             for button in row:
                 url = getattr(getattr(button, "web_app", None), "url", "") or ""
                 self.assertNotIn("deposit-app.html", url)
+                self.assertNotIn("checkout.chapa.co", url)
+
+    async def test_payment_start_502_offers_old_webapp(self):
+        # The create worked but the payment start was refused
+        # (Chapa down): same fallback as a failed create — the
+        # embedded page, with the draft kept for "Try again".
+        fake = FakePaxyo(
+            payment_error="Payment could not be started.",
+            payment_error_status=502,
+        )
+        query = await self._confirm(fake)
+        self.assertIn("couldn't be sent", query.edited[0])
+        rows = query.edited_markups[0].inline_keyboard
+        self.assertEqual(rows[0][0].web_app.url, bot.DEPOSIT_WEBAPP_URL)
+        self.assertEqual(fake.payment_starts, [])
+        self.assertEqual(len(bot.FAILED_DEPOSIT), 1)
 
 
 class TestDepositRedesign(unittest.IsolatedAsyncioTestCase):
     """Deposit redesign (owner, 17 Nov 2026): amount only in chat,
-    checkout URL never exposed, method + phone on the popup page,
-    credit automatic via the Chapa callback + the bot's credit
-    watcher — no "I paid" tap anywhere."""
+    checkout URL only as a button target (never as text), method
+    + phone collected by Chapa on its own checkout page, credit
+    automatic via the Chapa callback + the bot's credit watcher
+    — no "I paid" tap anywhere."""
 
     def setUp(self):
         for store in (
@@ -5071,36 +5128,6 @@ class TestDepositRedesign(unittest.IsolatedAsyncioTestCase):
             await bot.handle_order_text(update, None, text)
         return msg
 
-    def _all_text_and_urls(self, msg, query=None):
-        """Every string the bot showed the user, plus every URL in
-        every button — the checkout URL must appear in none of them."""
-        bits = list(msg.text_sent)
-        for markup in list(msg.markups):
-            if markup is None:
-                continue
-            for row in markup.inline_keyboard:
-                for button in row:
-                    bits.append(button.text)
-                    web_app = getattr(button, "web_app", None)
-                    if web_app is not None:
-                        bits.append(web_app.url)
-                    if getattr(button, "url", None):
-                        bits.append(button.url)
-        if query is not None:
-            bits.extend(query.edited)
-            for markup in query.edited_markups:
-                if markup is None:
-                    continue
-                for row in markup.inline_keyboard:
-                    for button in row:
-                        bits.append(button.text)
-                        web_app = getattr(button, "web_app", None)
-                        if web_app is not None:
-                            bits.append(web_app.url)
-                        if getattr(button, "url", None):
-                            bits.append(button.url)
-        return "\n".join(bits)
-
     async def test_amount_only_never_asks_phone_or_method(self):
         # (a) The whole chat flow: ask amount, Confirm, popup
         # button — no method question, no phone question, ever.
@@ -5123,10 +5150,11 @@ class TestDepositRedesign(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Telebirr or CBE", " ".join(msg2.text_sent))
         self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
 
-    async def test_no_checkout_url_anywhere_in_chat(self):
-        # (b) After Confirm, the checkout URL appears nowhere:
-        # not in the message text, not as a plain-link button,
-        # not in the Web App URL — only the popup token does.
+    async def test_checkout_url_only_as_button_target_never_as_text(self):
+        # (b) After Confirm, the checkout URL appears nowhere as
+        # text: not in the message, not in a button label. It IS
+        # the URL button's target — that is the one place it may
+        # appear — and there is no Web App button any more.
         fake = FakePaxyo()
         await self._send(
             "deposit 10",
@@ -5138,21 +5166,22 @@ class TestDepositRedesign(unittest.IsolatedAsyncioTestCase):
             f"confirm:{confirm_id}", message_text="Please confirm:")
         with mock.patch("bot.paxyo", fake):
             await bot.on_callback(FakeCallbackUpdate(query), None)
-        shown = self._all_text_and_urls(FakeMessage(), query)
-        self.assertNotIn("checkout.chapa.co", shown)
-        self.assertNotIn("checkout_url", shown)
-        self.assertIn("deposit-app.html", shown)
-        self.assertIn("token=", shown)
-        # And the keyboard is exactly one Web App button.
+        self.assertNotIn("checkout.chapa.co", query.edited[0])
+        self.assertNotIn("checkout_url", query.edited[0])
+        self.assertNotIn("deposit-app.html", query.edited[0])
+        # And the keyboard is exactly one URL button.
         rows = query.edited_markups[0].inline_keyboard
         self.assertEqual(len(rows), 1)
-        self.assertIsNotNone(rows[0][0].web_app)
-        self.assertIsNone(getattr(rows[0][0], "url", None))
-        self.assertIsNone(getattr(rows[0][0], "callback_data", None))
+        button = rows[0][0]
+        self.assertIsNone(getattr(button, "web_app", None))
+        self.assertEqual(
+            button.url, "https://checkout.chapa.co/pay/dep-1")
+        self.assertNotIn("checkout.chapa.co", button.text)
+        self.assertIsNone(getattr(button, "callback_data", None))
 
-    def test_popup_keyboard_has_no_paid_button(self):
-        markup = bot.deposit_popup_keyboard(
-            {"deposit_id": "dep-1", "popup_token": "tok-1"},
+    def test_checkout_keyboard_has_no_paid_button(self):
+        markup = bot.deposit_checkout_keyboard(
+            {"checkout_url": "https://checkout.chapa.co/pay/dep-1"},
             {"amount": 10}, "en",
         )
         texts = [
@@ -5235,10 +5264,14 @@ class TestDepositRedesign(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDepositPopupPage(unittest.TestCase):
-    """The popup page itself (server/deposit-app.html, owner,
-    17 Nov 2026): it collects the method + phone, exchanges the
-    one-time token for the checkout, and never shows the checkout
-    URL or an "I paid" tap. Read from disk — the page is static."""
+    """The return page itself (server/deposit-app.html, owner,
+    17 Nov 2026): it is ONLY Chapa's return_url target — after
+    payment Chapa sends the user back here (?paid=1) and the page
+    returns to the chat by itself. There is NO form on it any
+    more: no method picker, no phone field, no payment start.
+    The bot opens the Chapa checkout directly, and Chapa collects
+    the method + phone on its own page. Read from disk — the page
+    is static."""
 
     @classmethod
     def setUpClass(cls):
@@ -5247,17 +5280,23 @@ class TestDepositPopupPage(unittest.TestCase):
             "server", "deposit-app.html",
         ).read_text()
 
-    def test_collects_method_and_phone(self):
-        # (c) All four methods as picker buttons, plus a phone field.
+    def test_no_method_or_phone_form(self):
+        # (owner, 17 Nov 2026): the form is gone entirely — the
+        # user never picks a method or types a phone number here.
         for method in ("telebirr", "cbebirr", "mpesa", "cbe"):
-            self.assertIn(f'data-method="{method}"', self.page)
-        self.assertIn('id="phone"', self.page)
-        self.assertIn("Proceed to payment", self.page)
+            self.assertNotIn(f'data-method="{method}"', self.page)
+        self.assertNotIn('id="phone"', self.page)
+        self.assertNotIn('id="form"', self.page)
+        self.assertNotIn("Proceed to payment", self.page)
+        self.assertNotIn("Choose how to pay", self.page)
 
-    def test_exchanges_token_for_checkout(self):
-        self.assertIn("/payment", self.page)
-        self.assertIn("token", self.page)
-        self.assertIn("checkout_url", self.page)
+    def test_no_payment_start_from_page(self):
+        # Nothing on this page starts a payment or exchanges a
+        # token: no fetch, no checkout URL, no token, no opener.
+        self.assertNotIn("fetch(", self.page)
+        self.assertNotIn("checkout_url", self.page)
+        self.assertNotIn("popup_token", self.page)
+        self.assertNotIn("openCheckout", self.page)
 
     def test_no_visible_checkout_link_and_no_paid_button(self):
         self.assertNotIn("checkout.chapa.co", self.page)
@@ -5265,43 +5304,12 @@ class TestDepositPopupPage(unittest.TestCase):
         self.assertNotIn("check it", self.page)
 
     def test_no_embedded_chapa_iframe(self):
-        # Owner, 17 Nov 2026: the embedded Chapa iframe failed live
-        # (blank page, "CSRF token mismatch", masked phone) — the
-        # middle "Payment" page is gone entirely, frame and all.
+        # The embedded Chapa iframe failed live (blank page,
+        # "CSRF token mismatch", masked phone) — there is no frame
+        # on this page at all.
         self.assertNotIn("<iframe", self.page.lower())
         self.assertNotIn('id="frame"', self.page)
         self.assertNotIn('id="pay"', self.page)
-        self.assertNotIn("Payment page not loading? Open it here", self.page)
-
-    def test_checkout_opens_at_once_via_openlink(self):
-        # One tap from Proceed to paying: the checkout URL is
-        # opened immediately with Telegram.WebApp.openLink, with a
-        # plain new-tab fallback outside Telegram — never shown as
-        # text and never loaded in a frame.
-        self.assertIn("tg.openLink", self.page)
-        self.assertIn('window.open', self.page)
-        self.assertIn("openCheckout(data.checkout_url)", self.page)
-
-    def test_no_waiting_screen_after_pay(self):
-        # Owner, 17 Nov 2026: after "Proceed to payment" there is
-        # no waiting screen at all — the popup closes and the only
-        # thing the user sees after the tap is Chapa.
-        self.assertNotIn('id="waiting"', self.page)
-        self.assertNotIn("Payment opened in a new tab", self.page)
-        self.assertNotIn("Open payment page again", self.page)
-        self.assertNotIn('id="wait-amount"', self.page)
-        self.assertNotIn('id="wait-method"', self.page)
-        self.assertNotIn("showWaiting", self.page)
-
-    def test_popup_closes_itself_after_opening_checkout(self):
-        # After the checkout URL opens, the popup closes itself:
-        # tg.close() inside Telegram, window.close() as the
-        # outside-Telegram fallback, after a short delay so the
-        # open cannot be swallowed by the close.
-        self.assertIn("openCheckout(data.checkout_url)", self.page)
-        self.assertIn("tg.close()", self.page)
-        self.assertIn("window.close()", self.page)
-        self.assertIn("setTimeout(closePopup, 600)", self.page)
 
     def test_paid_view_returns_to_chat_automatically(self):
         # ?paid=1 (Chapa's return_url) sends the user back to the
@@ -5314,19 +5322,75 @@ class TestDepositPopupPage(unittest.TestCase):
         self.assertIn("Returning to the chat", self.page)
         self.assertIn('id="back-chat"', self.page)
 
-    def test_pushed_view_closes_by_itself(self):
-        # No checkout page here (Chapa pushed a prompt to the
-        # phone): the popup shows "Check your phone" briefly and
-        # then closes itself; the credit notice arrives in chat.
-        self.assertIn("Check your phone", self.page)
-        self.assertIn("setTimeout(closePopup, 3000)", self.page)
-
     def test_popup_stays_compact_no_fullscreen_expand(self):
-        # The popup must not take the full screen: no expand() call.
+        # The page must not take the full screen: no expand() call.
         self.assertNotIn("tg.expand()", self.page)
 
     def test_paid_view_says_automatic(self):
         self.assertIn("updates automatically", self.page)
+
+    def test_nourl_guidance_still_present(self):
+        self.assertIn("start a deposit in the chat first", self.page)
+
+
+class TestDepositNoPhonePayment(unittest.TestCase):
+    """Payment without method/phone (owner, 17 Nov 2026): the bot
+    starts the payment with the one-time token alone after
+    Confirm, and Chapa collects the method + phone on its own
+    checkout page — there is no popup form any more. Read from
+    disk — api-deposits.php is PHP, and there is no php binary
+    in this VM, so these pin the wiring and the exact validation
+    code; php -l must run on the server at install time."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.php = pathlib.Path(
+            os.path.dirname(os.path.abspath(__file__)),
+            "api-deposits.php",
+        ).read_text()
+
+    def test_payment_exchange_accepts_token_only(self):
+        # bot_dep_payment: no method, no phone required — the
+        # token alone starts the payment.
+        self.assertIn("function bot_dep_payment($deposit_id)", self.php)
+        self.assertIn("$token = (string)($in['token'] ?? '');", self.php)
+        self.assertIn("if ($token === '') dep_fail(400, 'token is required.');", self.php)
+
+    def test_payment_exchange_keeps_together_rule(self):
+        # One of method/phone without the other is still refused
+        # — half a payment cannot start.
+        self.assertIn(
+            "if (($method === null) !== ($phone === null)) {", self.php)
+        self.assertIn(
+            "dep_fail(400, 'method and phone must be sent together.');",
+            self.php)
+
+    def test_payment_start_skips_direct_charge_without_phone(self):
+        # dep_start_payment: with no method/phone there is no
+        # Direct Charge push (it needs a phone) — the checkout is
+        # initialised straight away.
+        self.assertIn(
+            "if ($method === null || $phone === null) {", self.php)
+        self.assertIn(
+            "$init = dep_chapa_initialize($deposit_id, $tx_ref, $amount, $user);",
+            self.php)
+        self.assertIn("return [false, 'checkout', $init, null];", self.php)
+
+    def test_initialize_sends_no_phone(self):
+        # The checkout initialise call carries no phone at all —
+        # Chapa shows its own empty phone field on the checkout
+        # page. (Chapa's docs: "Phone number is not required".)
+        self.assertIn(
+            "function dep_chapa_initialize($deposit_id, $tx_ref, $amount, $user) {",
+            self.php)
+        self.assertNotIn("phone_number", self.php)
+
+    def test_direct_charge_still_uses_phone_when_given(self):
+        # The old path is untouched: with method + phone the
+        # Direct Charge attempt still runs first, with the
+        # normalised 251-form as 'mobile'.
+        self.assertIn("'mobile' => $phone,", self.php)
+        self.assertIn("'/charges?type=' . $type", self.php)
 
 
 class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
@@ -5578,6 +5642,56 @@ class TestDepositApiClient(unittest.IsolatedAsyncioTestCase):
                 {"telegram_id": 1, "amount": 10, "method": "telebirr",
                  "phone": "25199387383"},
             )
+        finally:
+            await client._client.aclose()
+
+    async def test_start_deposit_payment_posts_token_only(self):
+        # Payment start (owner, 17 Nov 2026): the bot exchanges
+        # the one-time token for the checkout right after Confirm
+        # — token only, no method, no phone in the body.
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={
+                        "deposit_id": "dep-1", "pushed": False,
+                        "auth_type": "checkout",
+                        "checkout_url":
+                            "https://checkout.chapa.co/pay/dep-1",
+                        "status": "pending",
+                    }
+                ),
+            ) as send:
+                result = await client.start_deposit_payment(
+                    "dep-1", "tok-dep-1")
+            self.assertEqual(
+                result["checkout_url"],
+                "https://checkout.chapa.co/pay/dep-1",
+            )
+            request = send.call_args.args[0]
+            self.assertEqual(request.method, "POST")
+            self.assertTrue(
+                request.url.path.endswith("/deposits/dep-1/payment"))
+            self.assertEqual(request.headers["X-Bot-Secret"], "test-secret")
+            self.assertEqual(
+                json.loads(request.content), {"token": "tok-dep-1"})
+        finally:
+            await client._client.aclose()
+
+    async def test_start_deposit_payment_404_returns_none(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "POST",
+                "https://paxyo.et/api/bot/deposits/dep-1/payment")
+            resp = bot.httpx.Response(404, request=req)
+            err = bot.httpx.HTTPStatusError("not found", request=req, response=resp)
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertIsNone(
+                    await client.start_deposit_payment("dep-1", "tok-dep-1"))
         finally:
             await client._client.aclose()
 

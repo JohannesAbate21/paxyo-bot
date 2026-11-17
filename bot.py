@@ -507,18 +507,14 @@ DEPOSIT_WEBAPP_URL = os.environ.get(
 )
 PAXYO_SITE_URL = "https://paxyo.et/"
 
-# Deposit popup (owner, 17 Nov 2026): the deposit page the bot
-# opens as a Web App after a deposit is confirmed in chat
-# (server/deposit-app.html, installed at public_html/deposit-app.html).
-# It receives deposit_id + popup_token + amount in the query — no
-# checkout URL, no method, no phone: the page asks for the method +
-# phone itself and exchanges the one-time token for the checkout,
-# so the checkout URL never appears in the chat. The URL carries
-# no website login, no secret, no API key anywhere in it.
-# Override with PAXYO_DEPOSIT_POPUP_URL when the page moves.
-DEPOSIT_POPUP_URL = os.environ.get(
-    "PAXYO_DEPOSIT_POPUP_URL", "https://paxyo.et/deposit-app.html"
-)
+# Deposit return page (owner, 17 Nov 2026): server/deposit-app.html
+# is now only Chapa's return_url target — after payment Chapa
+# sends the user back to its ?paid=1 view, which returns to the
+# chat by itself. The bot no longer opens the page (no Web App
+# button, no popup form): after Confirm the bot opens the Chapa
+# checkout directly with a URL button, and Chapa collects the
+# method + phone on its own page. The page stays installed at
+# public_html/deposit-app.html on paxyo.et.
 
 # Shared invite code (owner, 14 Nov 2026): REF3723FB335 gives 20%
 # on the first deposit. It is the FALLBACK code now: a /start with
@@ -1090,33 +1086,33 @@ TEXT = {
     # 17 Nov 2026: the deposit keyboard is one Web App button only
     # — no plain link row, no "I paid" button. The balance credits
     # automatically; see deposit_popup_ready.)
-    # Deposit popup (owner, 16 Nov 2026): the pre-filled deposit page
-    # opens as a Web App after Confirm, when the server returned a
-    # checkout URL. Row 1 opens the popup (everything already filled
-    # in); row 2 is the plain checkout link, for clients where the
-    # Web App cannot open; row 3 rechecks ("I paid"). en + first-pass
-    # am, unreviewed.
+    # Deposit checkout button (owner, 17 Nov 2026): after Confirm
+    # the bot sends ONE URL button that opens the Chapa checkout
+    # directly — Chapa collects the method + phone on its own
+    # page. en + first-pass am, unreviewed.
     "deposit_popup_button": {
         "am": "💳 {amount} ETB ይክፈሉ",
         "en": "💳 Pay {amount} ETB",
     },
-    # Deposit popup (owner, 17 Nov 2026): after Confirm the bot
-    # sends ONE Web App button and this text — no checkout URL in
-    # the chat, no "I paid" button. The method + phone are chosen
-    # on the popup page, and the balance updates automatically
-    # once Chapa confirms the payment (Chapa callback + the bot's
-    # credit watcher), so there is nothing to tap afterwards.
+    # Deposit checkout (owner, 17 Nov 2026): after Confirm the bot
+    # sends ONE URL button and this text — the checkout URL is
+    # the button target only, never message text, and there is no
+    # "I paid" button. The method + phone are chosen on the
+    # payment page (Chapa's checkout), and the balance updates
+    # automatically once Chapa confirms the payment (Chapa
+    # callback + the bot's credit watcher), so there is nothing
+    # to tap afterwards.
     "deposit_popup_ready": {
         "am": (
             "{amount} ETB ለመክፈል ከታች ያለውን ይጫኑ — የክፍያ ዘዴ እና "
-            "ስልክ ቁጥር በገጹ ላይ ይምረጡ። ከከፈሉ በኋላ balance ወዲያው "
+            "ስልክ ቁጥር በክፍያ ገጹ ላይ ይምረጡ። ከከፈሉ በኋላ balance ወዲያው "
             "ይጨምራል — ምንም መጫን አያስፈልግም።"
         ),
         "en": (
             "Tap below to pay {amount} ETB — choose your payment "
-            "method and phone number on the page. Your balance "
-            "updates automatically once the payment succeeds — "
-            "nothing to tap."
+            "method and phone number on the payment page. Your "
+            "balance updates automatically once the payment "
+            "succeeds — nothing to tap."
         ),
     },
     # Deposit recheck ("did my deposit go through?"): the server
@@ -6199,6 +6195,32 @@ class PaxyoClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 log.warning("POST /deposits returned 404 (endpoint not live yet)")
+                return None
+            raise
+
+    async def start_deposit_payment(self, deposit_id, token):
+        """POST /deposits/{id}/payment {token} ->
+        {"deposit_id","pushed","auth_type","checkout_url",
+        "status":"pending"}. Owner, 17 Nov 2026: the bot starts
+        the payment itself right after Confirm, with the one-time
+        popup token only — no method, no phone. The server
+        initialises the Chapa checkout with no phone, and Chapa
+        collects the method + phone on its own page. A 404 means
+        the endpoint is not live yet — returns None."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST",
+                    f"/deposits/{deposit_id}/payment",
+                    {"token": token},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "POST /deposits/{id}/payment returned 404 "
+                    "(endpoint not live yet)"
+                )
                 return None
             raise
 
@@ -20660,11 +20682,42 @@ async def start_deposit(draft, user_id: int):
         return None, "deposit_failed"
     if result is None:  # 404: the endpoint is not live yet
         return None, "deposit_not_ready"
+    # Start the payment right away (owner, 17 Nov 2026): the bot
+    # exchanges the one-time popup token for the Chapa checkout
+    # itself — no method, no phone. Chapa collects the method +
+    # phone on its own checkout page, so there is no popup form
+    # any more: the button below opens the checkout directly.
+    # The checkout URL is the button target only — it never
+    # appears as message text.
+    deposit_id = result.get("deposit_id") if isinstance(result, dict) else None
+    token = result.get("popup_token") if isinstance(result, dict) else None
+    if deposit_id is not None and token:
+        try:
+            pay = await paxyo.start_deposit_payment(deposit_id, token)
+        except httpx.HTTPStatusError as exc:
+            log.warning("start_deposit_payment rejected: %s", exc.response.status_code)
+            if exc.response.status_code >= 500:
+                return None, "deposit_unavailable"
+            try:
+                data = exc.response.json()
+            except Exception:
+                data = {}
+            message = None
+            if isinstance(data, dict):
+                message = data.get("error") or data.get("message")
+            return None, message or "deposit_failed"
+        except Exception as exc:
+            log.warning("start_deposit_payment failed: %s", exc)
+            return None, "deposit_failed"
+        if pay is None:  # 404: the endpoint is not live yet
+            return None, "deposit_unavailable"
+        if isinstance(pay, dict) and pay.get("checkout_url"):
+            result = dict(result)
+            result["checkout_url"] = pay["checkout_url"]
     # Remember the deposit id so "did my deposit go through?"
     # can recheck this deposit without listing first — and watch
     # it for automatic credit, so the user is told the moment it
     # lands without tapping anything.
-    deposit_id = result.get("deposit_id") if isinstance(result, dict) else None
     if deposit_id is not None:
         LAST_DEPOSIT[user_id] = deposit_id
         import time
@@ -20793,58 +20846,36 @@ def deposit_webapp_keyboard(lang: str, amount=None, allow_retry: bool = False,
     return InlineKeyboardMarkup(rows)
 
 
-def deposit_popup_url(result, amount):
-    """Web App URL for the deposit popup (owner, 17 Nov 2026):
-    DEPOSIT_POPUP_URL with deposit_id + popup_token + amount in
-    the query — nothing else. The popup page (deposit-app.html)
-    asks for the payment method + phone itself and exchanges the
-    one-time token for the checkout, so the checkout URL never
-    appears in the chat, in a button, or in this URL. None when
-    the server returned no deposit id or no token — the caller
-    then sends the plain instructions (or the old Web App
-    fallback on error). The URL carries no secret: deposit_id is
-    the public deposit number and the token is a one-time key for
-    that one pending deposit only (it can only complete that
-    deposit — it cannot read, change or spend anything else)."""
-    deposit_id = str((result or {}).get("deposit_id") or "")
-    token = str((result or {}).get("popup_token") or "")
-    if not deposit_id or not token:
-        return None
-    params = {
-        "deposit_id": deposit_id,
-        "token": token,
-        "amount": format_money(amount),
-    }
-    return DEPOSIT_POPUP_URL + "?" + urllib.parse.urlencode(params)
-
-
-def deposit_popup_keyboard(result, draft, lang: str):
+def deposit_checkout_keyboard(result, draft, lang: str):
     """Inline keyboard for a started deposit (owner, 17 Nov 2026):
-    ONE row — the Web App button that opens the deposit popup.
-    No plain checkout-link row and no "I paid" row: the checkout
-    URL never reaches the chat, and the balance credits
-    automatically (Chapa callback + credit watcher). None when
-    the server returned no popup token."""
-    url = deposit_popup_url(result, draft["amount"])
-    if url is None:
+    ONE row — a plain URL button that opens the Chapa checkout
+    directly. Chapa collects the payment method + phone on its
+    own page, so there is no popup form any more: no Web App
+    button, no method/phone step anywhere in the bot. The
+    checkout URL is the button target only — it never appears as
+    message text — and there is no "I paid" row: the balance
+    credits automatically (Chapa callback + credit watcher).
+    None when the server returned no checkout URL."""
+    url = (result or {}).get("checkout_url") or ""
+    if not isinstance(url, str) or not url.startswith("https://"):
         return None
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             t("deposit_popup_button", lang,
               amount=format_money(draft["amount"])),
-            web_app=WebAppInfo(url=url),
+            url=url,
         )],
     ])
 
 
 def deposit_success_markup(result, draft, lang: str):
     """Keyboard for a started deposit (owner, 17 Nov 2026): the
-    popup keyboard when the server returned a popup token, else
-    None — no "I paid" recheck button any more. (A None markup
-    still replaces the Confirm/Cancel buttons on the edited card,
-    so a user cannot tap Confirm twice; the credit watcher tells
-    them when the deposit lands.)"""
-    return deposit_popup_keyboard(result, draft, lang)
+    checkout button when the server returned a checkout URL,
+    else None — no "I paid" recheck button any more. (A None
+    markup still replaces the Confirm/Cancel buttons on the
+    edited card, so a user cannot tap Confirm twice; the credit
+    watcher tells them when the deposit lands.)"""
+    return deposit_checkout_keyboard(result, draft, lang)
 
 
 def deposit_webapp_message(amount, lang: str, allow_retry: bool = False,

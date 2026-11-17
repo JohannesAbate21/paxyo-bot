@@ -9,13 +9,13 @@
 //     -> amount-only (owner, 17 Nov 2026 — the bot asks for the amount
 //        only in chat): {"deposit_id","popup_token","status":"pending",
 //        "pushed":false,"auth_type":"popup"}. No Chapa call yet, no
-//        checkout URL yet: the popup page (server/deposit-app.html)
-//        collects the method + phone and exchanges the one-time
-//        popup_token for the checkout (next endpoint). The token is
+//        checkout URL yet: the bot exchanges the one-time
+//        popup_token for the checkout (next endpoint) right after
+//        Confirm. The token is
 //        a random 32-hex-char key stored on the deposit row; it can
 //        only complete THAT one pending deposit — it cannot read,
 //        change or spend anything else, and it dies with the deposit
-//        (completed / failed / 48h). The popup page NEVER holds a
+//        (completed / failed / 48h). The bot NEVER holds a
 //        secret or API key and NEVER creates a deposit itself.
 //     -> with method + phone (the old full create, kept for other
 //        callers): {"deposit_id","pushed":true,"auth_type":"ussd",
@@ -25,15 +25,20 @@
 //        chapa.co/...","status":"pending"} (standard Chapa checkout
 //        fallback — 16 Nov 2026 — when Direct Charge is refused).
 //        Methods: telebirr, cbe, cbebirr, mpesa.
-//   POST /api/bot/deposits/{id}/payment   {token, method, phone}
-//     -> the popup page's exchange: validates the one-time token
-//        for THAT pending deposit (no X-Bot-Secret — the popup
-//        cannot hold it; the token IS the auth, so this route must
-//        be exempt from the secret check like the callback), then
-//        starts the payment (Direct Charge, else checkout fallback)
-//        and returns {"deposit_id","pushed","auth_type",
-//        "checkout_url","status":"pending"}. Repeating the call
-//        with the same token returns the SAME checkout URL —
+//   POST /api/bot/deposits/{id}/payment   {token[, method, phone]}
+//     -> the bot's exchange, right after Confirm: validates the
+//        one-time token for THAT pending deposit (no X-Bot-Secret
+//        — the token IS the auth, so this route must be exempt
+//        from the secret check like the callback), then starts the
+//        payment and returns {"deposit_id","pushed","auth_type",
+//        "checkout_url","status":"pending"}. With no method/phone
+//        (owner, 17 Nov 2026) the Direct Charge attempt is skipped
+//        and the Chapa checkout is initialised straight away —
+//        Chapa collects the method + phone on its own checkout
+//        page, so the user never picks them in the bot or a popup.
+//        With method + phone (the old popup exchange) the Direct
+//        Charge attempt still runs first. Repeating the call with
+//        the same token returns the SAME checkout URL —
 //        never a second charge.
 //   POST /api/bot/deposits/callback        {tx_ref, ...} (from Chapa)
 //     -> always 200; verifies with Chapa and credits once, same rules
@@ -314,14 +319,30 @@ function bot_dep_create() {
 
 // --- Shared payment start (Direct Charge, else checkout) -------------
 // Used by bot_dep_create (full create) and bot_dep_payment (the
-// popup page's exchange). Returns [pushed, auth_type, checkout_url,
-// error]: on success pushed is true (USSD prompt sent) or false
-// (checkout fallback), checkout_url is the hosted page (or null on
-// a push); on failure pushed is null and error is the message to
-// report. The deposit row stays pending either way — only a
-// successful start stores an outcome in chapa_response.
+// bot's exchange, token alone after Confirm). Returns [pushed,
+// auth_type, checkout_url, error]: on success pushed is true
+// (USSD prompt sent) or false (checkout fallback), checkout_url
+// is the hosted page (or null on a push); on failure pushed is
+// null and error is the message to report. With no method/phone
+// the Direct Charge attempt is skipped and the checkout is
+// initialised straight away (Chapa collects method + phone on
+// its own page). The deposit row stays pending either way — only
+// a successful start stores an outcome in chapa_response.
 
 function dep_start_payment($db, $deposit_id, $tx_ref, $amount, $user, $method, $phone) {
+    // No method/phone (owner, 17 Nov 2026): the bot started the
+    // payment with the token alone, and Chapa collects the method
+    // + phone on its own checkout page. A Direct Charge push needs
+    // a phone, so it is skipped and the checkout is initialised
+    // straight away. Chapa's initialise API does not require a
+    // phone number (Chapa's docs: a phone number is not required,
+    // but if you pass one it must be 10 digits) — the checkout
+    // page shows its own empty phone field for the user to fill in.
+    if ($method === null || $phone === null) {
+        $init = dep_chapa_initialize($deposit_id, $tx_ref, $amount, $user);
+        if ($init === null) return [null, null, null, 'Payment could not be started.'];
+        return [false, 'checkout', $init, null];
+    }
     $type = ($method === 'cbe') ? 'cbebirr' : $method;
     // Chapa Direct Charge: pushes a USSD prompt to the customer's phone.
     // No checkout link is needed when it works (telebirr / cbebirr /
@@ -369,18 +390,24 @@ function dep_start_payment($db, $deposit_id, $tx_ref, $amount, $user, $method, $
     return [false, 'checkout', $init, null];
 }
 
-// --- POST /api/bot/deposits/{id}/payment (popup page exchange) --------
-// The popup page (server/deposit-app.html) calls this after the
-// user picks a method + phone. Auth is the one-time popup_token
-// the bot was given at create time — NOT the X-Bot-Secret (the
-// popup page cannot hold it), so this route must be exempt from
-// the secret check, like the callback. The token is bound to this
-// deposit id and dies with the deposit; a wrong token, a missing
-// deposit, or a deposit that is no longer pending is refused.
+// --- POST /api/bot/deposits/{id}/payment (bot's exchange) --------
+// The bot calls this right after the user confirms the amount,
+// with the one-time popup_token only. Auth is the token the bot
+// was given at create time — NOT the X-Bot-Secret, so this route
+// must be exempt from the secret check, like the callback. The
+// token is bound to this deposit id and dies with the deposit; a
+// wrong token, a missing deposit, or a deposit that is no longer
+// pending is refused.
+// Method + phone are OPTIONAL (owner, 17 Nov 2026): the bot
+// starts the payment with the token alone, and Chapa collects
+// the method + phone on its own checkout page — the user never
+// picks them in the bot or a popup. One without the other is
+// refused — half a payment cannot start. When both are sent
+// (the old popup exchange) the Direct Charge attempt still runs.
 // Repeating the call with the same token returns the SAME
 // checkout URL (stored in chapa_response) — never a second
 // charge, and a failed first attempt keeps the token usable so
-// the user can retry on the page.
+// the user can retry.
 
 function bot_dep_payment($deposit_id) {
     $in = dep_json_body();
@@ -388,12 +415,21 @@ function bot_dep_payment($deposit_id) {
     if ($token === '') dep_fail(400, 'token is required.');
     $method_in = strtolower(trim((string)($in['method'] ?? '')));
     if ($method_in === 'cbebirr') $method_in = 'cbe';
-    if ($method_in !== 'telebirr' && $method_in !== 'cbe' && $method_in !== 'mpesa') {
-        dep_fail(400, 'method must be telebirr, cbe or mpesa.');
+    $method = null;
+    if ($method_in !== '') {
+        if ($method_in !== 'telebirr' && $method_in !== 'cbe' && $method_in !== 'mpesa') {
+            dep_fail(400, 'method must be telebirr, cbe or mpesa.');
+        }
+        $method = $method_in;
     }
-    $method = $method_in;
-    $phone = dep_normalize_phone($in['phone'] ?? '');
-    if ($phone === null) dep_fail(400, 'Invalid phone number.');
+    $phone = null;
+    if (trim((string)($in['phone'] ?? '')) !== '') {
+        $phone = dep_normalize_phone($in['phone']);
+        if ($phone === null) dep_fail(400, 'Invalid phone number.');
+    }
+    if (($method === null) !== ($phone === null)) {
+        dep_fail(400, 'method and phone must be sent together.');
+    }
     $db = dep_db();
     if ($db === null) dep_fail(500, 'Database is not available.');
     $stmt = $db->prepare('SELECT id, user_id, amount, tx_ref, reference_id, status, chapa_response, created_at FROM deposits WHERE id = ? LIMIT 1');
