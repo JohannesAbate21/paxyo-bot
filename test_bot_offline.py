@@ -5264,6 +5264,39 @@ class TestDepositPopupPage(unittest.TestCase):
         self.assertNotIn("I paid", self.page)
         self.assertNotIn("check it", self.page)
 
+    def test_no_embedded_chapa_iframe(self):
+        # Owner, 17 Nov 2026: the embedded Chapa iframe failed live
+        # (blank page, "CSRF token mismatch", masked phone) — the
+        # middle "Payment" page is gone entirely, frame and all.
+        self.assertNotIn("<iframe", self.page.lower())
+        self.assertNotIn('id="frame"', self.page)
+        self.assertNotIn('id="pay"', self.page)
+        self.assertNotIn("Payment page not loading? Open it here", self.page)
+
+    def test_checkout_opens_at_once_via_openlink(self):
+        # One tap from Proceed to paying: the checkout URL is
+        # opened immediately with Telegram.WebApp.openLink, with a
+        # plain new-tab fallback outside Telegram — never shown as
+        # text and never loaded in a frame.
+        self.assertIn("tg.openLink", self.page)
+        self.assertIn('window.open', self.page)
+        self.assertIn("openCheckout(data.checkout_url)", self.page)
+
+    def test_compact_waiting_screen(self):
+        # After Proceed, only a small waiting screen: amount,
+        # chosen method, "Payment opened in a new tab", one
+        # "Open payment page again" button, automatic-credit note.
+        self.assertIn('id="waiting"', self.page)
+        self.assertIn("Payment opened in a new tab", self.page)
+        self.assertIn("Open payment page again", self.page)
+        self.assertIn('id="wait-amount"', self.page)
+        self.assertIn('id="wait-method"', self.page)
+        self.assertIn("updates automatically", self.page)
+
+    def test_popup_stays_compact_no_fullscreen_expand(self):
+        # The popup must not take the full screen: no expand() call.
+        self.assertNotIn("tg.expand()", self.page)
+
     def test_paid_view_says_automatic(self):
         self.assertIn("updates automatically", self.page)
 
@@ -10766,6 +10799,153 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await bot.ai_transcribe(b"x"), "g")
         groq.assert_awaited_once()
         gem.assert_awaited_once()
+
+
+class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
+    """Grok (xAI) is the first AI (17 Nov 2026, owner: Grok first,
+    DeepSeek second as fallback). xAI's API is OpenAI-compatible,
+    so the provider mirrors DeepSeek exactly.
+    Order: Grok -> DeepSeek -> Zen -> Qwen -> Mistral -> Groq ->
+    OpenAI -> Gemini -> Kilo -> OpenRouter -> GLM. Grok is
+    expensive vs DeepSeek and only runs when GROK_API_KEY is set;
+    without the key the order is unchanged (DeepSeek first).
+    Grok has no voice transcription — ai_transcribe stays on
+    Groq Whisper. NOTE: GROQ_API_KEY is a different company
+    (Groq) and cannot be used for Grok."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.x.ai/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    def test_grok_default_model_is_grok_4(self):
+        self.assertEqual(bot.GROK_MODEL, "grok-4")
+
+    async def test_grok_generate_returns_reply_text(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROK_API_KEY", "xai-test"):
+            self.assertEqual(await bot.grok_generate("hi"), "hello")
+        post = client.posts[0]
+        self.assertTrue(post["url"].endswith("/chat/completions"))
+        self.assertTrue(post["url"].startswith("https://api.x.ai/v1"))
+        self.assertEqual(
+            post["headers"]["Authorization"], "Bearer xai-test"
+        )
+        self.assertEqual(post["json"]["model"], "grok-4")
+        self.assertEqual(
+            post["json"]["messages"], [{"role": "user", "content": "hi"}]
+        )
+
+    async def test_grok_generate_with_system_message(self):
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROK_API_KEY", "xai-test"):
+            await bot.grok_generate("hi", system="be helpful")
+        self.assertEqual(
+            client.posts[0]["json"]["messages"],
+            [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    async def test_grok_generate_retries_429_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._status_error(429), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.grok_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+
+    async def test_ai_generate_prefers_grok_over_deepseek(self):
+        with mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch(
+                 "bot.grok_generate",
+                 new=mock.AsyncMock(return_value="k"),
+             ) as grok, \
+             mock.patch(
+                 "bot.deepseek_generate", new=mock.AsyncMock()
+             ) as deepseek, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "k")
+        grok.assert_awaited_once()
+        deepseek.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_deepseek_when_grok_raises(self):
+        # Grok 429s (daily limit) after its own retries: DeepSeek
+        # takes over.
+        with mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch(
+                 "bot.grok_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("grok down")
+                 ),
+             ) as grok, \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(return_value="d"),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "d")
+        grok.assert_awaited_once()
+        deepseek.assert_awaited_once()
+        gem.assert_not_called()
+
+    async def test_ai_generate_deepseek_first_without_grok_key(self):
+        # No GROK_API_KEY: the order is unchanged, DeepSeek first.
+        with mock.patch.object(bot, "GROK_API_KEY", ""), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch(
+                 "bot.grok_generate", new=mock.AsyncMock()
+             ) as grok, \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(return_value="d"),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "d")
+        grok.assert_not_called()
+        deepseek.assert_awaited_once()
+        gem.assert_not_called()
+
+    async def test_ai_generate_grok_failure_logs_no_bearer(self):
+        err = self._status_error(404)
+        client = GroqFlakyClient([err, err, err])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
+             mock.patch.object(
+                 bot, "gemini_generate", new=mock.AsyncMock(return_value="hello")
+             ), mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()), \
+             self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            result = await bot.ai_generate("hi")
+        self.assertEqual(result, "hello")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "Grok generate failed, trying next provider (HTTP 404)",
+            joined,
+        )
+        self.assertNotIn("Bearer ", joined)
+        self.assertNotIn("xai-test", joined)
+        self.assertNotIn("key=", joined)
 
 
 class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):

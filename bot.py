@@ -113,6 +113,23 @@ OPENAI_URL = "https://api.openai.com/v1"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_URL = "https://api.groq.com/openai/v1"
+# Grok (xAI) — the FIRST AI since 17 Nov 2026 (owner: Grok first,
+# DeepSeek second as fallback). xAI's API is OpenAI-compatible
+# (same chat-completions shape as DeepSeek/Groq/OpenAI), base URL
+# https://api.x.ai/v1. Default model grok-4 — the Grok 4 alias,
+# which xAI keeps pointed at the current Grok 4 flagship, so the
+# model is an env var on purpose: if xAI retires the alias, switch
+# GROK_MODEL in Fly secrets, not the code. Grok is expensive vs
+# DeepSeek (about $2/1M input, $6/1M output), so it only runs when
+# GROK_API_KEY is set; without the key the order is unchanged
+# (DeepSeek first). A Grok failure — including its daily limit —
+# falls through to DeepSeek automatically in ai_generate. Grok has
+# no voice transcription — ai_transcribe stays on Groq Whisper.
+# The key is a Fly secret, never in code. NOTE: GROQ_API_KEY is a
+# different company (Groq) and cannot be used for Grok.
+GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
+GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4")
+GROK_URL = "https://api.x.ai/v1"
 # DeepSeek — the FIRST AI since the evening of 13 Nov 2026: Groq's
 # free tier hit its daily token limit (73% used by 21:48 EAT) and
 # Groq had temporarily disabled Developer (paid) upgrades, so the
@@ -7179,6 +7196,61 @@ async def groq_transcribe(audio_bytes: bytes, language: str = None) -> str:
     return str(data.get("text") or "").strip()
 
 
+# ------------------------------------------------------ Grok ------
+# Grok (xAI) is the first AI (17 Nov 2026, owner: Grok first,
+# DeepSeek second as fallback). xAI's API is OpenAI-compatible, so
+# the three functions below mirror the DeepSeek ones exactly (same
+# inputs, same outputs, same retry shape), with xAI's base URL and
+# its own key/model env vars. Grok has no voice transcription —
+# ai_transcribe stays on Groq Whisper — and pictures stay on
+# OpenAI/Gemini vision.
+
+async def _grok_post(path: str, headers=None, json=None) -> dict:
+    """One POST to the xAI (Grok) API, with retries on rate limits
+    and server errors. Same shape as _groq_post (two retries,
+    after 5s then 15s; 500 joins 429/503). The client shape is
+    identical (timeout 120s, trust_env False)."""
+    url = GROK_URL + path
+    for attempt, delay in enumerate((0, 5, 15)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (429, 500, 503) and attempt < 2:
+                log.warning(
+                    "Grok %s, retrying (attempt %d of 3)", status, attempt + 2
+                )
+                continue
+            raise
+
+
+def _grok_headers() -> dict:
+    return {"Authorization": f"Bearer {GROK_API_KEY}"}
+
+
+async def grok_generate(prompt: str, system: str = None) -> str:
+    """One Grok text call (OpenAI-compatible chat completions).
+    Returns the reply text (may be empty)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    data = await _grok_post(
+        "/chat/completions",
+        headers=_grok_headers(),
+        json={"model": GROK_MODEL, "messages": messages},
+    )
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 # --------------------------------------------------- DeepSeek ------
 # DeepSeek is the first AI (13 Nov 2026, evening): Groq's free
 # tier kept hitting its daily token limit and Groq had temporarily
@@ -7578,7 +7650,11 @@ def _log_ai_failure(message: str, exc) -> None:
 
 
 async def ai_generate(prompt: str, system: str = None) -> str:
-    """Text from the AI: DeepSeek when DEEPSEEK_API_KEY is set, else
+    """Text from the AI: Grok when GROK_API_KEY is set (first since
+    17 Nov 2026, owner: Grok first, DeepSeek second as fallback;
+    Grok is expensive vs DeepSeek, and a Grok failure — including
+    its daily limit — falls through to DeepSeek), else DeepSeek when
+    DEEPSEEK_API_KEY is set, else
     Zen when ZEN_API_KEY is set (model deepseek-v4.1-flash-free —
     free tier, no card, owner approved 14 Nov 2026; a Zen failure
     falls through to Qwen), else Qwen when QWEN_API_KEY is set,
@@ -7602,6 +7678,12 @@ async def ai_generate(prompt: str, system: str = None) -> str:
     silent). The last provider's error is re-raised — never retried
     — so a total failure fails once, not twice."""
     last_exc = None
+    if GROK_API_KEY:
+        try:
+            return await grok_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("Grok generate failed, trying next provider", exc)
+            last_exc = exc
     if DEEPSEEK_API_KEY:
         try:
             return await deepseek_generate(prompt, system=system)
