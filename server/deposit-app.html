@@ -1,31 +1,23 @@
 <!DOCTYPE html>
 <!--
-  Paxyo deposit popup (owner, 17 Nov 2026): the deposit page
-  @paxorder_bot opens INSIDE Telegram as a Web App after the user
-  confirms an amount in chat. The bot creates the deposit first
-  (amount only) and passes deposit_id + a one-time token + amount
-  in the URL query — this page NEVER asks for a website login,
-  NEVER holds a secret or API key, and NEVER creates a deposit
-  itself. It collects the payment method + phone HERE, exchanges
-  the token for the Chapa checkout (POST /api/bot/deposits/{id}/
-  payment — the token is the auth for that one pending deposit),
-  and opens the checkout straight away in a new tab with
-  Telegram.WebApp.openLink — there is NO middle "Payment" page
-  and NO embedded Chapa iframe here. The iframe was removed on
-  17 Nov 2026 after it failed live: Chapa showed a blank page,
-  "CSRF token mismatch", and a masked "09********" phone field
-  inside the frame, and payment only worked when Chapa opened in
-  its own tab. The checkout URL is never shown as text anywhere
-  on this page — it is used as a link target only.
+  Paxyo deposit return page (owner, 17 Nov 2026): this page is
+  ONLY Chapa's return_url target — after the user pays on
+  Chapa's checkout page, Chapa sends them back here (?paid=1)
+  and this page sends them back to the Telegram chat BY ITSELF.
 
-  Install: copy to public_html/deposit-app.html on paxyo.et
-  (https://paxyo.et/deposit-app.html). The bot opens it as
-  DEPOSIT_POPUP_URL; the server sends Chapa's return_url here
-  (?paid=1) after payment.
+  There is NO form on this page any more: no payment method
+  picker, no phone field, no proceed button. The bot
+  starts the payment itself right after Confirm (POST
+  /api/bot/deposits/{id}/payment with the one-time token only)
+  and gives the user ONE button that opens the Chapa checkout
+  directly. Chapa collects the payment method (Telebirr, CBE
+  Birr, M-Pesa, CBE) and the phone number on its own checkout
+  page — the user never picks them in the bot or here. That is
+  also why the old masked-phone problem is gone: nothing here
+  ever held a phone number to carry over.
 
-  Views (?paid=1 shows the success view, anything else the form):
-  - form: amount (read-only) + method picker (Telebirr, CBE,
-    M-Pesa, CBE Birr) + phone + "Proceed to payment".
+  Views (?paid=1 shows the success view, anything else the
+  guidance view):
   - paid: "Payment done" — shown briefly, then the page sends
     the user back to the Telegram chat BY ITSELF (no tap): it
     closes the Web App when it is inside Telegram, otherwise it
@@ -33,17 +25,11 @@
     stays as a fallback. Credit does NOT depend on this page:
     Chapa's callback credits server-side and the bot watcher
     notifies in chat either way.
-  - pushed: Chapa sent a payment prompt to the phone instead of
-    a checkout page — approve it on the phone; the popup closes
-    by itself a few seconds later and the chat is where the
-    balance update arrives.
-  - no deposit_id/token: open-from-the-bot guidance.
+  - no deposit paid yet: open-from-the-bot guidance.
 
-  After "Proceed to payment" there is NO waiting screen at all:
-  the checkout opens and this popup closes itself, so the only
-  thing the user sees after the tap is Chapa. (Owner, 17 Nov
-  2026: the waiting screen was removed because the user wants
-  nothing between the tap and Chapa.)
+  Install: copy to public_html/deposit-app.html on paxyo.et
+  (https://paxyo.et/deposit-app.html). Chapa's return_url points
+  here (?paid=1&deposit_id=...).
 -->
 <html lang="en">
 <head>
@@ -59,63 +45,17 @@
   .logo { color: var(--blue); font-weight: 800; font-size: 22px; letter-spacing: .3px; }
   h1 { font-size: 20px; margin: 18px 0 4px; }
   p { color: var(--muted); line-height: 1.5; margin: 6px 0; }
-  .amount { font-size: 34px; font-weight: 800; margin: 10px 0 2px; }
-  .amount small { font-size: 16px; font-weight: 600; color: var(--muted); }
-  .rows { border-top: 1px solid var(--line); margin: 16px 0; }
-  .row { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
-  .row .k { color: var(--muted); }
-  .row .v { font-weight: 600; text-align: right; word-break: break-all; }
   .btn { display: block; width: 100%; border: 0; border-radius: 12px; background: var(--blue); color: #fff; font-size: 17px; font-weight: 700; padding: 15px 12px; cursor: pointer; text-align: center; text-decoration: none; margin-top: 14px; }
-  .btn.secondary { background: #eef3fd; color: var(--blue); }
   .btn.ghost { background: #fff; color: var(--blue); border: 1px solid var(--line); }
-  .btn:disabled { opacity: .55; cursor: default; }
   .note { font-size: 13px; }
-  .err { color: #b3261e; font-size: 14px; }
-  #paid, #pushed, #nourl { display: none; }
+  #paid, #nourl { display: none; }
   .check { font-size: 44px; }
   .hidden { display: none !important; }
-  .methods { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 4px; }
-  .method { border: 1px solid var(--line); border-radius: 12px; background: #fff; font-size: 16px; font-weight: 600; padding: 13px 8px; cursor: pointer; color: var(--ink); }
-  .method[aria-pressed="true"] { border-color: var(--blue); background: #eef3fd; color: var(--blue); }
-  label { display: block; font-size: 14px; color: var(--muted); margin: 14px 0 6px; }
-  input[type="tel"] { width: 100%; font-size: 17px; padding: 13px 12px; border: 1px solid var(--line); border-radius: 12px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="logo">Paxyo</div>
-
-  <div id="form">
-    <h1>Deposit</h1>
-    <p>Choose how to pay and enter your phone number — then proceed to payment.</p>
-    <div class="amount"><span id="sum-amount">—</span> <small>ETB</small></div>
-    <div class="rows">
-      <div class="row"><span class="k">Deposit ID</span><span class="v" id="sum-id">—</span></div>
-    </div>
-    <label id="method-label">Payment method</label>
-    <div class="methods" role="group" aria-labelledby="method-label">
-      <button type="button" class="method" data-method="telebirr" aria-pressed="false">Telebirr</button>
-      <button type="button" class="method" data-method="cbebirr" aria-pressed="false">CBE Birr</button>
-      <button type="button" class="method" data-method="mpesa" aria-pressed="false">M-Pesa</button>
-      <button type="button" class="method" data-method="cbe" aria-pressed="false">CBE</button>
-    </div>
-    <label for="phone">Phone number</label>
-    <input type="tel" id="phone" inputmode="tel" autocomplete="tel"
-           placeholder="09... or 07..." aria-describedby="phone-hint">
-    <p class="note" id="phone-hint">The number the payment goes to — for example 09..., 07... or 2519...</p>
-    <p class="err hidden" id="form-error" role="alert"></p>
-    <button class="btn" id="proceed">Proceed to payment</button>
-    <p class="note">The payment page opens straight away and this popup closes. After you pay, you come back to the chat automatically — your balance updates on its own.</p>
-  </div>
-
-  <div id="pushed">
-    <div class="check">📱</div>
-    <h1>Check your phone</h1>
-    <p>A payment request is on its way to your phone — approve it with your payment PIN.</p>
-    <p>Your balance updates automatically once the payment succeeds — nothing to tap.</p>
-    <p class="note">This popup closes by itself — the balance update arrives in the chat.</p>
-    <a class="btn" href="https://t.me/paxorder_bot" id="pushed-chat">Back to chat</a>
-  </div>
 
   <div id="paid">
     <div class="check">✅</div>
@@ -136,48 +76,32 @@
 <script>
 (function () {
   var tg = (window.Telegram && Telegram.WebApp) ? Telegram.WebApp : null;
-  // Compact popup on purpose: no expand call — the page stays
+  // Compact page on purpose: no expand call — the page stays
   // small and never takes the full screen.
   if (tg) { try { tg.ready(); } catch (e) {} }
 
   var q = new URLSearchParams(window.location.search);
   function param(name) { var v = q.get(name); return v === null ? "" : v; }
 
-  var depositId = param("deposit_id");
-  var token = param("token");
   var paid = param("paid") === "1";
-  var form = document.getElementById("form");
-  var pushedView = document.getElementById("pushed");
   var paidView = document.getElementById("paid");
   var nourl = document.getElementById("nourl");
 
   function show(el) {
-    form.style.display = "none";
-    pushedView.style.display = "none";
     paidView.style.display = "none";
     nourl.style.display = "none";
     el.style.display = "block";
   }
-  // All values go in via textContent — never innerHTML — so a
-  // crafted query string cannot inject markup or scripts.
-  function setText(id, value) {
-    document.getElementById(id).textContent = value || "—";
-  }
-  function showError(message) {
-    var el = document.getElementById("form-error");
-    el.textContent = message;
-    el.classList.remove("hidden");
-  }
 
-  // Close this popup and hand the user back to the chat. Inside
+  // Close this page and hand the user back to the chat. Inside
   // Telegram, tg.close() does it. Outside Telegram — Chapa opened
   // the checkout in a browser tab, so this page is a plain browser
   // tab where tg.close() is a no-op — window.close() only closes
   // windows a script opened, so neither close works there. The
   // redirect to the chat link is the fallback that works in a
   // plain browser: t.me opens the Telegram app (or its web page)
-  // at the chat. Callers use it after a short delay so the open
-  // or the "Payment done" state is seen first.
+  // at the chat. Callers use it after a short delay so the
+  // "Payment done" state is seen first.
   function closePopup() {
     if (tg) { try { tg.close(); } catch (e) {} }
     try { window.close(); } catch (e) {}
@@ -207,90 +131,7 @@
     return;
   }
 
-  if (!depositId || !token) {
-    show(nourl);
-    return;
-  }
-
-  setText("sum-amount", param("amount"));
-  setText("sum-id", depositId);
-  show(form);
-
-  // Method picker: exactly one method selected. CBE Birr posts
-  // "cbebirr" (the server stores it as "cbe", as before) and CBE
-  // posts "cbe" — the four buttons stay distinct in the UI.
-  var selectedMethod = null;
-  var methodButtons = document.querySelectorAll(".method");
-  methodButtons.forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      methodButtons.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
-      btn.setAttribute("aria-pressed", "true");
-      selectedMethod = btn.getAttribute("data-method");
-      document.getElementById("form-error").classList.add("hidden");
-    });
-  });
-
-  // Open the checkout in its own tab — never inside an iframe
-  // on this page. Chapa fails inside a frame (blank page, CSRF
-  // token mismatch, masked phone), but works in a fresh tab.
-  function openCheckout(url) {
-    if (tg && tg.openLink) { tg.openLink(url); }
-    else { window.open(url, "_blank"); }
-  }
-
-  document.getElementById("proceed").addEventListener("click", function () {
-    var phone = document.getElementById("phone").value.trim();
-    if (!selectedMethod) { showError("Please choose a payment method."); return; }
-    if (!phone) { showError("Please enter your phone number."); return; }
-    var btn = document.getElementById("proceed");
-    btn.disabled = true;
-    btn.textContent = "Starting payment…";
-    // The token is the auth for this one pending deposit — no
-    // secret or API key is ever sent from this page. The server
-    // re-validates the method + phone and returns the checkout.
-    fetch("/api/bot/deposits/" + encodeURIComponent(depositId) + "/payment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: token, method: selectedMethod, phone: phone })
-    }).then(function (resp) { return resp.json(); }).then(function (data) {
-      if (!data || data.success === false) {
-        var msg = (data && (data.error || data.message)) || "Payment could not be started. Please try again.";
-        showError(msg);
-        btn.disabled = false;
-        btn.textContent = "Proceed to payment";
-        return;
-      }
-      if (data.pushed) {
-        // No checkout page here — Chapa pushed a payment prompt
-        // to the phone instead. Show that briefly, then close
-        // this popup by itself; the balance update arrives in
-        // the chat once the payment is approved.
-        show(pushedView);
-        setTimeout(closePopup, 3000);
-        return;
-      }
-      if (data.checkout_url && /^https?:\/\//i.test(data.checkout_url)) {
-        // One tap from here to paying: open the checkout at once
-        // and close this popup — there is no waiting screen, so
-        // the only thing the user sees after the tap is Chapa.
-        // A short delay lets the checkout open before the popup
-        // closes, so the close cannot swallow the open.
-        openCheckout(data.checkout_url);
-        setTimeout(closePopup, 600);
-        return;
-      }
-      showError("Payment could not be started. Please try again.");
-      btn.disabled = false;
-      btn.textContent = "Proceed to payment";
-    }).catch(function () {
-      showError("Could not reach the server. Please check your connection and try again.");
-      btn.disabled = false;
-      btn.textContent = "Proceed to payment";
-    });
-  });
-  document.getElementById("pushed-chat").addEventListener("click", function (ev) {
-    if (tg) { ev.preventDefault(); tg.openTelegramLink("https://t.me/paxorder_bot"); }
-  });
+  show(nourl);
 })();
 </script>
 </body>
