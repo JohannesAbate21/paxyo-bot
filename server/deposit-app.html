@@ -9,8 +9,14 @@
   itself. It collects the payment method + phone HERE, exchanges
   the token for the Chapa checkout (POST /api/bot/deposits/{id}/
   payment — the token is the auth for that one pending deposit),
-  and opens the checkout. The checkout URL is never shown as
-  text anywhere on this page.
+  and opens the checkout straight away in a new tab with
+  Telegram.WebApp.openLink — there is NO middle "Payment" page
+  and NO embedded Chapa iframe here. The iframe was removed on
+  17 Nov 2026 after it failed live: Chapa showed a blank page,
+  "CSRF token mismatch", and a masked "09********" phone field
+  inside the frame, and payment only worked when Chapa opened in
+  its own tab. The checkout URL is never shown as text anywhere
+  on this page — it is used as a link target only.
 
   Install: copy to public_html/deposit-app.html on paxyo.et
   (https://paxyo.et/deposit-app.html). The bot opens it as
@@ -20,12 +26,10 @@
   Views (?paid=1 shows the success view, anything else the form):
   - form: amount (read-only) + method picker (Telebirr, CBE,
     M-Pesa, CBE Birr) + phone + "Proceed to payment".
-  - pay: the Chapa checkout inside an iframe, with an always-
-    visible "Open payment page" button (Telegram.WebApp.openLink,
-    or a new tab outside Telegram) — a blocked iframe can never
-    leave a dead page, because the button is always on screen.
-    The checkout URL is used as a link target only, never
-    displayed as text.
+  - waiting: a compact waiting screen only — amount, chosen
+    method, "Payment opened in a new tab", one "Open payment
+    page again" button, and the note that the balance updates
+    automatically. No iframe, no full-screen takeover.
   - pushed: Chapa sent a payment prompt to the phone instead of
     a checkout page — approve it on the phone; the balance
     updates automatically.
@@ -59,8 +63,7 @@
   .btn:disabled { opacity: .55; cursor: default; }
   .note { font-size: 13px; }
   .err { color: #b3261e; font-size: 14px; }
-  #pay, #paid, #pushed, #nourl { display: none; }
-  #frame { width: 100%; height: 62vh; border: 1px solid var(--line); border-radius: 12px; margin-top: 12px; }
+  #waiting, #paid, #pushed, #nourl { display: none; }
   .check { font-size: 44px; }
   .hidden { display: none !important; }
   .methods { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 4px; }
@@ -94,15 +97,19 @@
     <p class="note" id="phone-hint">The number the payment goes to — for example 09..., 07... or 2519...</p>
     <p class="err hidden" id="form-error" role="alert"></p>
     <button class="btn" id="proceed">Proceed to payment</button>
-    <p class="note">You will pay on Chapa's secure page. Your balance updates automatically once the payment succeeds — nothing to tap afterwards.</p>
+    <p class="note">The payment page opens in a new tab. Your balance updates automatically once the payment succeeds — nothing to tap afterwards.</p>
   </div>
 
-  <div id="pay">
-    <h1>Payment</h1>
-    <p>Pay on Chapa's page below. If it does not load, use the button under it — the chat stays open either way.</p>
-    <iframe id="frame" title="Chapa payment page" allow="payment *"></iframe>
-    <button class="btn secondary" id="openlink">Payment page not loading? Open it here</button>
-    <button class="btn ghost" id="back">← Back</button>
+  <div id="waiting">
+    <div class="check">⏳</div>
+    <h1>Payment opened</h1>
+    <p>Payment opened in a new tab — finish paying there.</p>
+    <div class="rows">
+      <div class="row"><span class="k">Amount</span><span class="v" id="wait-amount">—</span></div>
+      <div class="row"><span class="k">Method</span><span class="v" id="wait-method">—</span></div>
+    </div>
+    <button class="btn secondary" id="reopen">Open payment page again</button>
+    <p class="note">Your balance updates automatically once the payment succeeds — no need to tap anything in the chat.</p>
   </div>
 
   <div id="pushed">
@@ -131,32 +138,33 @@
 <script>
 (function () {
   var tg = (window.Telegram && Telegram.WebApp) ? Telegram.WebApp : null;
-  if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+  // Compact popup on purpose: no expand call — the page stays
+  // small and never takes the full screen.
+  if (tg) { try { tg.ready(); } catch (e) {} }
 
   var q = new URLSearchParams(window.location.search);
   function param(name) { var v = q.get(name); return v === null ? "" : v; }
 
   var METHOD_LABELS = {
-    telebirr: "Telebirr", cbe: "CBE Birr",
-    cbebirr: "CBE Birr", mpesa: "M-Pesa"
+    telebirr: "Telebirr", cbebirr: "CBE Birr",
+    mpesa: "M-Pesa", cbe: "CBE"
   };
   var depositId = param("deposit_id");
   var token = param("token");
   var paid = param("paid") === "1";
   var form = document.getElementById("form");
-  var pay = document.getElementById("pay");
+  var waitingView = document.getElementById("waiting");
   var pushedView = document.getElementById("pushed");
   var paidView = document.getElementById("paid");
   var nourl = document.getElementById("nourl");
 
   function show(el) {
     form.style.display = "none";
-    pay.style.display = "none";
+    waitingView.style.display = "none";
     pushedView.style.display = "none";
     paidView.style.display = "none";
     nourl.style.display = "none";
     el.style.display = "block";
-    if (tg) { try { tg.expand(); } catch (e) {} }
   }
   // All values go in via textContent — never innerHTML — so a
   // crafted query string cannot inject markup or scripts.
@@ -206,24 +214,20 @@
   });
 
   var checkoutUrl = null;
-  var frame = document.getElementById("frame");
-  var loaded = false;
-  frame.addEventListener("load", function () { loaded = true; });
 
-  function openPay(url) {
+  // Open the checkout in its own tab — never inside an iframe
+  // on this page. Chapa fails inside a frame (blank page, CSRF
+  // token mismatch, masked phone), but works in a fresh tab.
+  function openCheckout(url) {
     checkoutUrl = url;
-    frame.src = url;
-    show(pay);
-    // If Chapa blocks framing the iframe stays blank (some browsers
-    // still fire load on a blocked frame), so the fallback button is
-    // always visible — and after 8s without a load it is highlighted.
-    setTimeout(function () {
-      if (!loaded) {
-        var btn = document.getElementById("openlink");
-        btn.style.outline = "2px solid #3275dd";
-        btn.scrollIntoView({ block: "center" });
-      }
-    }, 8000);
+    if (tg && tg.openLink) { tg.openLink(url); }
+    else { window.open(url, "_blank"); }
+  }
+
+  function showWaiting() {
+    setText("wait-amount", param("amount") + " ETB");
+    setText("wait-method", METHOD_LABELS[selectedMethod] || selectedMethod);
+    show(waitingView);
   }
 
   document.getElementById("proceed").addEventListener("click", function () {
@@ -250,7 +254,10 @@
       }
       if (data.pushed) { show(pushedView); return; }
       if (data.checkout_url && /^https?:\/\//i.test(data.checkout_url)) {
-        openPay(data.checkout_url);
+        // One tap from here to paying: open the checkout at once
+        // and show only the compact waiting screen behind it.
+        openCheckout(data.checkout_url);
+        showWaiting();
         return;
       }
       showError("Payment could not be started. Please try again.");
@@ -262,19 +269,8 @@
       btn.textContent = "Proceed to payment";
     });
   });
-  document.getElementById("openlink").addEventListener("click", function () {
-    if (!checkoutUrl) return;
-    if (tg && tg.openLink) { tg.openLink(checkoutUrl); }
-    else { window.open(checkoutUrl, "_blank"); }
-  });
-  document.getElementById("back").addEventListener("click", function () {
-    frame.removeAttribute("src");
-    loaded = false;
-    checkoutUrl = null;
-    var btn = document.getElementById("proceed");
-    btn.disabled = false;
-    btn.textContent = "Proceed to payment";
-    show(form);
+  document.getElementById("reopen").addEventListener("click", function () {
+    if (checkoutUrl) { openCheckout(checkoutUrl); }
   });
   document.getElementById("pushed-chat").addEventListener("click", function (ev) {
     if (tg) { ev.preventDefault(); tg.openTelegramLink("https://t.me/paxorder_bot"); }
