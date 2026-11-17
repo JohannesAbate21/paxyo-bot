@@ -485,11 +485,14 @@ DEPOSIT_WEBAPP_URL = os.environ.get(
 )
 PAXYO_SITE_URL = "https://paxyo.et/"
 
-# Deposit popup (owner, 16 Nov 2026): the pre-filled deposit page the
-# bot opens as a Web App after a deposit is confirmed in chat
+# Deposit popup (owner, 17 Nov 2026): the deposit page the bot
+# opens as a Web App after a deposit is confirmed in chat
 # (server/deposit-app.html, installed at public_html/deposit-app.html).
-# It receives deposit_id + checkout_url + amount + method + phone in
-# the query — no website login, no secret, no API key anywhere in it.
+# It receives deposit_id + popup_token + amount in the query — no
+# checkout URL, no method, no phone: the page asks for the method +
+# phone itself and exchanges the one-time token for the checkout,
+# so the checkout URL never appears in the chat. The URL carries
+# no website login, no secret, no API key anywhere in it.
 # Override with PAXYO_DEPOSIT_POPUP_URL when the page moves.
 DEPOSIT_POPUP_URL = os.environ.get(
     "PAXYO_DEPOSIT_POPUP_URL", "https://paxyo.et/deposit-app.html"
@@ -1044,13 +1047,13 @@ TEXT = {
         "am": (
             "የክፍያ ጥያቄ መላክ አልተቻለም — depositዎን በTelegram ውስጥ ያድርጉ። "
             "ከታች ይጫኑ፤ የPaxyo deposit ገጽ chatዎን ሳይዘጋ ይከፈታል። "
-            "ከከፈሉ በኋላ “ከፍዬአለሁ — ይፈትሹ” ይጫኑ።"
+            "ከከፈሉ በኋላ balance ወዲያው ይጨምራል።"
         ),
         "en": (
             "The payment prompt couldn't be sent — deposit inside "
             "Telegram instead. Tap below and the Paxyo deposit page "
-            "opens without closing this chat. When you've paid, tap "
-            "“I paid — check it”."
+            "opens without closing this chat. Your balance updates "
+            "automatically once the payment succeeds."
         ),
     },
     "deposit_webapp_button": {
@@ -1061,14 +1064,10 @@ TEXT = {
         "am": "💳 በTelegram deposit ያድርጉ",
         "en": "💳 Deposit in Telegram",
     },
-    "deposit_webapp_fallback": {
-        "am": "🌐 paxyo.et ይክፈቱ",
-        "en": "🌐 Open paxyo.et",
-    },
-    "deposit_paid_button": {
-        "am": "✅ ከፍዬአለሁ — ይፈትሹ",
-        "en": "✅ I paid — check it",
-    },
+    # (deposit_webapp_fallback / deposit_paid_button removed
+    # 17 Nov 2026: the deposit keyboard is one Web App button only
+    # — no plain link row, no "I paid" button. The balance credits
+    # automatically; see deposit_popup_ready.)
     # Deposit popup (owner, 16 Nov 2026): the pre-filled deposit page
     # opens as a Web App after Confirm, when the server returned a
     # checkout URL. Row 1 opens the popup (everything already filled
@@ -1079,9 +1078,24 @@ TEXT = {
         "am": "💳 {amount} ETB ይክፈሉ",
         "en": "💳 Pay {amount} ETB",
     },
-    "deposit_popup_open": {
-        "am": "🌐 የክፍያ ገጽ ይክፈቱ",
-        "en": "🌐 Open payment page",
+    # Deposit popup (owner, 17 Nov 2026): after Confirm the bot
+    # sends ONE Web App button and this text — no checkout URL in
+    # the chat, no "I paid" button. The method + phone are chosen
+    # on the popup page, and the balance updates automatically
+    # once Chapa confirms the payment (Chapa callback + the bot's
+    # credit watcher), so there is nothing to tap afterwards.
+    "deposit_popup_ready": {
+        "am": (
+            "{amount} ETB ለመክፈል ከታች ያለውን ይጫኑ — የክፍያ ዘዴ እና "
+            "ስልክ ቁጥር በገጹ ላይ ይምረጡ። ከከፈሉ በኋላ balance ወዲያው "
+            "ይጨምራል — ምንም መጫን አያስፈልግም።"
+        ),
+        "en": (
+            "Tap below to pay {amount} ETB — choose your payment "
+            "method and phone number on the page. Your balance "
+            "updates automatically once the payment succeeds — "
+            "nothing to tap."
+        ),
     },
     # Deposit recheck ("did my deposit go through?"): the server
     # re-verifies with Chapa before answering, so the bot only
@@ -1097,8 +1111,8 @@ TEXT = {
         "en": "Yes — your {amount} ETB deposit went through.",
     },
     "deposit_still_pending": {
-        "am": "ገና አልገባም — በስልክዎ ላይ ያለው prompt ካለ በPINዎ ያጽድቁትና እንደገና ይጠይቁኝ። አጽድቀው ከሆነ ትንሽ ይጠብቁ።",
-        "en": "Not yet — if the prompt is still on your phone, approve it with your PIN, then ask me again. If you already approved, give it a minute.",
+        "am": "ገና አልገባም — በክፍያ ገጹ ላይ ክፍያዎን ካላጠናቀቁ፣ የdeposit ቁልፉን እንደገና ይጫኑ። አስቀድመው ከከፈሉ ትንሽ ይጠብቁ።",
+        "en": "Not yet — if you haven't finished paying on the payment page, tap the deposit button again. If you already paid, give it a minute.",
     },
     "deposit_failed_reason": {
         "am": "Depositዎ አልተሳካም — {reason}። ገንዘብ አልተቀነሰብዎትም። እንደገና ይሞክሩ ወይም በpaxyo.et deposit ያድርጉ።",
@@ -3139,7 +3153,7 @@ TEXT = {
         "en": "Your order #{order_id} delivered {delivered} of {quantity} — {remains} didn't arrive, so {refunded} ETB is back in your balance.",
     },
     "abandoned_deposit_nudge": {
-        "en": "You started a deposit of {amount} ETB ({method}) but didn't finish it — tap below to pick up where you left off.",
+        "en": "You started a deposit of {amount} ETB but didn't finish it — tap below to pick up where you left off.",
     },
     "abandoned_deposit_resume_button": {
         "en": "Resume my deposit",
@@ -6129,25 +6143,32 @@ class PaxyoClient:
     # only after Chapa confirms the payment. The bot never credits
     # anything itself — it only shows the payment instructions.
 
-    async def create_deposit(self, telegram_id: int, amount, method: str, phone: str,
-                             promo_code: str = None):
-        """POST /deposits {telegram_id, amount, method, phone} ->
-        {"deposit_id","checkout_url","ussd_code","pay_to","status"}.
-        ussd_code / pay_to may be null when Chapa only gives a
-        checkout link. A 404 means the endpoint is not live yet —
-        returns None so the caller can say deposit-by-chat is not
-        ready yet. promo_code is only ever sent when the bot
-        validated it first (POST /promo-codes/validate said ok) —
-        the server stores it in chapa_response and its hook credits
-        the bonus when the deposit completes; an unvalidated code
-        is never sent."""
+    async def create_deposit(self, telegram_id: int, amount, method: str = None,
+                             phone: str = None, promo_code: str = None):
+        """POST /deposits {telegram_id, amount[, method, phone]} ->
+        {"deposit_id","popup_token","status":"pending"} when only
+        the amount is sent (owner, 17 Nov 2026): the server creates
+        the pending deposit and returns a one-time popup token —
+        the popup page (deposit-app.html) collects the method +
+        phone and exchanges the token for the checkout. Method +
+        phone may still be sent (the old full create, which also
+        returns a checkout_url) — the bot no longer does that.
+        A 404 means the endpoint is not live yet — returns None so
+        the caller can say deposit-by-chat is not ready yet.
+        promo_code is only ever sent when the bot validated it
+        first (POST /promo-codes/validate said ok) — the server
+        stores it in chapa_response and its hook credits the bonus
+        when the deposit completes; an unvalidated code is never
+        sent."""
         try:
             body = {
                 "telegram_id": telegram_id,
                 "amount": amount,
-                "method": method,
-                "phone": phone,
             }
+            if method is not None:
+                body["method"] = method
+            if phone is not None:
+                body["phone"] = phone
             if promo_code:
                 body["promo_code"] = promo_code
             return await self._send(
@@ -9248,6 +9269,18 @@ PENDING_DEPOSIT = {}
 # endpoint is the fallback, so "did my deposit go through?" still
 # works. Set in start_deposit on success.
 LAST_DEPOSIT = {}
+# Deposits awaiting automatic credit (owner, 17 Nov 2026):
+# telegram_id -> {"deposit_id", "started_at" (epoch)}. The bot
+# created the deposit (amount only — method + phone are chosen
+# on the popup page) and the Chapa callback credits it server-
+# side; run_deposit_credit_cycle watches these ids and messages
+# the user the moment one completes (or fails), so nobody has to
+# tap "I paid". In-memory only, like LAST_DEPOSIT: a restart
+# drops the watch — the callback still credits server-side, and
+# "did my deposit go through?" rechecks on demand. Entries older
+# than 48 hours are dropped (the server fails a pending deposit
+# after 48 hours too).
+DEPOSIT_CREDIT_WATCH = {}
 # Promo codes (ideas batch 2, feature 1, 15 Nov 2026): a code the
 # user typed and the server validated, waiting for their next
 # deposit. telegram_id -> {"code", "percent"}. In-memory only, like
@@ -18146,13 +18179,110 @@ async def run_abandoned_deposit_cycle(app, now=None):
             t(
                 "abandoned_deposit_nudge", lang,
                 amount=format_money(entry.get("amount") or 0),
-                method=METHOD_LABELS.get(
-                    entry.get("method"), entry.get("method")
-                ),
             ),
             reply_markup=abandoned_deposit_keyboard(confirm_id),
         )
         entry["nudged_at"] = now
+
+
+async def run_deposit_credit_cycle(app, now=None):
+    """One pass over deposits awaiting automatic credit (owner,
+    17 Nov 2026): the Chapa callback credits a paid deposit
+    server-side, and this watcher tells the user it landed — no
+    "I paid" tap needed. It re-reads each watched deposit with
+    GET /deposits/{id} (the server re-verifies with Chapa when
+    still pending, so this IS the recheck — the bot never credits
+    anything itself). Completed -> the same "went through" line
+    (plus referral-bonus lines and the big-deposit alert, exactly
+    as the explicit recheck does) and the watch is dropped;
+    failed -> one honest "it failed" line and the watch is
+    dropped; still pending -> keep watching (dropped after 48
+    hours, when the server fails it too). A 404 (endpoint not
+    live yet) or a failed read keeps the watch for next time.
+    Best-effort throughout: a failed send or read is logged and
+    never raises into the scheduler cycle. Called from the
+    60-second scheduler loop."""
+    import time
+
+    if now is None:
+        now = time.time()
+    if not DEPOSIT_CREDIT_WATCH:
+        return
+    for user_id, entry in list(DEPOSIT_CREDIT_WATCH.items()):
+        deposit_id = entry.get("deposit_id")
+        started_at = entry.get("started_at") or now
+        if now - started_at > 48 * 3600:
+            DEPOSIT_CREDIT_WATCH.pop(user_id, None)
+            continue
+        try:
+            deposit = await paxyo.deposit_status(deposit_id, user_id)
+        except Exception as exc:
+            log.warning("deposit credit watch failed: %s", exc)
+            continue
+        if deposit is None:  # 404: endpoint not live yet
+            continue
+        status = str(deposit.get("status") or "").strip().lower()
+        if status not in ("completed", "success", "paid",
+                          "failed", "cancelled", "canceled",
+                          "expired", "rejected"):
+            continue  # still pending: keep watching
+        DEPOSIT_CREDIT_WATCH.pop(user_id, None)
+        lang = LAST_LANG.get(user_id) or "en"
+        amount = deposit.get("amount")
+        try:
+            amount_text = format_money(amount)
+        except (TypeError, ValueError):
+            amount_text = "?"
+        if status in ("completed", "success", "paid"):
+            try:
+                bal = await paxyo.balance(user_id)
+            except Exception as exc:
+                log.warning(
+                    "balance failed after deposit credit: %s", exc
+                )
+                bal = None
+            if bal and bal.get("found"):
+                text = t(
+                    "deposit_went_through", lang,
+                    amount=amount_text,
+                    balance=format_money(bal.get("balance", 0)),
+                )
+            else:
+                text = t(
+                    "deposit_went_through_nobalance", lang,
+                    amount=amount_text,
+                )
+            await notify_user(app, user_id, text)
+            # Referral-bonus lines + big-deposit alert, mirroring
+            # the explicit recheck (deposit_status_text).
+            try:
+                for line in await _referral_bonus_lines(
+                    user_id, deposit, lang, app
+                ):
+                    await notify_user(app, user_id, line)
+            except Exception as exc:
+                log.warning("deposit credit bonus lines failed: %s", exc)
+            try:
+                await _maybe_big_deposit_alert(
+                    app, deposit, user_id, None,
+                    (bal or {}).get("balance"),
+                )
+            except Exception as exc:
+                log.warning("deposit credit alert failed: %s", exc)
+            # A completed deposit teaches the bot the user's last
+            # successful method (23): the method rides on the
+            # deposit record. Best-effort, like the recheck.
+            _method = str(deposit.get("method") or "").strip().lower()
+            if _method in ("telebirr", "cbe", "cbebirr", "mpesa"):
+                _traits_entry(user_id)["last_deposit_method"] = _method
+                schedule_traits_save(
+                    user_id, {"last_deposit_method": _method}
+                )
+        else:
+            await notify_user(
+                app, user_id,
+                t("deposit_failed_check", lang, amount=amount_text),
+            )
 
 
 async def run_uptime_watch_cycle(app, now=None):
@@ -20388,12 +20518,14 @@ def pending_deposit_for_user(user_id: int):
 
 
 async def start_deposit(draft, user_id: int):
-    """Call POST /deposits for a confirmed draft.
+    """Call POST /deposits for a confirmed draft (amount only,
+    owner, 17 Nov 2026 — the method + phone are chosen on the
+    popup page, never in chat).
 
     Returns (result, error): result is the server's record
-    ({"deposit_id","pushed","auth_type","checkout_url","ussd_code",
-    "pay_to","status"} — pushed/auth_type "ussd" means a USSD prompt
-    was sent to the user's phone, no link needed),
+    ({"deposit_id","popup_token","status":"pending"} — the popup
+    token is the one-time key the popup page exchanges for the
+    checkout; no checkout URL ever reaches the chat),
     error is None on success, "deposit_not_ready" when the endpoint
     is not live yet (404), "deposit_unavailable" when the payment
     service itself failed (5xx, e.g. Chapa refusing Direct Charge),
@@ -20411,7 +20543,7 @@ async def start_deposit(draft, user_id: int):
         validated = VALIDATED_PROMO.get(user_id) or {}
         promo_code = validated.get("code")
         result = await paxyo.create_deposit(
-            user_id, draft["amount"], draft["method"], draft["phone"],
+            user_id, draft["amount"],
             promo_code=promo_code,
         )
     except httpx.HTTPStatusError as exc:
@@ -20435,11 +20567,19 @@ async def start_deposit(draft, user_id: int):
         return None, "deposit_failed"
     if result is None:  # 404: the endpoint is not live yet
         return None, "deposit_not_ready"
-    # Remember the deposit id so "did my deposit go through?" /
-    # "I paid" can recheck this deposit without listing first.
+    # Remember the deposit id so "did my deposit go through?"
+    # can recheck this deposit without listing first — and watch
+    # it for automatic credit, so the user is told the moment it
+    # lands without tapping anything.
     deposit_id = result.get("deposit_id") if isinstance(result, dict) else None
     if deposit_id is not None:
         LAST_DEPOSIT[user_id] = deposit_id
+        import time
+
+        DEPOSIT_CREDIT_WATCH[user_id] = {
+            "deposit_id": deposit_id,
+            "started_at": time.time(),
+        }
     if promo_code:
         # The code is spent on THIS deposit: it moves to
         # PROMO_DEPOSIT (so the completion recheck can report the
@@ -20534,25 +20674,22 @@ def deposit_webapp_keyboard(lang: str, amount=None, allow_retry: bool = False,
                             user_id: int = None) -> InlineKeyboardMarkup:
     """Embedded deposit (owner, 15 Nov 2026): open the Paxyo deposit
     page INSIDE Telegram as a Web App, so the chat never closes while
-    the user pays. Row 2 is the plain external link, for clients where
-    the Web App cannot open; row 3 rechecks the deposit just paid —
-    the same deposit_status_text the "I paid" text and the receipt
-    button use (the server re-verifies with Chapa and credits once).
-    With an amount the button names it ("Deposit 100.00 ETB"); without
-    one it is generic (the insufficient-balance nudge, where the user
-    may want to deposit more than the shortfall). Ideas batch (15 Nov
-    2026): when a deposit just failed and `allow_retry` is set, a
-    fourth row offers "🔁 Try again" — it restarts the same deposit
-    (amount/method/phone kept) instead of making the user retype
-    everything."""
+    the user pays. One row only (owner, 17 Nov 2026): no plain-link
+    row and no "I paid" row — the balance credits automatically
+    (Chapa callback + the credit watcher) and the user is told when
+    it lands. With an amount the button names it ("Deposit 100.00
+    ETB"); without one it is generic (the insufficient-balance
+    nudge, where the user may want to deposit more than the
+    shortfall). Ideas batch (15 Nov 2026): when a deposit just
+    failed and `allow_retry` is set, a second row offers "🔁 Try
+    again" — it restarts the same deposit (amount kept) instead of
+    making the user retype it."""
     if amount is not None:
         label = t("deposit_webapp_button", lang, amount=format_money(amount))
     else:
         label = t("deposit_webapp_button_plain", lang)
     rows = [
         [InlineKeyboardButton(label, web_app=WebAppInfo(url=DEPOSIT_WEBAPP_URL))],
-        [InlineKeyboardButton(t("deposit_webapp_fallback", lang), url=PAXYO_SITE_URL)],
-        [InlineKeyboardButton(t("deposit_paid_button", lang), callback_data="checkdep:")],
     ]
     if allow_retry and user_id is not None and user_id in FAILED_DEPOSIT:
         rows.append([
@@ -20563,37 +20700,39 @@ def deposit_webapp_keyboard(lang: str, amount=None, allow_retry: bool = False,
     return InlineKeyboardMarkup(rows)
 
 
-def deposit_popup_url(result, amount, method, phone):
-    """Web App URL for the pre-filled deposit popup (owner, 16 Nov
-    2026): DEPOSIT_POPUP_URL with deposit_id + checkout_url + amount
-    + method + phone in the query, so the page shows everything the
-    user already typed in chat and the "Proceed to payment" button
-    opens the server's checkout URL. None when the server returned
-    no usable checkout URL — the caller then sends the plain
-    instructions (or the old Web App fallback on error). The URL
-    carries no secret: checkout_url is the per-transaction Chapa
-    link, deposit_id is the public deposit number."""
-    url = (result or {}).get("checkout_url")
-    if not url or not str(url).strip().startswith(("http://", "https://")):
+def deposit_popup_url(result, amount):
+    """Web App URL for the deposit popup (owner, 17 Nov 2026):
+    DEPOSIT_POPUP_URL with deposit_id + popup_token + amount in
+    the query — nothing else. The popup page (deposit-app.html)
+    asks for the payment method + phone itself and exchanges the
+    one-time token for the checkout, so the checkout URL never
+    appears in the chat, in a button, or in this URL. None when
+    the server returned no deposit id or no token — the caller
+    then sends the plain instructions (or the old Web App
+    fallback on error). The URL carries no secret: deposit_id is
+    the public deposit number and the token is a one-time key for
+    that one pending deposit only (it can only complete that
+    deposit — it cannot read, change or spend anything else)."""
+    deposit_id = str((result or {}).get("deposit_id") or "")
+    token = str((result or {}).get("popup_token") or "")
+    if not deposit_id or not token:
         return None
     params = {
-        "deposit_id": str(result.get("deposit_id") or ""),
-        "checkout_url": str(url).strip(),
+        "deposit_id": deposit_id,
+        "token": token,
         "amount": format_money(amount),
-        "method": str(method or ""),
-        "phone": str(phone or ""),
     }
     return DEPOSIT_POPUP_URL + "?" + urllib.parse.urlencode(params)
 
 
 def deposit_popup_keyboard(result, draft, lang: str):
-    """Inline keyboard for a deposit that has a checkout URL: row 1
-    opens the pre-filled popup as a Web App, row 2 is the plain
-    checkout link, row 3 rechecks ("I paid"). None when there is no
-    checkout URL — a USSD push needs no button at all."""
-    url = deposit_popup_url(
-        result, draft["amount"], draft["method"], draft["phone"]
-    )
+    """Inline keyboard for a started deposit (owner, 17 Nov 2026):
+    ONE row — the Web App button that opens the deposit popup.
+    No plain checkout-link row and no "I paid" row: the checkout
+    URL never reaches the chat, and the balance credits
+    automatically (Chapa callback + credit watcher). None when
+    the server returned no popup token."""
+    url = deposit_popup_url(result, draft["amount"])
     if url is None:
         return None
     return InlineKeyboardMarkup([
@@ -20602,31 +20741,17 @@ def deposit_popup_keyboard(result, draft, lang: str):
               amount=format_money(draft["amount"])),
             web_app=WebAppInfo(url=url),
         )],
-        [InlineKeyboardButton(
-            t("deposit_popup_open", lang),
-            url=str(result.get("checkout_url")).strip(),
-        )],
-        [InlineKeyboardButton(
-            t("deposit_paid_button", lang), callback_data="checkdep:"
-        )],
     ])
 
 
 def deposit_success_markup(result, draft, lang: str):
-    """Keyboard for a started deposit. A checkout URL gets the popup
-    keyboard; anything else gets just the "I paid" recheck button —
-    which also replaces the Confirm/Cancel buttons on the edited
-    card (edit_message_text with no markup would leave them there,
-    and a user could tap Confirm twice). Never None on success: the
-    caller always passes the returned markup."""
-    popup = deposit_popup_keyboard(result, draft, lang)
-    if popup is not None:
-        return popup
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            t("deposit_paid_button", lang), callback_data="checkdep:"
-        )
-    ]])
+    """Keyboard for a started deposit (owner, 17 Nov 2026): the
+    popup keyboard when the server returned a popup token, else
+    None — no "I paid" recheck button any more. (A None markup
+    still replaces the Confirm/Cancel buttons on the edited card,
+    so a user cannot tap Confirm twice; the credit watcher tells
+    them when the deposit lands.)"""
+    return deposit_popup_keyboard(result, draft, lang)
 
 
 def deposit_webapp_message(amount, lang: str, allow_retry: bool = False,
@@ -22412,12 +22537,60 @@ async def _continue_parked_draft(message, user_id, lang, voice=False):
     await reply_message(message, t("ask_platform", lang), lang, voice=voice)
 
 
+def deposit_confirm_card(user_id: int, amount, lang: str):
+    """(text, markup) for a deposit Confirm card (owner, 17 Nov
+    2026): the amount ONLY — the method + phone are chosen on the
+    popup page after Confirm, never in chat. Registers the card in
+    PENDING_DEPOSIT (amount only) and in DEPOSIT_ABANDONED (so a
+    card never tapped gets one Resume nudge after 3 quiet hours).
+    Nothing is created on the server until the user taps Confirm
+    (or says yes)."""
+    import time
+
+    confirm_id = uuid.uuid4().hex[:12]
+    PENDING_DEPOSIT[confirm_id] = {
+        "user_id": user_id,
+        "amount": amount,
+    }
+    DEPOSIT_ABANDONED[user_id] = {
+        "confirm_id": confirm_id,
+        "amount": amount,
+        "started_at": time.time(),
+        "nudged_at": None,
+    }
+    lines = [
+        t("confirm_title", lang),
+        "",
+        f"💰 {format_money(amount)} ETB",
+    ]
+    # A validated promo code shows on the card, so the user sees
+    # the bonus will apply before they confirm (ideas batch 2,
+    # feature 1, 15 Nov 2026). The code itself is only attached
+    # when the deposit is created (start_deposit).
+    _validated = VALIDATED_PROMO.get(user_id) or {}
+    if _validated.get("code"):
+        lines.append(
+            t(
+                "deposit_confirm_promo", lang,
+                code=_validated["code"],
+                percent=(
+                    _validated["percent"]
+                    if _validated.get("percent") is not None
+                    else "?"
+                ),
+            )
+        )
+    return "\n".join(lines), confirm_keyboard(confirm_id)
+
+
 async def handle_deposit_text(update, text, intent, lang, voice=False):
-    """Build a deposit over several turns (amount -> method -> phone),
-    then show a Confirm summary. Nothing is created on the server
-    until the user taps Confirm (or says yes): money must never move
-    on a misunderstood message. The server creates the Chapa checkout
-    and credits the balance only after Chapa confirms the payment;
+    """Build a deposit (amount only, owner, 17 Nov 2026), then
+    show a Confirm summary. The method + phone are never asked
+    in chat — the user picks them on the deposit popup page after
+    Confirm. Nothing is created on the server until the user taps
+    Confirm (or says yes): money must never move on a
+    misunderstood message. The server creates the deposit and
+    credits the balance only after Chapa confirms the payment;
     the bot never credits anything itself."""
     user = update.effective_user
     # Deposit-hijack fix (16 Nov 2026): the deposit flow starts
@@ -22442,113 +22615,28 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
         amount = parse_deposit_amount(text)
     if amount is None:
         amount = stored.get("amount")
-    method = intent.get("method")
-    if not isinstance(method, str):
-        method = None
-    if method is None:
-        method = normalize_method(text)
-    if method is None:
-        method = stored.get("method")
-    phone = intent.get("phone")
-    if isinstance(phone, str):
-        phone = normalize_phone(phone)
-    else:
-        phone = None
-    if phone is None:
-        phone = normalize_phone(text)
-    if phone is None:
-        phone = stored.get("phone")
-    merged = {"amount": amount, "method": method, "phone": phone}
+    # A method or phone typed along with the amount ("deposit 10
+    # by telebirr, phone 09...") is deliberately ignored: the
+    # user picks both on the popup page after Confirm, so the
+    # chat never asks for them and never repeats them.
     if amount is not None and (amount <= 0 or amount > MAX_DEPOSIT_ETB):
-        DEPOSIT_DRAFT[user.id] = {
-            k: v for k, v in merged.items() if v is not None and k != "amount"
-        }
+        DEPOSIT_DRAFT[user.id] = {}
         await reply_message(update.message, t("deposit_too_big", lang), lang, voice=voice)
         return
     if amount is None:
-        DEPOSIT_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        DEPOSIT_DRAFT[user.id] = {}
         await reply_message(update.message, t("ask_deposit_amount", lang), lang, voice=voice)
         return
-    if method is None:
-        DEPOSIT_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
-        # Remember deposit method (23, 15 Nov 2026): offer the last
-        # successful method first ("Telebirr again?"), with a "use
-        # a different method" option always shown. Never after the
-        # user tapped "different method" in this flow
-        # (DEPOSIT_METHOD_DECLINED) — a declined offer is not
-        # re-shown until the next deposit.
-        if user.id not in DEPOSIT_METHOD_DECLINED:
-            remembered = await _remembered_deposit_method(user.id)
-            if remembered is not None:
-                label = METHOD_LABELS.get(remembered, remembered)
-                await reply_message(
-                    update.message,
-                    t("deposit_method_again", lang, method=label),
-                    lang, voice=voice,
-                    reply_markup=deposit_method_again_keyboard(
-                        remembered, lang
-                    ),
-                )
-                return
-        await reply_message(update.message, t("ask_deposit_method", lang), lang, voice=voice)
-        return
-    if phone is None:
-        DEPOSIT_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
-        await reply_message(update.message, t("ask_deposit_phone", lang), lang, voice=voice)
-        return
-    # Complete: Confirm card, always text — it carries the buttons.
+    # Complete: Confirm card (amount only), always text — it
+    # carries the buttons.
     DEPOSIT_DRAFT.pop(user.id, None)
     DEPOSIT_METHOD_DECLINED.discard(user.id)
     PARTIAL.pop(user.id, None)
     RECURRING_DRAFT.pop(user.id, None)
-    confirm_id = uuid.uuid4().hex[:12]
-    PENDING_DEPOSIT[confirm_id] = {
-        "user_id": user.id,
-        "amount": amount,
-        "method": method,
-        "phone": phone,
-    }
-    # Abandoned deposits (14, 15 Nov 2026): the Confirm card was
-    # shown (method + amount + phone all given) — if the user never
-    # taps it, the scheduler nudges once after 3 quiet hours.
-    # Replaced when a newer deposit card is shown (one per user).
-    import time
-
-    DEPOSIT_ABANDONED[user.id] = {
-        "confirm_id": confirm_id,
-        "amount": amount,
-        "method": method,
-        "phone": phone,
-        "started_at": time.time(),
-        "nudged_at": None,
-    }
-    lines = [
-        t("confirm_title", lang),
-        "",
-        f"💰 {format_money(amount)} ETB",
-        f"📱 {METHOD_LABELS.get(method, method)}",
-        f"📞 {phone}",
-    ]
-    # A validated promo code shows on the card, so the user sees
-    # the bonus will apply before they confirm (ideas batch 2,
-    # feature 1, 15 Nov 2026). The code itself is only attached
-    # when the deposit is created (start_deposit).
-    _validated = VALIDATED_PROMO.get(user.id) or {}
-    if _validated.get("code"):
-        lines.append(
-            t(
-                "deposit_confirm_promo", lang,
-                code=_validated["code"],
-                percent=(
-                    _validated["percent"]
-                    if _validated.get("percent") is not None
-                    else "?"
-                ),
-            )
-        )
+    card_text, card_markup = deposit_confirm_card(user.id, amount, lang)
     await reply_message(
-        update.message, "\n".join(lines), lang,
-        reply_markup=confirm_keyboard(confirm_id),
+        update.message, card_text, lang,
+        reply_markup=card_markup,
     )
 
 
@@ -26416,12 +26504,12 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     await update.message.reply_text(error)
                 return
             await update.message.reply_text(
-                deposit_instructions_text(
-                    result, dep_draft["amount"], dep_draft["method"], lang
+                t(
+                    "deposit_popup_ready", lang,
+                    amount=format_money(dep_draft["amount"]),
                 ),
                 reply_markup=deposit_success_markup(result, dep_draft, lang),
             )
-            await maybe_send_deposit_qr(update.message, result, lang)
             return
         # A "yes" can also confirm a batch of orders awaiting Confirm:
         # place them all and answer with one short line per order.
@@ -29088,12 +29176,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "depshort":
         # One-tap deposit of exactly the shortfall (15 Nov 2026,
         # feature 1): the low-balance warning's button carries the
-        # shortfall amount. It pre-fills the deposit flow's amount
-        # and asks for the payment method next — the method and
-        # phone are then collected by handle_deposit_text exactly
-        # as if the user had typed the amount themself, and nothing
-        # is created until the deposit Confirm card is tapped. The
-        # order's own Confirm card stays open underneath.
+        # shortfall amount. It shows the deposit Confirm card
+        # straight away (amount only, 17 Nov 2026 — the method +
+        # phone are chosen on the popup page after Confirm), and
+        # nothing is created until the deposit Confirm card is
+        # tapped. The order's own Confirm card stays open
+        # underneath.
         try:
             _amount = float(arg)
         except (TypeError, ValueError):
@@ -29101,16 +29189,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _amount is None or _amount <= 0:
             await query.edit_message_text(t("cancelled", lang))
             return
-        DEPOSIT_DRAFT[user.id] = {"amount": _amount}
-        await query.edit_message_text(t("ask_deposit_method", lang))
+        card_text, card_markup = deposit_confirm_card(
+            user.id, _amount, lang
+        )
+        await query.edit_message_text(card_text, reply_markup=card_markup)
         return
 
     if action == "depagain":
-        # Remember deposit method (23, 15 Nov 2026): "✅ Telebirr
-        # again" keeps the remembered method and asks for the phone
-        # next — the normal deposit flow then shows the Confirm
-        # card. No amount on file (a restart dropped the draft)
-        # asks for the amount instead.
+        # Remember deposit method (23, 15 Nov 2026) — the method
+        # itself is now chosen on the popup page (17 Nov 2026),
+        # so both "again" and "different method" just show the
+        # deposit Confirm card for the amount on file. No amount
+        # on file (a restart dropped the draft) asks for the
+        # amount instead. These buttons only exist on old messages;
+        # new flows never offer a method in chat.
         if arg not in ("telebirr", "cbe", "cbebirr", "mpesa"):
             await query.edit_message_text(t("cancelled", lang))
             return
@@ -29118,17 +29210,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if draft.get("amount") is None:
             await query.edit_message_text(t("ask_deposit_amount", lang))
             return
-        DEPOSIT_DRAFT[user.id] = {"amount": draft["amount"], "method": arg}
-        await query.edit_message_text(t("ask_deposit_phone", lang))
+        card_text, card_markup = deposit_confirm_card(
+            user.id, draft["amount"], lang
+        )
+        await query.edit_message_text(card_text, reply_markup=card_markup)
         return
 
     if action == "depdiff":
-        # "Use a different method" (23): remember the decline for
-        # this flow, then ask for the method plainly. The decline
-        # is cleared when the deposit's Confirm card is shown, so
-        # the next deposit can offer the remembered method again.
-        DEPOSIT_METHOD_DECLINED.add(user.id)
-        await query.edit_message_text(t("ask_deposit_method", lang))
+        # "Use a different method" (23): the method is chosen on
+        # the popup page now, so this just shows the deposit
+        # Confirm card for the amount on file.
+        draft = DEPOSIT_DRAFT.get(user.id) or {}
+        if draft.get("amount") is None:
+            await query.edit_message_text(t("ask_deposit_amount", lang))
+            return
+        card_text, card_markup = deposit_confirm_card(
+            user.id, draft["amount"], lang
+        )
+        await query.edit_message_text(card_text, reply_markup=card_markup)
         return
 
     if action == "start_order":
@@ -29243,8 +29342,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t("confirm_title", lang),
             "",
             f"💰 {format_money(dep_draft['amount'])} ETB",
-            f"📱 {METHOD_LABELS.get(dep_draft['method'], dep_draft['method'])}",
-            f"📞 {dep_draft['phone']}",
         ]
         _validated = VALIDATED_PROMO.get(user.id) or {}
         if _validated.get("code"):
@@ -29313,12 +29410,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(error)
             return
         await query.edit_message_text(
-            deposit_instructions_text(
-                result, draft["amount"], draft["method"], lang
+            t(
+                "deposit_popup_ready", lang,
+                amount=format_money(draft["amount"]),
             ),
             reply_markup=deposit_success_markup(result, draft, lang),
         )
-        await maybe_send_deposit_qr(query.message, result, lang)
         return
 
     if action == "reorder":
@@ -29999,12 +30096,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(error)
             return
         await query.edit_message_text(
-            deposit_instructions_text(
-                result, dep_draft["amount"], dep_draft["method"], lang
+            t(
+                "deposit_popup_ready", lang,
+                amount=format_money(dep_draft["amount"]),
             ),
             reply_markup=deposit_success_markup(result, dep_draft, lang),
         )
-        await maybe_send_deposit_qr(query.message, result, lang)
         return
 
     batch = PENDING_BATCH.pop(arg, None)
@@ -30933,6 +31030,9 @@ async def run_scheduler_cycle(app):
     # server's flagged users, relayed to William once each. All
     # three never raise and never message a customer.
     await run_abandoned_deposit_cycle(app)
+    # Automatic deposit credit (owner, 17 Nov 2026): tell the user
+    # the moment a watched deposit completes — no "I paid" tap.
+    await run_deposit_credit_cycle(app)
     await run_uptime_watch_cycle(app)
     await run_fraud_watch_cycle(app)
     # Quiet hours (#19, customizations, 15 Nov 2026): flush the
