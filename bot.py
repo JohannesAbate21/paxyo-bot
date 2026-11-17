@@ -5361,7 +5361,13 @@ class PaxyoClient:
             and now - self._services_cached_at < SERVICES_CACHE_SECONDS
         ):
             return self._services_cache
+        _fetch_t0 = time.monotonic()
         data = await self._send(build_api_request("GET", "/services"))
+        # Handler timing (17 Nov 2026): the catalogue fetch runs
+        # before the classifier on the 2-call path, and its duration
+        # is a prime suspect for a slow turn — log it on its own
+        # line so a slow fetch is visible.
+        log.info("api services fetch %.2fs", time.monotonic() - _fetch_t0)
         raw = data.get("services", data) if isinstance(data, dict) else data
         services = []
         for s in raw or []:
@@ -7785,6 +7791,17 @@ async def _ai_attempt(provider: str, coro):
         raise
     log.info("ai %s ok %.2fs", provider, time.monotonic() - _start)
     return _text
+
+
+def _turn_log(stage: str, t0: float) -> None:
+    """One handler-stage timing line for a text turn: the stage name
+    + seconds since the turn started. Timings and intent type only —
+    never the user's message text, a link, a phone number, a token,
+    a key, a URL, a prompt or a reply. (17 Nov 2026: a live reply
+    took 29s while both AI calls took under 1s each, so the delay
+    sits somewhere in the handler — these lines show where.)
+    """
+    log.info("turn %s %.2fs", stage, time.monotonic() - t0)
 
 
 async def ai_generate(prompt: str, system: str = None) -> str:
@@ -26334,6 +26351,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       "yes" replied to a Confirm card confirms it. See
       reply_or_bare_intent, checked before the classifier.
     """
+    # Turn timing (17 Nov 2026 — a live reply took 29s while both
+    # AI calls took under 1s each): one log line per stage, timings
+    # + intent type only, so the next slow reply shows exactly
+    # where its seconds went instead of being guessed at. `age` is
+    # the time from Telegram's own timestamp on the message to this
+    # handler starting — a large age means the update waited (queue
+    # / delivery: PTB handles updates one at a time), not that the
+    # bot worked slowly. Never logs the message text.
+    _t0 = time.monotonic()
+    try:
+        _msg_date = getattr(update.message, "date", None)
+        _age = time.time() - _msg_date.timestamp() if _msg_date is not None else -1.0
+    except Exception:
+        _age = -1.0
+    if _age >= 0:
+        log.info("turn received age %.2fs", _age)
+    _intent_source = "injected" if intent is not None else "local"
     user = update.effective_user
     # Tolerate typos and slang before anything else: the classifier,
     # the acceptance check and the follow-up parsers all see the
@@ -26373,6 +26407,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # process restores this user's history and order draft from
     # the API, so a restart or redeploy does not wipe the chat.
     await restore_session(user.id)
+    _turn_log("session", _t0)
     # Language lock (#37): the customer set a fixed reply
     # language — it overrides this message's detected language
     # (and the bridge direction), so every reply follows the
@@ -27130,15 +27165,20 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         _simple = simple_chat_intent(text)
         if _simple is not None:
             intent = _simple
+            _intent_source = "fast"
         else:
+            _svc_t0 = time.monotonic()
             try:
                 _services = await paxyo.services() if paxyo is not None else None
             except Exception:
                 _services = None
+            _turn_log("services", _svc_t0)
+            _intent_source = "classifier"
             intent = await extract_intent(
                 text, user_id=user.id, services=_services
             )
     intent_type = (intent.get("intent") or "unclear").strip().lower()
+    _turn_log(f"intent {intent_type} {_intent_source}", _t0)
     # Off-topic steering counts consecutive off-topic turns; any
     # Paxyo topic resets it.
     if intent_type not in ("off_topic", "unclear"):
@@ -27194,6 +27234,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # (checked inside), never via the scheduler.
         if await maybe_feedback_ask(update, user.id, lang):
             return
+
+    # The Friday / feedback gates above each call the server
+    # (recent_orders), so a slow server stalls a light turn here —
+    # log the stage to catch it.
+    _turn_log("light_gates", _t0)
 
     # A question about an order awaiting Confirm ("how fast would
     # those 1000 views actually arrive?") is answered from the
@@ -27734,15 +27779,19 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             update.message, t("greeting", lang), lang, voice=voice,
             reply_markup=hide_reply_keyboard(),
         )
+        _turn_log("sent", _t0)
         return
     if intent_type == "source_question":
         await reply_message(update.message, t("source_question", lang), lang, voice=voice)
         return
     if intent_type == "paxyo_info":
+        _paxyo_answer = await answer_paxyo_question(text, lang, user_id=user.id)
+        _turn_log("answer", _t0)
         await reply_message(
-            update.message, await answer_paxyo_question(text, lang, user_id=user.id),
+            update.message, _paxyo_answer,
             lang, voice=voice,
         )
+        _turn_log("sent", _t0)
         return
     if intent_type == "how_to":
         # A how-to question gets a free AI answer, like DeepSeek
@@ -27751,11 +27800,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # (the classifier ran), so a None answer only means an
         # empty reply — the short Paxyo line is the fallback.
         general = await answer_general_question(text, lang)
+        _turn_log("answer", _t0)
         await reply_message(
             update.message,
             general if general is not None else t("paxyo_info_fallback", lang),
             lang, voice=voice,
         )
+        _turn_log("sent", _t0)
         return
     if intent_type == "off_topic":
         # Off-topic steering (owner, 13 Nov 2026; widened 14 Nov

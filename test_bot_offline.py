@@ -8816,6 +8816,177 @@ class TestSimpleChatFastPath(unittest.IsolatedAsyncioTestCase):
         self.assertIn("It is sunny today.", msg.text_sent[0])
 
 
+class TestTurnTimingLogs(unittest.IsolatedAsyncioTestCase):
+    """Handler-stage timing logs (owner, 17 Nov 2026): a live reply
+    took 29s while both AI calls took under 1s each, so each stage
+    of a text turn logs its own timing — update age, session
+    restore, services load, intent decision, answer, reply sent —
+    plus the services() fetch itself. Timings and intent type only:
+    the user's message text never appears in any of these lines.
+    """
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot._SESSION_RESTORED.clear()
+        bot.CHAT_HISTORY.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot._SESSION_RESTORED.clear()
+        bot.CHAT_HISTORY.clear()
+
+    async def _send_logged(self, text, ai_side_effect, date=None):
+        msg = FakeMessage()
+        if date is not None:
+            msg.date = date
+        update = FakeUpdate(msg)
+        ai_mock = mock.AsyncMock(side_effect=list(ai_side_effect))
+        with mock.patch("bot.ai_generate", ai_mock), \
+             mock.patch("bot.paxyo", FakePaxyo()), \
+             mock.patch("bot.speak_reply"), \
+             self.assertLogs("paxorder_bot", level="INFO") as logs:
+            await bot.handle_order_text(update, None, text)
+        self.assertEqual(msg.voice_sent, [])
+        return msg, ai_mock, "\n".join(logs.output)
+
+    async def test_simple_chat_logs_every_stage(self):
+        # The owner's live test message, fast path, one AI call.
+        answer = "Paxyo offers followers, likes and views."
+        msg, ai_mock, joined = await self._send_logged(
+            "Hello, what services do you offer?",
+            [answer],
+            date=datetime.now(timezone.utc),
+        )
+        self.assertEqual(ai_mock.call_count, 1)
+        self.assertEqual(msg.text_sent, [answer])
+        self.assertRegex(joined, r"turn received age \d+\.\d\ds")
+        self.assertRegex(joined, r"turn session \d+\.\d\ds")
+        self.assertRegex(
+            joined, r"turn intent paxyo_info fast \d+\.\d\ds"
+        )
+        self.assertRegex(joined, r"turn answer \d+\.\d\ds")
+        self.assertRegex(joined, r"turn sent \d+\.\d\ds")
+        # The fast path never loads the catalogue.
+        self.assertNotIn("turn services", joined)
+
+    async def test_greeting_logs_sent_without_answer(self):
+        msg, ai_mock, joined = await self._send_logged(
+            "Hello", [], date=datetime.now(timezone.utc)
+        )
+        ai_mock.assert_not_called()
+        self.assertIn("Tell me the service you want", msg.text_sent[0])
+        self.assertRegex(joined, r"turn received age \d+\.\d\ds")
+        self.assertRegex(
+            joined, r"turn intent greeting fast \d+\.\d\ds"
+        )
+        self.assertRegex(joined, r"turn sent \d+\.\d\ds")
+        self.assertNotIn("turn answer", joined)
+
+    async def test_turn_logs_never_carry_the_message_text(self):
+        answer = "Paxyo offers followers, likes and views."
+        _, _, joined = await self._send_logged(
+            "Hello, what services do you offer?",
+            [answer],
+            date=datetime.now(timezone.utc),
+        )
+        self.assertNotIn("what services do you offer", joined)
+        self.assertNotIn("Hello, what services", joined)
+        self.assertNotIn("http", joined)
+
+    async def test_classifier_path_logs_services_and_intent(self):
+        payload = json.dumps({
+            **FULL_INTENT,
+            "intent": "order",
+            "platform": "instagram",
+            "service_hint": "instagram followers",
+            "link": "https://instagram.com/p/x",
+            "quantity": 1000,
+        })
+        msg, ai_mock, joined = await self._send_logged(
+            "I want 1000 Instagram followers https://instagram.com/p/x",
+            [payload],
+            date=datetime.now(timezone.utc),
+        )
+        self.assertEqual(ai_mock.call_count, 1)
+        self.assertRegex(joined, r"turn services \d+\.\d\ds")
+        self.assertRegex(
+            joined, r"turn intent order classifier \d+\.\d\ds"
+        )
+
+    async def test_services_fetch_logs_duration_once(self):
+        client = bot.PaxyoClient()
+        try:
+            calls = []
+
+            async def _fake_send(request):
+                calls.append(request)
+                return {"services": [
+                    {"id": 1, "price": 100},
+                    {"id": 2, "price": 200},
+                ]}
+
+            with mock.patch.object(client, "_send", _fake_send), \
+                 self.assertLogs("paxorder_bot", level="INFO") as logs:
+                first = await client.services()
+            joined = "\n".join(logs.output)
+            self.assertRegex(joined, r"api services fetch \d+\.\d\ds")
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(
+                any(s.get("service") == 1 for s in first)
+            )
+            # Second call is served from the 10-minute cache: no
+            # second fetch — and no second log line. assertLogs
+            # would fail on zero records, so capture with a plain
+            # handler instead.
+            import logging
+            records = []
+            _handler = logging.Handler()
+            _handler.emit = lambda record: records.append(
+                record.getMessage()
+            )
+            _logger = logging.getLogger("paxorder_bot")
+            _logger.addHandler(_handler)
+            try:
+                second = await client.services()
+            finally:
+                _logger.removeHandler(_handler)
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(
+                any("api services fetch" in m for m in records)
+            )
+            self.assertEqual(first, second)
+        finally:
+            await client._client.aclose()
+
+
 class FlakyClient:
     """Fake client returning a queue of responses/errors per post."""
 
