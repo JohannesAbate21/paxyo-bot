@@ -8378,7 +8378,8 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGeminiRetry(unittest.IsolatedAsyncioTestCase):
-    """_gemini_post retries 429/503, and gemini_* use it."""
+    """_gemini_post fails fast on HTTP errors (fast failover,
+    17 Nov 2026), and gemini_* use it."""
 
     def _status_error(self, status):
         req = bot.httpx.Request("POST", "https://example.com/gemini")
@@ -8390,27 +8391,141 @@ class TestGeminiRetry(unittest.IsolatedAsyncioTestCase):
             "candidates": [{"content": {"parts": [{"text": text}]}}]
         })
 
-    async def test_generate_retries_429_then_succeeds(self):
-        client = FlakyClient([self._status_error(429), self._ok_response()])
+    async def test_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once — no
+        # retry, no sleep — so ai_generate falls through at once.
+        client = FlakyClient([self._status_error(429)])
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.gemini_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
-
-    async def test_generate_raises_after_three_429s(self):
-        client = FlakyClient([self._status_error(429)] * 3)
-        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
             with self.assertRaises(bot.httpx.HTTPStatusError):
                 await bot.gemini_generate("hi")
-        self.assertEqual(len(client.posts), 3)
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
-    async def test_transcribe_retries_503_then_succeeds(self):
-        client = FlakyClient([self._status_error(503), self._ok_response("hi")])
+    async def test_generate_raises_after_one_429(self):
+        client = FlakyClient([self._status_error(429)] * 3)
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.gemini_transcribe(b"fake-ogg"), "hi")
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.gemini_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
+
+    async def test_transcribe_fails_fast_on_503(self):
+        client = FlakyClient([self._status_error(503)])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.gemini_transcribe(b"fake-ogg")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
+
+
+class TestFastFailover(unittest.IsolatedAsyncioTestCase):
+    """Fast failover (owner, 17 Nov 2026): an HTTP error raises at
+    once so ai_generate falls through to the next provider with no
+    retry delay; only a transport failure gets one quick retry;
+    every provider call is bounded by AI_POST_TIMEOUT_SECONDS."""
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.groq.com/openai/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    def _transport_error(self, kind):
+        req = bot.httpx.Request(
+            "POST", "https://api.groq.com/openai/v1/chat/completions"
+        )
+        if kind == "timeout":
+            return bot.httpx.TimeoutException("timed out", request=req)
+        return bot.httpx.ConnectError("connection refused", request=req)
+
+    def _ok_response(self, text="hello"):
+        return FakeCloudTTSResponse({
+            "choices": [{"message": {"content": text}}]
+        })
+
+    async def test_timeout_retries_once_then_succeeds(self):
+        # A timeout is a transport failure: one quick retry after
+        # 0.5s, then the reply lands.
+        client = GroqFlakyClient(
+            [self._transport_error("timeout"), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            self.assertEqual(await bot.groq_generate("hi"), "hello")
         self.assertEqual(len(client.posts), 2)
+        sleep_mock.assert_awaited_once_with(
+            bot.AI_TRANSIENT_RETRY_DELAY_SECONDS
+        )
+
+    async def test_connect_error_retries_once_then_succeeds(self):
+        client = GroqFlakyClient(
+            [self._transport_error("connect"), self._ok_response()]
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            self.assertEqual(await bot.deepseek_generate("hi"), "hello")
+        self.assertEqual(len(client.posts), 2)
+        sleep_mock.assert_awaited_once_with(
+            bot.AI_TRANSIENT_RETRY_DELAY_SECONDS
+        )
+
+    async def test_timeout_twice_raises_after_one_retry(self):
+        client = GroqFlakyClient(
+            [self._transport_error("timeout")] * 2
+        )
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.TimeoutException):
+                await bot.groq_generate("hi")
+        self.assertEqual(len(client.posts), 2)
+        sleep_mock.assert_awaited_once_with(
+            bot.AI_TRANSIENT_RETRY_DELAY_SECONDS
+        )
+
+    async def test_http_500_fails_fast_with_no_retry(self):
+        client = GroqFlakyClient([self._status_error(500)])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.groq_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
+
+    async def test_post_uses_bounded_timeout(self):
+        # One provider call may take at most AI_POST_TIMEOUT_SECONDS
+        # (was 120s): a hung provider cannot eat the reply budget.
+        client = GroqFlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client) as mocked, \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"):
+            self.assertEqual(await bot.groq_generate("hi"), "hello")
+        mocked.assert_called_once_with(
+            timeout=bot.AI_POST_TIMEOUT_SECONDS, trust_env=False
+        )
+
+    async def test_ai_generate_falls_through_at_once_on_groq_429(self):
+        # The reported bug, end to end: Groq 429s on its daily
+        # limit and DeepSeek answers — with no retry sleep in
+        # between (the old shape paid 5s + 15s first).
+        client = GroqFlakyClient([self._status_error(429)])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(return_value="d"),
+             ), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            self.assertEqual(await bot.ai_generate("hello"), "d")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
 
 class FlakyClient:
@@ -10630,15 +10745,19 @@ class TestOpenAIProvider(unittest.IsolatedAsyncioTestCase):
             "choices": [{"message": {"content": text}}]
         })
 
-    async def test_openai_generate_retries_429_then_succeeds(self):
+    async def test_openai_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = OpenAIFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.openai_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.openai_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
         post = client.posts[0]
         self.assertTrue(post["url"].endswith("/chat/completions"))
         self.assertEqual(
@@ -10649,16 +10768,19 @@ class TestOpenAIProvider(unittest.IsolatedAsyncioTestCase):
             post["json"]["messages"], [{"role": "user", "content": "hi"}]
         )
 
-    async def test_openai_generate_retries_500_then_succeeds(self):
-        # 500 is in the OpenAI retry set (it is not in Gemini's).
+    async def test_openai_generate_fails_fast_on_500(self):
+        # 500 fails fast like every HTTP error now (fast failover,
+        # 17 Nov 2026): no retry, no sleep.
         client = OpenAIFlakyClient(
-            [self._status_error(500), self._ok_response()]
+            [self._status_error(500)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.openai_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.openai_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_openai_transcribe_posts_audio(self):
         client = OpenAIFlakyClient(
@@ -10803,15 +10925,19 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_groq_generate_retries_429_then_succeeds(self):
+    async def test_groq_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.groq_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.groq_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_groq_transcribe_posts_audio(self):
         client = GroqFlakyClient(
@@ -11002,15 +11128,19 @@ class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_grok_generate_retries_429_then_succeeds(self):
+    async def test_grok_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.grok_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.grok_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_ai_generate_grok_third_after_groq_and_deepseek_fail(self):
         # Groq and DeepSeek both fail: Grok answers third.
@@ -11043,8 +11173,8 @@ class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
         gem.assert_not_called()
 
     async def test_ai_generate_falls_back_to_zen_when_grok_raises(self):
-        # Groq and DeepSeek unset, Grok 429s (daily limit) after
-        # its own retries: Zen takes over.
+        # Groq and DeepSeek unset, Grok 429s (daily limit) and fails
+        # fast: Zen takes over.
         with mock.patch.object(bot, "GROQ_API_KEY", ""), \
              mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
              mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
@@ -11178,15 +11308,19 @@ class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_deepseek_generate_retries_429_then_succeeds(self):
+    async def test_deepseek_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.deepseek_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.deepseek_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_ai_generate_prefers_groq_over_deepseek(self):
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
@@ -11212,7 +11346,7 @@ class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):
         gem.assert_not_called()
 
     async def test_ai_generate_falls_back_to_deepseek_when_groq_raises(self):
-        # Groq 429s after its own retries: DeepSeek takes over.
+        # Groq 429s and fails fast: DeepSeek takes over.
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
              mock.patch(
@@ -14233,15 +14367,19 @@ class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_qwen_generate_retries_429_then_succeeds(self):
+    async def test_qwen_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.qwen_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.qwen_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_ai_generate_prefers_qwen_when_groq_deepseek_and_grok_unset(self):
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
@@ -14277,7 +14415,7 @@ class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
         gem.assert_not_called()
 
     async def test_ai_generate_falls_back_to_qwen_when_groq_and_deepseek_raise(self):
-        # Groq and DeepSeek 429 after their own retries, Grok and
+        # Groq and DeepSeek 429 and fail fast, Grok and
         # Zen unset: Qwen takes over.
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
@@ -14375,15 +14513,19 @@ class TestGlmProvider(unittest.IsolatedAsyncioTestCase):
             post["json"]["messages"], [{"role": "user", "content": "hi"}]
         )
 
-    async def test_glm_generate_retries_429_then_succeeds(self):
+    async def test_glm_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.glm_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.glm_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_ai_generate_falls_through_full_chain_to_glm(self):
         # Every provider before GLM fails: GLM answers, and each
@@ -14554,15 +14696,19 @@ class TestOpenRouterProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_openrouter_generate_retries_429_then_succeeds(self):
+    async def test_openrouter_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.openrouter_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.openrouter_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_openrouter_generate_model_env_honoured(self):
         # A pinned model (OPENROUTER_MODEL) replaces the router
@@ -14813,14 +14959,18 @@ class TestKiloProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_kilo_generate_retries_429_then_succeeds(self):
+    async def test_kilo_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.kilo_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.kilo_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_kilo_generate_model_env_honoured(self):
         # A pinned model (KILO_MODEL) replaces the router
@@ -15023,15 +15173,19 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_zen_generate_retries_429_then_succeeds(self):
+    async def test_zen_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.zen_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.zen_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_zen_generate_model_env_honoured(self):
         # A pinned model (ZEN_MODEL) replaces the default
@@ -15365,15 +15519,19 @@ class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_mistral_generate_retries_429_then_succeeds(self):
+    async def test_mistral_generate_fails_fast_on_429(self):
+        # Fast failover (17 Nov 2026): a 429 raises at once —
+        # no retry, no sleep — so ai_generate falls through.
         client = GroqFlakyClient(
-            [self._status_error(429), self._ok_response()]
+            [self._status_error(429)]
         )
         with mock.patch("bot.httpx.AsyncClient", return_value=client), \
              mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
-             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
-            self.assertEqual(await bot.mistral_generate("hi"), "hello")
-        self.assertEqual(len(client.posts), 2)
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()) as sleep_mock:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.mistral_generate("hi")
+        self.assertEqual(len(client.posts), 1)
+        sleep_mock.assert_not_awaited()
 
     async def test_mistral_generate_model_env_honoured(self):
         # A pinned model (MISTRAL_MODEL) replaces the default

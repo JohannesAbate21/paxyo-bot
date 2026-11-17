@@ -6897,30 +6897,58 @@ class PaxyoClient:
             raise
 
 
+# Fast failover (owner, 17 Nov 2026): every chat reply must land in
+# ~3s. The old shape retried an HTTP error twice, after 5s then
+# 15s — one Groq daily-limit hit (429) cost 20s before DeepSeek
+# ever got a turn, which is the >10s replies the owner saw. Now an
+# HTTP error is never retried: it raises at once and ai_generate
+# falls through to the next provider. Only a transport failure
+# (dropped connection, timeout) gets one quick retry after 0.5s.
+# Each attempt is also bounded: a hung provider used to hold a call
+# for up to 120s; now it gives up after 5s. Groq answers in ~1s per
+# call when healthy and DeepSeek in ~4s, so 5s keeps healthy
+# replies alive while a hung call cannot eat the whole budget.
+# NOTE: a hard 3s guarantee for every reply is not possible with
+# timeouts alone — a turn makes two AI calls, and DeepSeek alone
+# needs ~4s per call when it is the answering provider. What this
+# change guarantees is: no retry penalty, and no unbounded wait.
+AI_POST_TIMEOUT_SECONDS = 5.0
+AI_TRANSIENT_RETRY_DELAY_SECONDS = 0.5
+
+
 async def _gemini_post(payload: dict) -> dict:
-    """One POST to the Gemini API, with retries on rate limits.
+    """One POST to the Gemini API, with fast failover (17 Nov 2026):
+    HTTP errors are never retried.
 
     The free-tier key trips its per-minute limit easily when several
     messages arrive at once (429) or the model is overloaded (503),
-    so those two statuses retry after 5s then 15s. Any other error
-    raises at once — the caller decides what the user hears. The
+    so an HTTP error raises at once (fast failover, 17 Nov 2026)
+    — no retry; the caller decides what the user hears. The
     client shape is kept exactly as the three callers used it
-    (timeout 120s, trust_env False, params key, json payload), so
-    tests that mock the client still pass.
+    (timeout AI_POST_TIMEOUT_SECONDS, trust_env False, params key,
+    json payload), so tests that mock the client still pass.
     """
     url = GEMINI_URL.format(model=GEMINI_MODEL)
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 503) and attempt < 2:
-                log.warning("Gemini %s, retrying (attempt %d of 3)", status, attempt + 2)
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("Gemini transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7043,27 +7071,33 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT,
 
 async def _openai_post(path: str, headers=None, json=None, data=None,
                        files=None) -> dict:
-    """One POST to the OpenAI API, with retries on rate limits and
-    server errors. Same shape as _gemini_post (two retries, after
-    5s then 15s; 500 joins 429/503 here because OpenAI returns it
-    for overloaded models). The client shape is identical (timeout
-    120s, trust_env False). `files` values are bytes, so a retried
+    """One POST to the OpenAI API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _gemini_post (no retries on HTTP errors). The client shape is identical (timeout AI_POST_TIMEOUT_SECONDS,
+    trust_env False). `files` values are bytes, so a retried
     multipart upload re-sends cleanly."""
     url = OPENAI_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(
                     url, headers=headers, json=json, data=data, files=files
                 )
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning("OpenAI %s, retrying (attempt %d of 3)", status, attempt + 2)
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("OpenAI transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7146,26 +7180,33 @@ async def openai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
 
 async def _groq_post(path: str, headers=None, json=None, data=None,
                      files=None) -> dict:
-    """One POST to the Groq API, with retries on rate limits and
-    server errors. Same shape as _openai_post (two retries, after
-    5s then 15s; 500 joins 429/503). The client shape is identical
-    (timeout 120s, trust_env False). `files` values are bytes, so a
+    """One POST to the Groq API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _openai_post (no retries on HTTP errors). The client shape is identical
+    (timeout AI_POST_TIMEOUT_SECONDS, trust_env False). `files` values are bytes, so a
     retried multipart upload re-sends cleanly."""
     url = GROQ_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(
                     url, headers=headers, json=json, data=data, files=files
                 )
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning("Groq %s, retrying (attempt %d of 3)", status, attempt + 2)
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("Groq transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7236,25 +7277,30 @@ async def groq_transcribe(audio_bytes: bytes, language: str = None) -> str:
 # OpenAI/Gemini vision.
 
 async def _grok_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the xAI (Grok) API, with retries on rate limits
-    and server errors. Same shape as _groq_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the xAI (Grok) API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _groq_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = GROK_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "Grok %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("Grok transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7293,25 +7339,30 @@ async def grok_generate(prompt: str, system: str = None) -> str:
 # on Groq Whisper — and pictures stay on OpenAI/Gemini vision.
 
 async def _deepseek_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the DeepSeek API, with retries on rate limits
-    and server errors. Same shape as _groq_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the DeepSeek API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _groq_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = DEEPSEEK_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "DeepSeek %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("DeepSeek transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7344,25 +7395,30 @@ async def deepseek_generate(prompt: str, system: str = None) -> str:
 # with Qwen's base URL and its own key/model env vars.
 
 async def _qwen_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the Qwen API, with retries on rate limits
-    and server errors. Same shape as _groq_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the Qwen API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _groq_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = QWEN_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "Qwen %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("Qwen transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7397,25 +7453,30 @@ async def qwen_generate(prompt: str, system: str = None) -> str:
 # in ai_generate — never the first call.
 
 async def _glm_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the GLM API, with retries on rate limits
-    and server errors. Same shape as _groq_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the GLM API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _groq_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = GLM_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "GLM %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("GLM transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7451,25 +7512,30 @@ async def glm_generate(prompt: str, system: str = None) -> str:
 # — so it never burns its daily free cap on healthy days.
 
 async def _openrouter_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the OpenRouter API, with retries on rate limits
-    and server errors. Same shape as _glm_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the OpenRouter API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _glm_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = OPENROUTER_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "OpenRouter %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("OpenRouter transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7508,25 +7574,30 @@ async def openrouter_generate(prompt: str, system: str = None) -> str:
 # to OpenRouter, then GLM.
 
 async def _kilo_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the Kilo Code gateway, with retries on rate limits
-    and server errors. Same shape as _openrouter_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the Kilo Code gateway, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _openrouter_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = KILO_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "Kilo %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("Kilo transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7564,25 +7635,30 @@ async def kilo_generate(prompt: str, system: str = None) -> str:
 # then OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM.
 
 async def _zen_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the OpenCode Zen API, with retries on rate limits
-    and server errors. Same shape as _openrouter_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the OpenCode Zen API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _openrouter_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = ZEN_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "Zen %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("Zen transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7619,25 +7695,30 @@ async def zen_generate(prompt: str, system: str = None) -> str:
 # OpenRouter, then GLM.
 
 async def _mistral_post(path: str, headers=None, json=None) -> dict:
-    """One POST to the Mistral API, with retries on rate limits
-    and server errors. Same shape as _openrouter_post (two retries,
-    after 5s then 15s; 500 joins 429/503). The client shape is
-    identical (timeout 120s, trust_env False)."""
+    """One POST to the Mistral API, with fast failover (17 Nov 2026): an HTTP error
+    raises at once, never retried. Same shape as _openrouter_post (no retries on HTTP errors). The client shape is
+    identical (timeout AI_POST_TIMEOUT_SECONDS, trust_env False)."""
     url = MISTRAL_URL + path
-    for attempt, delay in enumerate((0, 5, 15)):
-        if delay:
-            await asyncio.sleep(delay)
+    for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=json)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (429, 500, 503) and attempt < 2:
-                log.warning(
-                    "Mistral %s, retrying (attempt %d of 3)", status, attempt + 2
-                )
+        except httpx.HTTPStatusError:
+            # Fast failover (17 Nov 2026): an HTTP error — rate
+            # limit (429), overload (503), server error (500) — is
+            # never retried. Raise at once so ai_generate falls
+            # through to the next provider instead of paying 5s +
+            # 15s of retries for a limit that will not clear.
+            raise
+        except httpx.TransportError:
+            # Only a transport failure (dropped connection, timeout)
+            # gets one quick retry after 0.5s; a second failure
+            # raises and ai_generate falls through.
+            if attempt == 0:
+                log.warning("Mistral transport error, retrying once")
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
 
@@ -7704,8 +7785,7 @@ async def ai_generate(prompt: str, system: str = None) -> str:
     resort — slow and rate-limited, so it only runs when every other
     provider failed).
     Every caller uses this, so the provider switch is one env var
-    and the fallback is automatic. A provider that raises after its
-    own retries falls through to the next one; only when every
+    and the fallback is automatic. A provider that raises falls through to the next one at once (fast failover, 17 Nov 2026); only when every
     configured provider failed does the error reach the caller
     (extract_intent then answers from local_intent instead of going
     silent). The last provider's error is re-raised — never retried
