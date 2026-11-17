@@ -5282,16 +5282,44 @@ class TestDepositPopupPage(unittest.TestCase):
         self.assertIn('window.open', self.page)
         self.assertIn("openCheckout(data.checkout_url)", self.page)
 
-    def test_compact_waiting_screen(self):
-        # After Proceed, only a small waiting screen: amount,
-        # chosen method, "Payment opened in a new tab", one
-        # "Open payment page again" button, automatic-credit note.
-        self.assertIn('id="waiting"', self.page)
-        self.assertIn("Payment opened in a new tab", self.page)
-        self.assertIn("Open payment page again", self.page)
-        self.assertIn('id="wait-amount"', self.page)
-        self.assertIn('id="wait-method"', self.page)
-        self.assertIn("updates automatically", self.page)
+    def test_no_waiting_screen_after_pay(self):
+        # Owner, 17 Nov 2026: after "Proceed to payment" there is
+        # no waiting screen at all — the popup closes and the only
+        # thing the user sees after the tap is Chapa.
+        self.assertNotIn('id="waiting"', self.page)
+        self.assertNotIn("Payment opened in a new tab", self.page)
+        self.assertNotIn("Open payment page again", self.page)
+        self.assertNotIn('id="wait-amount"', self.page)
+        self.assertNotIn('id="wait-method"', self.page)
+        self.assertNotIn("showWaiting", self.page)
+
+    def test_popup_closes_itself_after_opening_checkout(self):
+        # After the checkout URL opens, the popup closes itself:
+        # tg.close() inside Telegram, window.close() as the
+        # outside-Telegram fallback, after a short delay so the
+        # open cannot be swallowed by the close.
+        self.assertIn("openCheckout(data.checkout_url)", self.page)
+        self.assertIn("tg.close()", self.page)
+        self.assertIn("window.close()", self.page)
+        self.assertIn("setTimeout(closePopup, 600)", self.page)
+
+    def test_paid_view_returns_to_chat_automatically(self):
+        # ?paid=1 (Chapa's return_url) sends the user back to the
+        # chat by itself after a short "Payment done" pause: it
+        # closes the Web App when inside Telegram, otherwise it
+        # redirects to the chat link — no tap needed. The manual
+        # "Back to chat" button stays as a fallback.
+        self.assertIn("setTimeout(returnToChat, 1500)", self.page)
+        self.assertIn('window.location.replace("https://t.me/paxorder_bot")', self.page)
+        self.assertIn("Returning to the chat", self.page)
+        self.assertIn('id="back-chat"', self.page)
+
+    def test_pushed_view_closes_by_itself(self):
+        # No checkout page here (Chapa pushed a prompt to the
+        # phone): the popup shows "Check your phone" briefly and
+        # then closes itself; the credit notice arrives in chat.
+        self.assertIn("Check your phone", self.page)
+        self.assertIn("setTimeout(closePopup, 3000)", self.page)
 
     def test_popup_stays_compact_no_fullscreen_expand(self):
         # The popup must not take the full screen: no expand() call.
