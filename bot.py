@@ -10128,21 +10128,120 @@ async def restore_session(user_id: int) -> None:
     """Load a stored session for a user with nothing in memory (a
     fresh process after a restart or redeploy). Runs once per user
     per process; a missing session, a not-yet-deployed endpoint, or
-    a failed API call is a no-op — the user just starts fresh."""
+    a failed API call is a no-op — the user just starts fresh. The
+    three API calls (traits, prefs, session) run concurrently in
+    _restore_session_fetch instead of one after another (17 Nov
+    2026: live they took ~2.9s + ~1.9s + ~2.2s in sequence, so
+    the first turn after a restart paid ~7s)."""
     user_id = int(user_id)
     if user_id in _SESSION_RESTORED:
         return
     _SESSION_RESTORED.add(user_id)
     if paxyo is None:
         return
+    await _restore_session_fetch(
+        user_id,
+        # A session fetch is skipped when in-memory state already
+        # exists — the in-memory state is newer. Decided here, at
+        # the moment the restore starts, not inside the fetch: a
+        # background restore runs beside the reply, and the turn
+        # builds its own state while the fetch is still queued.
+        need_session=not (
+            CHAT_HISTORY.get(user_id) or PARTIAL.get(user_id)
+        ),
+    )
+
+
+_RESTORE_TASKS = set()  # in-flight background restores, kept alive until done
+
+
+def schedule_session_restore(user_id: int) -> None:
+    """Start a session restore in the background (best-effort,
+    never raises): the turn that triggered it answers at once
+    from fresh state and the restore lands a moment later for
+    the next turn. The _SESSION_RESTORED guard is claimed here,
+    synchronously, so a second turn arriving while the restore
+    is still in flight never starts a second one — exactly the
+    guard restore_session claims when awaited. When there is no
+    running event loop (sync unit tests) it quietly does
+    nothing, like schedule_session_save."""
+    user_id = int(user_id)
+    if user_id in _SESSION_RESTORED:
+        return
+    _SESSION_RESTORED.add(user_id)
+    if paxyo is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _task = loop.create_task(_restore_session_background(
+        user_id,
+        # Decided here, synchronously — see restore_session: by
+        # the time the background fetch runs, the turn may already
+        # have built its own in-memory state.
+        need_session=not (
+            CHAT_HISTORY.get(user_id) or PARTIAL.get(user_id)
+        ),
+    ))
+    _RESTORE_TASKS.add(_task)
+    _task.add_done_callback(_RESTORE_TASKS.discard)
+
+
+async def _restore_session_background(user_id: int, need_session: bool) -> None:
+    """Background half of schedule_session_restore: the fetch
+    itself, with every failure swallowed — a restore must never
+    raise into a chat, and there is no caller here to raise to
+    anyway (the per-call warnings inside still log). Cancelled
+    cleanly like any other task (CancelledError is not an
+    Exception, so it is not swallowed here)."""
+    try:
+        await _restore_session_fetch(user_id, need_session=need_session)
+    except Exception as exc:
+        log.warning("session restore failed: %s", exc)
+
+
+async def _restore_session_fetch(user_id: int, need_session: bool) -> None:
+    """The three restore fetches, concurrently: user-traits,
+    user-prefs and the session. Each fetch has its own
+    try/except (inside _restore_traits / _restore_prefs / the
+    session job below), so one failing or slow endpoint never
+    cancels the others and never raises into a chat — a missing
+    piece just means the user starts fresh for that piece.
+
+    Merge, don't clobber: this runs beside the reply now, so
+    the turn that triggered it may already have recorded its
+    own exchange or learned something newer while the fetches
+    were in flight. The server history is older, so it goes
+    first and the turn's own exchanges stay after it; a stored
+    draft fills the gaps in a draft the turn already built for
+    the same order, and a draft for a different order is left
+    alone; traits and prefs fill only keys the turn has not set
+    yet. The stored language is the durable truth, as before.
+    """
+    user_id = int(user_id)
+    if paxyo is None:
+        return
+    _start = time.monotonic()
     # Per-user traits (feature 5, 15 Nov 2026): the learned usuals
     # + tone load alongside the session, from their own table — a
     # traits load can never touch the session. Runs even when the
-    # session restore below is skipped for in-memory state, so the
+    # session fetch below is skipped for in-memory state, so the
     # mirror is filled once per process either way.
-    await _restore_traits(user_id)
-    if CHAT_HISTORY.get(user_id) or PARTIAL.get(user_id):
-        return
+    _jobs = [
+        asyncio.create_task(_restore_traits(user_id)),
+        asyncio.create_task(_restore_prefs(user_id)),
+    ]
+    if need_session:
+        _jobs.append(asyncio.create_task(_fetch_session(user_id)))
+    await asyncio.gather(*_jobs, return_exceptions=True)
+    log.info("restore done %.2fs", time.monotonic() - _start)
+
+
+async def _fetch_session(user_id: int) -> None:
+    """One best-effort session fetch + apply (see
+    _restore_session_fetch for the merge rules). Never raises."""
+    user_id = int(user_id)
     try:
         data = await paxyo.load_session(user_id)
     except Exception as exc:
@@ -10152,14 +10251,33 @@ async def restore_session(user_id: int) -> None:
         return
     history = data.get("history") or []
     if isinstance(history, list):
-        CHAT_HISTORY[user_id] = [
+        _server_history = [
             {"user": str(e.get("user", "")), "bot": str(e.get("bot", ""))}
             for e in history
             if isinstance(e, dict) and e.get("user") and e.get("bot")
         ][-MAX_HISTORY_EXCHANGES:]
+        CHAT_HISTORY[user_id] = (
+            _server_history + CHAT_HISTORY.get(user_id, [])
+        )[-MAX_HISTORY_EXCHANGES:]
     draft = data.get("draft")
     if isinstance(draft, dict) and draft:
-        PARTIAL[user_id] = {k: v for k, v in draft.items() if v is not None}
+        # Fill the gaps in the turn's own draft from the stored
+        # one — but only when it is the same order (same
+        # platform, or the turn has not picked one yet). The
+        # stored draft's missing pieces (service hint, quantity)
+        # complete a turn that only sent the link, which is how
+        # a user resumes a half-built order after a restart. A
+        # draft for a different platform is a new order: the
+        # turn's own draft wins untouched.
+        _current = PARTIAL.get(user_id) or {}
+        _stored_platform = draft.get("platform")
+        _current_platform = _current.get("platform")
+        if not _current or _current_platform in (None, _stored_platform):
+            _merged = {k: v for k, v in draft.items() if v is not None}
+            _merged.update(
+                {k: v for k, v in _current.items() if v is not None}
+            )
+            PARTIAL[user_id] = _merged
     lang = data.get("lang")
     if lang in ("en", "am", "ti", "om"):
         LAST_LANG[user_id] = lang
@@ -10304,12 +10422,16 @@ async def _restore_traits(user_id: int) -> None:
     if not isinstance(traits, dict) or not traits:
         return
     entry = _traits_entry(user_id)
-    entry.update({k: v for k, v in traits.items() if v is not None})
+    # Merge, don't overwrite: the turn that triggered this
+    # restore may already have learned something newer while the
+    # fetch was in flight (a background restore runs beside the
+    # reply now). The server copy fills only keys the turn has
+    # not set yet. Prefs load as their own parallel job in
+    # _restore_session_fetch, not here.
+    for key, value in traits.items():
+        if value is not None and entry.get(key) is None:
+            entry[key] = value
     _TRAITS_FROM_SERVER.add(user_id)
-    # Explicit prefs (customizations, 15 Nov 2026) load alongside
-    # the learned traits — same table, different keys, same
-    # best-effort no-op when nothing is stored.
-    await _restore_prefs(user_id)
 
 
 def user_tone(user_id: int):
@@ -10875,7 +10997,10 @@ async def _restore_prefs(user_id: int) -> None:
     for key, value in stored.items():
         if key in PREF_KEYS and value is not None:
             cleaned = validate_pref(key, value)
-            if cleaned is not None:
+            # Merge, don't overwrite (see _restore_traits): the
+            # turn that triggered this restore may already have
+            # set a newer value while the fetch was in flight.
+            if cleaned is not None and entry.get(key) is None:
                 entry[key] = cleaned
 
 
@@ -26406,14 +26531,24 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Session store (smart-loop round 1, 14 Nov 2026): a fresh
     # process restores this user's history and order draft from
     # the API, so a restart or redeploy does not wipe the chat.
-    await restore_session(user.id)
+    # The restore runs in the background (17 Nov 2026: the three
+    # API calls took ~7s in sequence and every first turn after a
+    # restart paid it) — this turn answers from fresh state at
+    # once and the restore lands a moment later for the next
+    # turn. The _SESSION_RESTORED guard is claimed synchronously
+    # by the kick-off, so a second turn arriving while the
+    # restore is in flight never starts a second one.
+    schedule_session_restore(user.id)
     _turn_log("session", _t0)
     # Language lock (#37): the customer set a fixed reply
     # language — it overrides this message's detected language
     # (and the bridge direction), so every reply follows the
-    # lock. Prefs are restored by restore_session just above, so
-    # the lock is known here. LAST_LANG follows the lock too, so
-    # scheduler messages use it as well.
+    # lock. The lock lives in the prefs the background restore
+    # loads, so on the first turn after a restart the restore
+    # may not have landed yet and the detected language is used
+    # until then; from the next turn the lock applies.
+    # LAST_LANG follows the lock too, so scheduler messages use
+    # it as well.
     _locked_lang = get_pref(user.id, "pref_language")
     if _locked_lang:
         lang = _locked_lang

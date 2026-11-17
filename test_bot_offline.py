@@ -8874,6 +8874,11 @@ class TestTurnTimingLogs(unittest.IsolatedAsyncioTestCase):
              mock.patch("bot.speak_reply"), \
              self.assertLogs("paxorder_bot", level="INFO") as logs:
             await bot.handle_order_text(update, None, text)
+            # Let the background restore (kicked off by the turn)
+            # finish while paxyo is still patched, so no restore
+            # task outlives the log capture.
+            for _ in range(3):
+                await asyncio.sleep(0)
         self.assertEqual(msg.voice_sent, [])
         return msg, ai_mock, "\n".join(logs.output)
 
@@ -13881,33 +13886,51 @@ class TestSessionStore(_SmartLoopBase):
         bot.LAST_LANG.clear()
         bot._SESSION_RESTORED.clear()
         self.assertEqual(bot.chat_history_lines(1), [])
-        # Turn 2, in the "new process", sends only the link: the
-        # restored draft already has quantity 1000, platform and
-        # service hint, so the link completes the order and the bot
-        # goes straight to the confirm card — that is the proof the
-        # session survived (without the restore it would have asked
-        # "Which platform?").
+        # Turn 2, in the "new process", sends only the link. The
+        # restore runs in the background now (17 Nov 2026), so
+        # this turn answers from fresh state: it asks "How many?"
+        # instead of going straight to the confirm card — and the
+        # turn still works, no crash, no lost message.
         fake2 = FakePaxyo(session=payload)
         msg, _ = await self._turns([
             ("https://instagram.com/p/x",
              intent_of("order", link="https://instagram.com/p/x")),
         ], paxyo=fake2)
         self.assertEqual(fake2.session_loads, [1])
-        self.assertIn("Please confirm", msg.text_sent[0])
-        self.assertIn("1000", msg.text_sent[0])
-        self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        self.assertIn("How many?", msg.text_sent[0])
+        self.assertNotIn("Please confirm", msg.text_sent[0])
+        # The restore landed after the turn: the stored draft
+        # filled the gaps in the fresh one (same platform — the
+        # service hint and quantity are back, the turn's own link
+        # kept), and the history came back too.
+        self.assertEqual(bot.PARTIAL[1]["platform"], "instagram")
+        self.assertEqual(bot.PARTIAL[1]["service_hint"], "followers")
+        self.assertEqual(bot.PARTIAL[1]["quantity"], 1000)
+        self.assertEqual(
+            bot.PARTIAL[1]["link"], "https://instagram.com/p/x")
+        self.assertIn(
+            "i want 1000 instagram followers",
+            " ".join(bot.chat_history_lines(1)),
+        )
+        # Turn 3 sends the link again: the restored draft already
+        # has quantity 1000, platform and service hint, so the
+        # link completes the order and the bot goes straight to
+        # the confirm card — that is the proof the session
+        # survived, one turn later.
+        msg3, _ = await self._turns([
+            ("https://instagram.com/p/x",
+             intent_of("order", link="https://instagram.com/p/x")),
+        ], paxyo=fake2)
+        self.assertEqual(fake2.session_loads, [1])
+        self.assertIn("Please confirm", msg3.text_sent[0])
+        self.assertIn("1000", msg3.text_sent[0])
+        self.assertIn("https://instagram.com/p/x", msg3.text_sent[0])
         # PENDING is keyed by confirm id, not user id.
         pending = [e for e in bot.PENDING.values()
                    if e["user_id"] == 1]
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["link"], "https://instagram.com/p/x")
         self.assertEqual(pending[0]["quantity"], 1000)
-        # The history came back too: the first turn is remembered
-        # (stored in normalised form, as the bot saw it).
-        self.assertIn(
-            "i want 1000 instagram followers",
-            " ".join(bot.chat_history_lines(1)),
-        )
 
     async def test_restore_with_no_stored_session_is_noop(self):
         msg, fake = await self._turns([
@@ -13969,6 +13992,177 @@ class TestSessionStore(_SmartLoopBase):
         # have no running loop: the save is skipped, never raised.
         bot.record_exchange(1, "hello", "hi there")
         self.assertEqual(len(bot.CHAT_HISTORY[1]), 1)
+
+
+class TestBackgroundSessionRestore(_SmartLoopBase):
+    """Background session restore (17 Nov 2026): the three
+    restore fetches (traits, prefs, session) took ~7s in
+    sequence live, so they run concurrently now and the restore
+    runs in the background — the turn that triggers it answers
+    from fresh state at once and the restore lands a moment
+    later for the next turn. These tests prove the concurrency,
+    the no-wait reply, the no-double-restore guard, and that a
+    failing endpoint still leaves a working chat."""
+
+    def setUp(self):
+        super().setUp()
+        bot._PREFS_FROM_SERVER.clear()
+        bot._RESTORE_TASKS.clear()
+
+    def tearDown(self):
+        super().tearDown()
+        bot._PREFS_FROM_SERVER.clear()
+        bot._RESTORE_TASKS.clear()
+
+    async def test_restore_fetches_run_concurrently(self):
+        # Each load sleeps 0.05s: run one after another that is
+        # ~0.15s, run together it is ~0.05s (the slowest single
+        # call) — and all three start before any one finishes.
+        loop = asyncio.get_running_loop()
+        started = {}
+
+        class DelayedFakePaxyo(FakePaxyo):
+            async def load_traits(self, telegram_id):
+                started["traits"] = loop.time()
+                await asyncio.sleep(0.05)
+                return await super().load_traits(telegram_id)
+
+            async def load_prefs(self, telegram_id):
+                started["prefs"] = loop.time()
+                await asyncio.sleep(0.05)
+                return await super().load_prefs(telegram_id)
+
+            async def load_session(self, telegram_id):
+                started["session"] = loop.time()
+                await asyncio.sleep(0.05)
+                return await super().load_session(telegram_id)
+
+        payload = {"history": [{"user": "hi", "bot": "hello"}],
+                   "draft": {"platform": "tiktok"}, "lang": "am"}
+        fake = DelayedFakePaxyo(
+            traits={"tone": "brief"},
+            prefs={"pref_pick_order": "cheapest"},
+            session=payload)
+        _start = loop.time()
+        with mock.patch("bot.paxyo", fake):
+            await bot.restore_session(1)
+        _elapsed = loop.time() - _start
+        self.assertEqual(sorted(started), ["prefs", "session", "traits"])
+        self.assertLess(
+            max(started.values()) - min(started.values()), 0.02)
+        self.assertLess(_elapsed, 0.12)
+        # Traits and prefs share one in-memory entry per user, so
+        # the entry holds both after the parallel restore.
+        self.assertEqual(bot.USER_TRAITS[1]["tone"], "brief")
+        self.assertEqual(
+            bot.get_pref(1, "pref_pick_order"), "cheapest")
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+        self.assertEqual(bot.LAST_LANG[1], "am")
+        self.assertEqual(fake.traits_loads, [1])
+        self.assertEqual(fake.session_loads, [1])
+
+    async def test_failing_restore_endpoints_leave_fresh_state(self):
+        # Every restore endpoint is down: the restore returns
+        # normally, the user just starts fresh — and the chat
+        # still works afterwards.
+        fake = FakePaxyo()
+        fake.load_traits = mock.AsyncMock(
+            side_effect=Exception("traits down"))
+        fake.load_prefs = mock.AsyncMock(
+            side_effect=Exception("prefs down"))
+        fake.load_session = mock.AsyncMock(
+            side_effect=Exception("session down"))
+        with mock.patch("bot.paxyo", fake):
+            await bot.restore_session(1)
+        self.assertEqual(bot.USER_TRAITS, {})
+        self.assertEqual(bot.PARTIAL, {})
+        self.assertEqual(bot.CHAT_HISTORY.get(1, []), [])
+        msg, _ = await self._turns([
+            ("Hello", None),
+        ], paxyo=fake)
+        self.assertIn("Tell me the service you want", msg.text_sent[0])
+
+    async def test_reply_does_not_wait_for_restore(self):
+        # The three loads each sleep 0.2s: the turn's reply is
+        # sent while the restore is still in flight, and the
+        # restore lands afterwards.
+        done = asyncio.Event()
+
+        class SlowFakePaxyo(FakePaxyo):
+            async def load_traits(self, telegram_id):
+                await asyncio.sleep(0.2)
+                return await super().load_traits(telegram_id)
+
+            async def load_prefs(self, telegram_id):
+                await asyncio.sleep(0.2)
+                return await super().load_prefs(telegram_id)
+
+            async def load_session(self, telegram_id):
+                await asyncio.sleep(0.2)
+                result = await super().load_session(telegram_id)
+                done.set()
+                return result
+
+        payload = {"history": [],
+                   "draft": {"platform": "tiktok"}, "lang": "en"}
+        fake = SlowFakePaxyo(session=payload)
+        answer = "Paxyo offers followers, likes and views."
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.ai_generate",
+                        mock.AsyncMock(return_value=answer)), \
+             mock.patch("bot.paxyo", fake), mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(
+                update, None, "Hello, what services do you offer?")
+            # The reply is already sent; the restore has not
+            # finished yet (its slowest fetch is still asleep).
+            self.assertEqual(msg.text_sent, [answer])
+            self.assertFalse(done.is_set())
+            # The restore lands while the patch is still active.
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            await self._flush()
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+
+    async def test_no_double_restore_for_two_turns_together(self):
+        # Two turns arrive while the first restore is still in
+        # flight: each endpoint is fetched exactly once.
+        fake = FakePaxyo()
+        prefs_calls = []
+        _orig_load_prefs = fake.load_prefs
+
+        async def _count_prefs(telegram_id):
+            prefs_calls.append(telegram_id)
+            return await _orig_load_prefs(telegram_id)
+
+        fake.load_prefs = _count_prefs
+        msg, _ = await self._turns([
+            ("Hello", None),
+            ("Hello", None),
+        ], paxyo=fake)
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertEqual(fake.traits_loads, [1])
+        self.assertEqual(fake.session_loads, [1])
+        self.assertEqual(prefs_calls, [1])
+
+    async def test_stored_draft_for_another_platform_is_not_merged(self):
+        # A turn after a restart builds a TikTok draft while the
+        # stored draft is Instagram followers: the stored draft
+        # must not leak its service hint or quantity into the
+        # new order.
+        payload = {"history": [], "draft": {
+            "platform": "instagram", "service_hint": "followers",
+            "quantity": 1000}, "lang": "en"}
+        fake = FakePaxyo(session=payload)
+        msg, _ = await self._turns([
+            ("I want 500 tiktok views",
+             intent_of("order", platform="tiktok",
+                       service_hint="views", quantity=500)),
+        ], paxyo=fake)
+        self.assertIn("link", msg.text_sent[0].lower())
+        self.assertEqual(bot.PARTIAL[1]["platform"], "tiktok")
+        self.assertEqual(bot.PARTIAL[1]["service_hint"], "views")
+        self.assertEqual(bot.PARTIAL[1]["quantity"], 500)
+        self.assertNotIn("followers", str(bot.PARTIAL[1]))
 
 
 class TestFailureLog(_SmartLoopBase):
@@ -29294,10 +29488,22 @@ class TestPerUserPersonality(_SmartLoopBase):
             "usual_metric": "views", "usual_quantity": 1000,
             "usual_service_id": 2001,
         })
+        # Turn 1, first after a restart: the restore runs in the
+        # background now (17 Nov 2026), so this turn answers from
+        # fresh state — no usual known yet — and the restore lands
+        # right after it (_send flushes while paxyo is patched).
         msg, _ = await self._send(
             "Give me the usual.", intent_of("usual"), paxyo=fake,
         )
+        self.assertIn("don't have a usual", msg.text_sent[0])
         self.assertEqual(bot.USER_TRAITS[1]["usual_service_id"], 2001)
+        # Turn 2 asks again: the usual is restored now, so the
+        # bot builds the draft from it.
+        msg, _ = await self._send(
+            "Give me the usual.", intent_of("usual"), paxyo=fake,
+        )
+        self.assertIn("usual", msg.text_sent[0].lower())
+        self.assertIn("platform", bot.PARTIAL.get(1, {}))
         msg, _ = await self._send(
             "forget what you know about me", intent_of("unclear"),
             paxyo=fake,
@@ -29413,7 +29619,12 @@ class TestPerUserPersonality(_SmartLoopBase):
 
     async def test_usual_fallback_after_restart_with_empty_memory(self):
         # A restart: no history, no draft, no mirror — the stored
-        # usuals come back from the server on the first turn.
+        # usuals come back from the server on the first turn. The
+        # restore runs in the background now (17 Nov 2026), so
+        # the first turn answers from fresh state ("no usual
+        # yet") and the restore lands right after it (_send
+        # flushes while paxyo is patched); the second turn has
+        # the usual.
         fake = TikTokPaxyo(traits={
             "usual_platform": "tiktok", "usual_metric": "views",
             "usual_quantity": 1000, "usual_service_id": 2001,
@@ -29421,8 +29632,12 @@ class TestPerUserPersonality(_SmartLoopBase):
         msg, _ = await self._send(
             "Give me the usual.", intent_of("usual"), paxyo=fake,
         )
+        self.assertIn("don't have a usual", msg.text_sent[0])
         self.assertEqual(bot.USER_TRAITS[1]["usual_platform"], "tiktok")
         self.assertIn(1, bot._TRAITS_FROM_SERVER)
+        msg, _ = await self._send(
+            "Give me the usual.", intent_of("usual"), paxyo=fake,
+        )
         self.assertIn("Your usual is TikTok Video Views", msg.text_sent[0])
         self.assertIn("×1000", msg.text_sent[0])
         self.assertIn("Please send the link of the video.", msg.text_sent[0])
