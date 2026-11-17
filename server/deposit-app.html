@@ -1,27 +1,37 @@
 <!DOCTYPE html>
 <!--
-  Paxyo deposit popup (owner, 16 Nov 2026): the pre-filled deposit page
+  Paxyo deposit popup (owner, 17 Nov 2026): the deposit page
   @paxorder_bot opens INSIDE Telegram as a Web App after the user
-  confirms a deposit in chat. The bot creates the deposit first and
-  passes everything in the URL query — this page NEVER asks for a
-  website login, NEVER holds a secret or API key, and NEVER creates
-  a deposit itself. It only displays the pre-filled summary and opens
-  the Chapa checkout the server returned.
+  confirms an amount in chat. The bot creates the deposit first
+  (amount only) and passes deposit_id + a one-time token + amount
+  in the URL query — this page NEVER asks for a website login,
+  NEVER holds a secret or API key, and NEVER creates a deposit
+  itself. It collects the payment method + phone HERE, exchanges
+  the token for the Chapa checkout (POST /api/bot/deposits/{id}/
+  payment — the token is the auth for that one pending deposit),
+  and opens the checkout. The checkout URL is never shown as
+  text anywhere on this page.
 
   Install: copy to public_html/deposit-app.html on paxyo.et
   (https://paxyo.et/deposit-app.html). The bot opens it as
   DEPOSIT_POPUP_URL; the server sends Chapa's return_url here
   (?paid=1) after payment.
 
-  Views (?paid=1 shows the success view, anything else the summary):
-  - summary: amount / method / phone / deposit id + "Proceed to payment".
-  - pay: the Chapa checkout inside an iframe, with an always-visible
-    "Open payment page" fallback (Telegram.WebApp.openLink, or a new
-    tab outside Telegram) — a blocked iframe can never leave a dead
-    page, because the fallback is always on screen.
-  - paid: "Payment done" + back-to-chat guidance (the bot's "I paid"
-    recheck credits the balance; this page never claims it directly).
-  - no checkout_url and not paid: open-from-the-bot guidance.
+  Views (?paid=1 shows the success view, anything else the form):
+  - form: amount (read-only) + method picker (Telebirr, CBE,
+    M-Pesa, CBE Birr) + phone + "Proceed to payment".
+  - pay: the Chapa checkout inside an iframe, with an always-
+    visible "Open payment page" button (Telegram.WebApp.openLink,
+    or a new tab outside Telegram) — a blocked iframe can never
+    leave a dead page, because the button is always on screen.
+    The checkout URL is used as a link target only, never
+    displayed as text.
+  - pushed: Chapa sent a payment prompt to the phone instead of
+    a checkout page — approve it on the phone; the balance
+    updates automatically.
+  - paid: "Payment done" + the balance updates automatically —
+    no tap needed anywhere, in the chat or here.
+  - no deposit_id/token: open-from-the-bot guidance.
 -->
 <html lang="en">
 <head>
@@ -46,28 +56,45 @@
   .btn { display: block; width: 100%; border: 0; border-radius: 12px; background: var(--blue); color: #fff; font-size: 17px; font-weight: 700; padding: 15px 12px; cursor: pointer; text-align: center; text-decoration: none; margin-top: 14px; }
   .btn.secondary { background: #eef3fd; color: var(--blue); }
   .btn.ghost { background: #fff; color: var(--blue); border: 1px solid var(--line); }
+  .btn:disabled { opacity: .55; cursor: default; }
   .note { font-size: 13px; }
-  #pay, #paid, #nourl { display: none; }
+  .err { color: #b3261e; font-size: 14px; }
+  #pay, #paid, #pushed, #nourl { display: none; }
   #frame { width: 100%; height: 62vh; border: 1px solid var(--line); border-radius: 12px; margin-top: 12px; }
   .check { font-size: 44px; }
   .hidden { display: none !important; }
+  .methods { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 4px; }
+  .method { border: 1px solid var(--line); border-radius: 12px; background: #fff; font-size: 16px; font-weight: 600; padding: 13px 8px; cursor: pointer; color: var(--ink); }
+  .method[aria-pressed="true"] { border-color: var(--blue); background: #eef3fd; color: var(--blue); }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 14px 0 6px; }
+  input[type="tel"] { width: 100%; font-size: 17px; padding: 13px 12px; border: 1px solid var(--line); border-radius: 12px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="logo">Paxyo</div>
 
-  <div id="summary">
+  <div id="form">
     <h1>Deposit</h1>
-    <p>Everything is already filled in — just proceed to payment.</p>
+    <p>Choose how to pay and enter your phone number — then proceed to payment.</p>
     <div class="amount"><span id="sum-amount">—</span> <small>ETB</small></div>
     <div class="rows">
-      <div class="row"><span class="k">Method</span><span class="v" id="sum-method">—</span></div>
-      <div class="row"><span class="k">Phone</span><span class="v" id="sum-phone">—</span></div>
       <div class="row"><span class="k">Deposit ID</span><span class="v" id="sum-id">—</span></div>
     </div>
+    <label id="method-label">Payment method</label>
+    <div class="methods" role="group" aria-labelledby="method-label">
+      <button type="button" class="method" data-method="telebirr" aria-pressed="false">Telebirr</button>
+      <button type="button" class="method" data-method="cbebirr" aria-pressed="false">CBE Birr</button>
+      <button type="button" class="method" data-method="mpesa" aria-pressed="false">M-Pesa</button>
+      <button type="button" class="method" data-method="cbe" aria-pressed="false">CBE</button>
+    </div>
+    <label for="phone">Phone number</label>
+    <input type="tel" id="phone" inputmode="tel" autocomplete="tel"
+           placeholder="09... or 07..." aria-describedby="phone-hint">
+    <p class="note" id="phone-hint">The number the payment goes to — for example 09..., 07... or 2519...</p>
+    <p class="err hidden" id="form-error" role="alert"></p>
     <button class="btn" id="proceed">Proceed to payment</button>
-    <p class="note">You will pay on Chapa's secure page. Your balance updates automatically once the payment succeeds.</p>
+    <p class="note">You will pay on Chapa's secure page. Your balance updates automatically once the payment succeeds — nothing to tap afterwards.</p>
   </div>
 
   <div id="pay">
@@ -75,21 +102,28 @@
     <p>Pay on Chapa's page below. If it does not load, use the button under it — the chat stays open either way.</p>
     <iframe id="frame" title="Chapa payment page" allow="payment *"></iframe>
     <button class="btn secondary" id="openlink">Payment page not loading? Open it here</button>
-    <button class="btn ghost" id="back">← Back to summary</button>
+    <button class="btn ghost" id="back">← Back</button>
+  </div>
+
+  <div id="pushed">
+    <div class="check">📱</div>
+    <h1>Check your phone</h1>
+    <p>A payment request is on its way to your phone — approve it with your payment PIN.</p>
+    <p>Your balance updates automatically once the payment succeeds — nothing to tap.</p>
+    <a class="btn" href="https://t.me/paxorder_bot" id="pushed-chat">Back to chat</a>
   </div>
 
   <div id="paid">
     <div class="check">✅</div>
     <h1>Payment done</h1>
-    <p>Your balance updates once the payment is confirmed.</p>
-    <p>In the chat, tap <b>“I paid — check it”</b> to see your new balance.</p>
+    <p>Your balance updates automatically once the payment is confirmed — no need to tap anything in the chat.</p>
     <a class="btn" href="https://t.me/paxorder_bot" id="back-chat">Back to chat</a>
     <button class="btn ghost hidden" id="close">Close</button>
   </div>
 
   <div id="nourl">
     <h1>Deposit</h1>
-    <p>This page opens from the Paxyo bot with your deposit already filled in. Please start a deposit in the chat first.</p>
+    <p>This page opens from the Paxyo bot with your deposit already started. Please start a deposit in the chat first.</p>
     <a class="btn" href="https://t.me/paxorder_bot">Open @paxorder_bot</a>
   </div>
 </div>
@@ -106,16 +140,19 @@
     telebirr: "Telebirr", cbe: "CBE Birr",
     cbebirr: "CBE Birr", mpesa: "M-Pesa"
   };
-  var checkoutUrl = param("checkout_url");
+  var depositId = param("deposit_id");
+  var token = param("token");
   var paid = param("paid") === "1";
-  var summary = document.getElementById("summary");
+  var form = document.getElementById("form");
   var pay = document.getElementById("pay");
+  var pushedView = document.getElementById("pushed");
   var paidView = document.getElementById("paid");
   var nourl = document.getElementById("nourl");
 
   function show(el) {
-    summary.style.display = "none";
+    form.style.display = "none";
     pay.style.display = "none";
+    pushedView.style.display = "none";
     paidView.style.display = "none";
     nourl.style.display = "none";
     el.style.display = "block";
@@ -125,6 +162,11 @@
   // crafted query string cannot inject markup or scripts.
   function setText(id, value) {
     document.getElementById(id).textContent = value || "—";
+  }
+  function showError(message) {
+    var el = document.getElementById("form-error");
+    el.textContent = message;
+    el.classList.remove("hidden");
   }
 
   if (paid) {
@@ -140,22 +182,37 @@
     return;
   }
 
-  if (!checkoutUrl || !/^https?:\/\//i.test(checkoutUrl)) {
+  if (!depositId || !token) {
     show(nourl);
     return;
   }
 
   setText("sum-amount", param("amount"));
-  setText("sum-method", METHOD_LABELS[(param("method") || "").toLowerCase()] || param("method"));
-  setText("sum-phone", param("phone"));
-  setText("sum-id", param("deposit_id"));
-  show(summary);
+  setText("sum-id", depositId);
+  show(form);
 
+  // Method picker: exactly one method selected. CBE Birr posts
+  // "cbebirr" (the server stores it as "cbe", as before) and CBE
+  // posts "cbe" — the four buttons stay distinct in the UI.
+  var selectedMethod = null;
+  var methodButtons = document.querySelectorAll(".method");
+  methodButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      methodButtons.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+      btn.setAttribute("aria-pressed", "true");
+      selectedMethod = btn.getAttribute("data-method");
+      document.getElementById("form-error").classList.add("hidden");
+    });
+  });
+
+  var checkoutUrl = null;
   var frame = document.getElementById("frame");
   var loaded = false;
   frame.addEventListener("load", function () { loaded = true; });
-  document.getElementById("proceed").addEventListener("click", function () {
-    frame.src = checkoutUrl;
+
+  function openPay(url) {
+    checkoutUrl = url;
+    frame.src = url;
     show(pay);
     // If Chapa blocks framing the iframe stays blank (some browsers
     // still fire load on a blocked frame), so the fallback button is
@@ -167,15 +224,60 @@
         btn.scrollIntoView({ block: "center" });
       }
     }, 8000);
+  }
+
+  document.getElementById("proceed").addEventListener("click", function () {
+    var phone = document.getElementById("phone").value.trim();
+    if (!selectedMethod) { showError("Please choose a payment method."); return; }
+    if (!phone) { showError("Please enter your phone number."); return; }
+    var btn = document.getElementById("proceed");
+    btn.disabled = true;
+    btn.textContent = "Starting payment…";
+    // The token is the auth for this one pending deposit — no
+    // secret or API key is ever sent from this page. The server
+    // re-validates the method + phone and returns the checkout.
+    fetch("/api/bot/deposits/" + encodeURIComponent(depositId) + "/payment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: token, method: selectedMethod, phone: phone })
+    }).then(function (resp) { return resp.json(); }).then(function (data) {
+      if (!data || data.success === false) {
+        var msg = (data && (data.error || data.message)) || "Payment could not be started. Please try again.";
+        showError(msg);
+        btn.disabled = false;
+        btn.textContent = "Proceed to payment";
+        return;
+      }
+      if (data.pushed) { show(pushedView); return; }
+      if (data.checkout_url && /^https?:\/\//i.test(data.checkout_url)) {
+        openPay(data.checkout_url);
+        return;
+      }
+      showError("Payment could not be started. Please try again.");
+      btn.disabled = false;
+      btn.textContent = "Proceed to payment";
+    }).catch(function () {
+      showError("Could not reach the server. Please check your connection and try again.");
+      btn.disabled = false;
+      btn.textContent = "Proceed to payment";
+    });
   });
   document.getElementById("openlink").addEventListener("click", function () {
+    if (!checkoutUrl) return;
     if (tg && tg.openLink) { tg.openLink(checkoutUrl); }
     else { window.open(checkoutUrl, "_blank"); }
   });
   document.getElementById("back").addEventListener("click", function () {
     frame.removeAttribute("src");
     loaded = false;
-    show(summary);
+    checkoutUrl = null;
+    var btn = document.getElementById("proceed");
+    btn.disabled = false;
+    btn.textContent = "Proceed to payment";
+    show(form);
+  });
+  document.getElementById("pushed-chat").addEventListener("click", function (ev) {
+    if (tg) { ev.preventDefault(); tg.openTelegramLink("https://t.me/paxorder_bot"); }
   });
 })();
 </script>
