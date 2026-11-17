@@ -8528,6 +8528,294 @@ class TestFastFailover(unittest.IsolatedAsyncioTestCase):
         sleep_mock.assert_not_awaited()
 
 
+class TestAiTimingLogs(unittest.IsolatedAsyncioTestCase):
+    """Timing logs (owner, 17 Nov 2026): every ai_generate attempt
+    logs provider + seconds on success and on failure, plus the
+    total — and never logs a secret (no URL, no key, no prompt, no
+    reply)."""
+
+    def _key_url_error(self, status, url):
+        req = bot.httpx.Request("POST", url)
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(
+            f"{status}", request=req, response=resp
+        )
+
+    def _status_error(self, status):
+        req = bot.httpx.Request(
+            "POST", "https://api.groq.com/openai/v1/chat/completions"
+        )
+        resp = bot.httpx.Response(status, request=req)
+        return bot.httpx.HTTPStatusError(f"{status}", request=req, response=resp)
+
+    async def test_groq_success_logs_provider_seconds_and_total(self):
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(return_value="ok"),
+             ), \
+             self.assertLogs("paxorder_bot", level="INFO") as logs:
+            self.assertEqual(await bot.ai_generate("hello"), "ok")
+        joined = "\n".join(logs.output)
+        self.assertRegex(joined, r"ai Groq ok \d+\.\d\ds")
+        self.assertRegex(joined, r"ai_generate ok \d+\.\d\ds")
+
+    async def test_groq_429_logs_failure_status_and_total(self):
+        client = GroqFlakyClient([self._status_error(429)])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "<redacted>"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(return_value="d"),
+             ), \
+             self.assertLogs("paxorder_bot", level="INFO") as logs:
+            self.assertEqual(await bot.ai_generate("hello"), "d")
+        joined = "\n".join(logs.output)
+        # The failure warning keeps its exact old format (existing
+        # secrecy tests assert the "(HTTP 429)" substring); the
+        # seconds live on their own info line.
+        self.assertIn(
+            "Groq generate failed, trying next provider (HTTP 429)",
+            joined,
+        )
+        self.assertRegex(joined, r"ai Groq failed \d+\.\d\ds")
+        self.assertRegex(joined, r"ai_generate ok \d+\.\d\ds")
+
+    async def test_total_time_logged_when_every_provider_fails(self):
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", "<redacted>"), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("down")),
+             ), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("down")),
+             ), \
+             mock.patch(
+                 "bot.kilo_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("down")),
+             ), \
+             self.assertLogs("paxorder_bot", level="INFO") as logs:
+            with self.assertRaises(RuntimeError):
+                await bot.ai_generate("hello")
+        joined = "\n".join(logs.output)
+        for provider in ("Groq", "DeepSeek", "Kilo"):
+            self.assertIn(
+                f"{provider} generate failed, trying next provider",
+                joined,
+            )
+            self.assertRegex(
+                joined, rf"ai {provider} failed \d+\.\d\ds"
+            )
+        self.assertRegex(joined, r"ai_generate failed \d+\.\d\ds")
+
+    async def test_attempt_log_never_carries_secrets(self):
+        # The Gemini URL carries the API key (?key=...) and leaked
+        # into the Render logs on 13 Nov 2026: a failure log must
+        # carry the status only, and a success log must not carry
+        # the reply text.
+        err = self._key_url_error(
+            429,
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-3.5-flash:generateContent?key=FAKESECRETKEY",
+        )
+
+        async def _raise():
+            raise err
+
+        with self.assertLogs("paxorder_bot", level="INFO") as logs:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot._ai_attempt("Gemini", _raise())
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "Gemini generate failed, trying next provider (HTTP 429)",
+            joined,
+        )
+        self.assertRegex(joined, r"ai Gemini failed \d+\.\d\ds")
+        self.assertNotIn("key=", joined)
+        self.assertNotIn("FAKESECRETKEY", joined)
+        self.assertNotIn("generateContent", joined)
+        self.assertNotIn("Bearer ", joined)
+
+        async def _ok():
+            return "SECRET-REPLY-TEXT"
+
+        with self.assertLogs("paxorder_bot", level="INFO") as logs:
+            self.assertEqual(
+                await bot._ai_attempt("Groq", _ok()), "SECRET-REPLY-TEXT"
+            )
+        joined = "\n".join(logs.output)
+        self.assertRegex(joined, r"ai Groq ok \d+\.\d\ds")
+        self.assertNotIn("SECRET-REPLY-TEXT", joined)
+
+
+class TestSimpleChatFastPath(unittest.IsolatedAsyncioTestCase):
+    """One AI call for simple chats (owner, 17 Nov 2026): a plain
+    greeting or a question about Paxyo itself skips the AI classify
+    call — the local reader pins it down — so the turn costs one AI
+    call (paxyo_info, how_to) or none (greeting, help,
+    how_to_order). Anything that could be an order, money or state
+    still goes through the classifier."""
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    async def _send_counting(self, text, ai_side_effect):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        ai_mock = mock.AsyncMock(side_effect=ai_side_effect)
+        with mock.patch("bot.ai_generate", ai_mock), \
+             mock.patch("bot.paxyo", FakePaxyo()), \
+             mock.patch("bot.speak_reply") as speak:
+            await bot.handle_order_text(update, None, text)
+        self.assertEqual(msg.voice_sent, [])
+        speak.assert_not_called()
+        return msg, ai_mock
+
+    def test_greeting_intent(self):
+        intent = bot.simple_chat_intent("Hello")
+        self.assertEqual(intent["intent"], "greeting")
+        self.assertNotIn("gemini_failed", intent)
+
+    def test_services_question_intent(self):
+        for text in (
+            "What services do you offer?",
+            "Hello, what services do you offer?",
+            "What is Paxyo?",
+            "How long does delivery take?",
+        ):
+            intent = bot.simple_chat_intent(text)
+            self.assertIsNotNone(intent, text)
+            self.assertEqual(intent["intent"], "paxyo_info", text)
+
+    def test_help_and_how_to_intents(self):
+        self.assertEqual(
+            bot.simple_chat_intent("help")["intent"], "help"
+        )
+        self.assertEqual(
+            bot.simple_chat_intent("How do I order?")["intent"],
+            "how_to_order",
+        )
+        self.assertEqual(
+            bot.simple_chat_intent("How do I make my account public?")["intent"],
+            "how_to",
+        )
+
+    def test_order_deposit_and_state_messages_not_skipped(self):
+        for text in (
+            "I want 1000 Instagram followers https://instagram.com/p/x",
+            "I want to deposit 10 ETB",
+            "How much is my balance",
+            "Cancel my order",
+            "What services do you offer? I want a refund",
+            "1000",
+            "Hello, I want 1000 TikTok views",
+            "What is the weather like?",
+        ):
+            self.assertIsNone(bot.simple_chat_intent(text), text)
+
+    async def test_greeting_costs_zero_ai_calls(self):
+        msg, ai_mock = await self._send_counting("Hello", [])
+        ai_mock.assert_not_called()
+        self.assertIn("Tell me the service you want", msg.text_sent[0])
+
+    async def test_services_question_costs_one_ai_call(self):
+        # The owner's live test message: the "Hello, " prefix means
+        # the browse-services gate (which needs a bare "what ...")
+        # does not fire, so this reaches the fast path and costs
+        # exactly one AI call — the answer — instead of two.
+        answer = "Paxyo offers followers, likes and views."
+        msg, ai_mock = await self._send_counting(
+            "Hello, what services do you offer?", [answer]
+        )
+        self.assertEqual(ai_mock.call_count, 1)
+        self.assertEqual(msg.text_sent, [answer])
+
+    async def test_bare_services_question_goes_to_browse(self):
+        # Pre-existing behaviour, pinned here so the fast path is
+        # never "fixed" into breaking it: a bare "What services do
+        # you offer?" matches the browse-services gate before the
+        # classifier, so it costs zero AI calls and asks which
+        # platform instead of listing services.
+        msg, ai_mock = await self._send_counting(
+            "What services do you offer?", []
+        )
+        ai_mock.assert_not_called()
+        self.assertEqual(
+            msg.text_sent,
+            ["Which platform? (Instagram, TikTok, Telegram, YouTube...)"],
+        )
+
+    async def test_order_message_still_classifies(self):
+        payload = json.dumps({
+            **FULL_INTENT,
+            "intent": "order",
+            "platform": "instagram",
+            "service_hint": "instagram followers",
+            "link": "https://instagram.com/p/x",
+            "quantity": 1000,
+        })
+        msg, ai_mock = await self._send_counting(
+            "I want 1000 Instagram followers https://instagram.com/p/x",
+            [payload],
+        )
+        # The classify call ran (and nothing else called the AI):
+        # the order flow itself is deterministic.
+        self.assertEqual(ai_mock.call_count, 1)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # the Confirm card
+
+    async def test_deposit_message_still_classifies(self):
+        payload = json.dumps({"intent": "deposit", "amount": 10})
+        msg, ai_mock = await self._send_counting(
+            "I want to deposit 10 ETB", [payload]
+        )
+        self.assertEqual(ai_mock.call_count, 1)
+        self.assertEqual(len(msg.text_sent), 1)
+
+    async def test_ambiguous_message_falls_back_to_two_calls(self):
+        payload = json.dumps({"intent": "off_topic"})
+        msg, ai_mock = await self._send_counting(
+            "What is the weather like?", [payload, "It is sunny today."]
+        )
+        self.assertEqual(ai_mock.call_count, 2)
+        self.assertIn("It is sunny today.", msg.text_sent[0])
+
+
 class FlakyClient:
     """Fake client returning a queue of responses/errors per post."""
 
@@ -13330,7 +13618,13 @@ class _SmartLoopBase(unittest.IsolatedAsyncioTestCase):
         msg = FakeMessage()
         update = FakeUpdate(msg)
         fake_paxyo = paxyo or FakePaxyo()
-        intents = [intent for _, intent in turns]
+        # The simple-chat fast path (17 Nov 2026) answers a plain
+        # greeting locally, so those turns never call the classifier:
+        # the mocked intents line up with the turns that do.
+        intents = [
+            intent for text, intent in turns
+            if bot.simple_chat_intent(text) is None
+        ]
         with mock.patch(
             "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
         ), mock.patch("bot.paxyo", fake_paxyo), mock.patch("bot.speak_reply"):
@@ -16024,7 +16318,11 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
 
     async def test_unchanged_translation_does_not_engage_bridge(self):
         # Gemini returns the text unchanged: the bridge stays off
-        # and nothing is translated back.
+        # and nothing is translated back. The greeting itself is
+        # answered by the simple-chat fast path (17 Nov 2026), so
+        # the classifier is never called — the bridge staying off
+        # is what this test pins (translate_to_amharic would raise
+        # if it engaged).
         amharic = "ሰላም"
         with mock.patch(
             "bot.translate_to_english",
@@ -16046,8 +16344,7 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
             mock.patch("bot.speak_reply"):
             msg = FakeMessage()
             await bot.handle_order_text(FakeUpdate(msg), None, amharic)
-        extract.assert_awaited_once()
-        self.assertEqual(extract.await_args.args[0], amharic)
+        extract.assert_not_called()
         self.assertTrue(msg.text_sent)
 
 
@@ -19416,7 +19713,13 @@ class TestStaleDraftPrice(_LanguageRoundBase):
     async def _turns(self, turns, paxyo=None):
         msg = FakeMessage()
         update = FakeUpdate(msg)
-        intents = [intent for _, intent in turns]
+        # The simple-chat fast path (17 Nov 2026) answers a plain
+        # greeting locally, so those turns never call the classifier:
+        # the mocked intents line up with the turns that do.
+        intents = [
+            intent for text, intent in turns
+            if bot.simple_chat_intent(text) is None
+        ]
         with mock.patch(
             "bot.extract_intent", new=mock.AsyncMock(side_effect=intents)
         ), mock.patch("bot.paxyo", paxyo or StaleDraftPricePaxyo()), mock.patch(
@@ -19518,7 +19821,9 @@ class TestStaleDraftPrice(_LanguageRoundBase):
         msg = FakeMessage()
         update = FakeUpdate(msg)
         intents = [
-            intent_of("greeting"),
+            # The "Hi" turn is answered by the simple-chat fast
+            # path (17 Nov 2026) and never calls the classifier,
+            # so the mocked intents start at the order turn.
             intent_of(
                 "order", platform="tiktok",
                 service_hint="tiktok views",

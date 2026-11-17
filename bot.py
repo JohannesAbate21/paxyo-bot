@@ -57,6 +57,7 @@ import re
 import shutil
 import signal
 import tempfile
+import time
 import urllib.parse
 import uuid
 from typing import Optional
@@ -7752,6 +7753,9 @@ def _log_ai_failure(message: str, exc) -> None:
     error's text carries the request URL, and the Gemini URL carries
     the API key (?key=...), which leaked into the Render logs (13 Nov
     2026). The status code is all the debugging signal there is.
+    The message format is exact — existing secrecy tests assert the
+    "(HTTP 429)" substring — so timing is logged on its own line
+    by _ai_attempt, never appended here.
     """
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
@@ -7759,6 +7763,28 @@ def _log_ai_failure(message: str, exc) -> None:
         log.warning("%s (HTTP %s)", message, status)
     else:
         log.warning("%s", message)
+
+
+async def _ai_attempt(provider: str, coro):
+    """One provider attempt inside ai_generate: time it and log the
+    provider name + seconds, on success and on failure. Never logs
+    the exception text, a URL, a prompt or a reply — the Gemini URL
+    carries the API key (?key=...), which leaked into the Render
+    logs (13 Nov 2026); failures go through _log_ai_failure, which
+    logs the HTTP status only.
+    """
+    _start = time.monotonic()
+    try:
+        _text = await coro
+    except Exception as exc:
+        _elapsed = time.monotonic() - _start
+        _log_ai_failure(
+            f"{provider} generate failed, trying next provider", exc
+        )
+        log.info("ai %s failed %.2fs", provider, _elapsed)
+        raise
+    log.info("ai %s ok %.2fs", provider, time.monotonic() - _start)
+    return _text
 
 
 async def ai_generate(prompt: str, system: str = None) -> str:
@@ -7789,74 +7815,101 @@ async def ai_generate(prompt: str, system: str = None) -> str:
     configured provider failed does the error reach the caller
     (extract_intent then answers from local_intent instead of going
     silent). The last provider's error is re-raised — never retried
-    — so a total failure fails once, not twice."""
+    — so a total failure fails once, not twice. Every attempt is
+    timed and logged (provider + seconds, status only on failure —
+    see _ai_attempt), plus the total time for the whole call, so a
+    slow reply can be traced to the provider that ate the time."""
     last_exc = None
+    _start = time.monotonic()
     if GROQ_API_KEY:
         try:
-            return await groq_generate(prompt, system=system)
+            _text = await _ai_attempt("Groq", groq_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("Groq generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if DEEPSEEK_API_KEY:
         try:
-            return await deepseek_generate(prompt, system=system)
+            _text = await _ai_attempt("DeepSeek", deepseek_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("DeepSeek generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if GROK_API_KEY:
         try:
-            return await grok_generate(prompt, system=system)
+            _text = await _ai_attempt("Grok", grok_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("Grok generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if ZEN_API_KEY:
         try:
-            return await zen_generate(prompt, system=system)
+            _text = await _ai_attempt("Zen", zen_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("Zen generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if QWEN_API_KEY:
         try:
-            return await qwen_generate(prompt, system=system)
+            _text = await _ai_attempt("Qwen", qwen_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("Qwen generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if MISTRAL_API_KEY:
         try:
-            return await mistral_generate(prompt, system=system)
+            _text = await _ai_attempt("Mistral", mistral_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("Mistral generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if OPENAI_API_KEY:
         try:
-            return await openai_generate(prompt, system=system)
+            _text = await _ai_attempt("OpenAI", openai_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("OpenAI generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if GEMINI_API_KEY:
         try:
-            return await gemini_generate(prompt, system=system)
+            _text = await _ai_attempt("Gemini", gemini_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("Gemini generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     try:
-        return await kilo_generate(prompt, system=system)
+        _text = await _ai_attempt("Kilo", kilo_generate(prompt, system=system))
     except Exception as exc:
-        _log_ai_failure("Kilo generate failed, trying next provider", exc)
         last_exc = exc
+    else:
+        log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+        return _text
     if OPENROUTER_API_KEY:
         try:
-            return await openrouter_generate(prompt, system=system)
+            _text = await _ai_attempt("OpenRouter", openrouter_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("OpenRouter generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if GLM_API_KEY:
         try:
-            return await glm_generate(prompt, system=system)
+            _text = await _ai_attempt("GLM", glm_generate(prompt, system=system))
         except Exception as exc:
-            _log_ai_failure("GLM generate failed, trying next provider", exc)
             last_exc = exc
+        else:
+            log.info("ai_generate ok %.2fs", time.monotonic() - _start)
+            return _text
     if last_exc is not None:
+        log.info("ai_generate failed %.2fs", time.monotonic() - _start)
         raise last_exc
     # No provider configured at all: let Gemini raise so the caller
     # falls back to local rules instead of going silent.
@@ -8813,6 +8866,95 @@ def local_intent(text: str) -> dict:
     elif is_source_question(text):
         intent["intent"] = "source_question"
     return intent
+
+
+# Simple-chat fast path (owner, 17 Nov 2026): a plain greeting or a
+# question about Paxyo itself costs TWO AI calls today — one to
+# classify it, one to answer it — so the provider's latency counts
+# double (Groq ~1s/call = ~2s a reply, DeepSeek ~4s/call =
+# ~8-9s). When the message is simple enough for the local reader to
+# pin down with confidence, the classify call is skipped and the
+# handler answers with one AI call (paxyo_info, how_to) or none at
+# all (greeting, help, how_to_order — canned replies). Anything that
+# could be an order, money or state is NEVER skipped: a link, a
+# platform or metric, a quantity, an amount, a phone number, a
+# service id, an interval/delay, a payment method, or a
+# money/state word (refund, cancel, deposit, balance, recharge,
+# support, problem) all force the normal AI-classify path. When in
+# doubt this returns None and the classifier runs — a wrong skip is
+# worse than a slow reply.
+_SIMPLE_GREETINGS = frozenset((
+    "hi", "hello", "hey", "selam", "ሰላም",
+    "good morning", "good afternoon", "good evening",
+    "hi there", "hello there", "hey there",
+))
+_PAXYO_INFO_PHRASES = (
+    "what services",
+    "services do you offer",
+    "services you offer",
+    "what do you offer",
+    "what do you sell",
+    "what can you do",
+    "what is paxyo",
+    "what's paxyo",
+    "whats paxyo",
+    "tell me about paxyo",
+    "about paxyo",
+    "how does paxyo work",
+    "how do you work",
+    "who are you",
+    "what do you do",
+    "how long does delivery take",
+    "how long delivery takes",
+    "how long will delivery take",
+)
+_SIMPLE_STATE_WORDS = (
+    "refund", "cancel", "deposit", "balance", "recharge", "top up",
+    "support", "problem", "complaint",
+)
+
+
+def simple_chat_intent(text: str):
+    """Confident local intent for a simple chat message, or None.
+
+    Returns a handler-ready intent dict (same shape as
+    local_intent's) when the message is a plain greeting, a question
+    about Paxyo itself, or a help / how-to-order / how-to question —
+    and NOTHING in it could be an order, money or state. Returns
+    None for everything else, so the AI classifier runs as before.
+    The "gemini_failed" flag is cleared: the classifier did not
+    fail, it was deliberately skipped.
+    """
+    local = local_intent(text)
+    if extract_links(text):
+        return None
+    if local.get("platform") or local.get("service_hint"):
+        return None
+    if (
+        local.get("quantity") is not None
+        or local.get("amount") is not None
+        or local.get("phone") is not None
+        or local.get("service_id") is not None
+        or local.get("interval_minutes") is not None
+        or local.get("delay_minutes") is not None
+        or local.get("method") is not None
+    ):
+        return None
+    s = normalize_text(text).strip()
+    if any(w in s for w in _SIMPLE_STATE_WORDS):
+        return None
+    if any(p in s for p in _PAXYO_INFO_PHRASES):
+        local["intent"] = "paxyo_info"
+    elif local.get("intent") in ("how_to_order", "how_to"):
+        pass  # local_intent already pinned it down; keep it.
+    elif s.strip(".!?").strip() in _SIMPLE_GREETINGS:
+        local["intent"] = "greeting"
+    elif s.strip(".!?").strip() == "help":
+        local["intent"] = "help"
+    else:
+        return None
+    local.pop("gemini_failed", None)
+    return local
 
 
 # Strict-mode extraction (smart-loop round 2, 14 Nov 2026): the
@@ -26148,7 +26290,11 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       budget, batch, change_order, refill, split_payment,
       max_for_balance, discount, safety, refund_policy, geo_target,
       free_sample, price_pushback, content_help, support_issue,
-      cancel, off_topic, unclear).
+      cancel, off_topic, unclear). EXCEPT a simple chat message
+      (plain greeting, question about Paxyo, help / how-to-order /
+      how-to) is pinned down locally first and skips the classify
+      call entirely (simple_chat_intent, 17 Nov 2026) — one AI call
+      (or none) instead of two.
       Conversational intents are answered before the order flow, so the bot talks like
       customer support instead of only understanding orders;
       a real question always gets a free AI answer (owner,
@@ -26975,13 +27121,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # catalogue as a hint when it is available (cached 10 minutes;
     # a fetch failure just means no services section, as before).
     if intent is None:
-        try:
-            _services = await paxyo.services() if paxyo is not None else None
-        except Exception:
-            _services = None
-        intent = await extract_intent(
-            text, user_id=user.id, services=_services
-        )
+        # Simple-chat fast path (owner, 17 Nov 2026): a plain
+        # greeting or a question about Paxyo itself is pinned down
+        # locally, so the AI classify call is skipped and the turn
+        # costs one AI call (paxyo_info, how_to) or none (greeting,
+        # help, how_to_order). Anything else still goes through the
+        # classifier below — see simple_chat_intent for the guards.
+        _simple = simple_chat_intent(text)
+        if _simple is not None:
+            intent = _simple
+        else:
+            try:
+                _services = await paxyo.services() if paxyo is not None else None
+            except Exception:
+                _services = None
+            intent = await extract_intent(
+                text, user_id=user.id, services=_services
+            )
     intent_type = (intent.get("intent") or "unclear").strip().lower()
     # Off-topic steering counts consecutive off-topic turns; any
     # Paxyo topic resets it.
