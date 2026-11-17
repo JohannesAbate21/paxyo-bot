@@ -87,8 +87,8 @@ PAXYO_API_BASE = os.environ.get("PAXYO_API_BASE", "https://paxyo.et/api/bot").rs
 BOT_API_SECRET = os.environ.get("BOT_API_SECRET", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-# OpenAI (ChatGPT) — the fourth AI since 13 Nov 2026, now behind
-# DeepSeek, Qwen and Groq: the Gemini free-tier key kept hitting its
+# OpenAI (ChatGPT) — the seventh AI since 17 Nov 2026, now behind
+# Groq, DeepSeek, Grok, Zen, Qwen and Mistral: the Gemini free-tier key kept hitting its
 # per-minute limit (429), so when OPENAI_API_KEY is set the bot
 # classifies, transcribes and reads pictures with OpenAI instead,
 # and only falls back to Gemini when no OpenAI key is set. The key
@@ -99,7 +99,8 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_URL = "https://api.openai.com/v1"
 # Groq — the first AI from 13 Nov 2026 until DeepSeek took over
-# that evening (see below). OpenAI's $5 credit could not be
+# that evening, and first again since 17 Nov 2026 (owner: Groq
+# first, DeepSeek second). OpenAI's $5 credit could not be
 # bought (the owner's Bybit card was declined), so the bot uses
 # Groq's free tier instead — no card needed, just a free API
 # key. Groq's API is OpenAI-compatible (same chat-completions
@@ -113,8 +114,8 @@ OPENAI_URL = "https://api.openai.com/v1"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_URL = "https://api.groq.com/openai/v1"
-# Grok (xAI) — the FIRST AI since 17 Nov 2026 (owner: Grok first,
-# DeepSeek second as fallback). xAI's API is OpenAI-compatible
+# Grok (xAI) — the THIRD AI since 17 Nov 2026 (owner: Groq first,
+# DeepSeek second, Grok third). xAI's API is OpenAI-compatible
 # (same chat-completions shape as DeepSeek/Groq/OpenAI), base URL
 # https://api.x.ai/v1. Default model grok-4 — the Grok 4 alias,
 # which xAI keeps pointed at the current Grok 4 flagship, so the
@@ -122,16 +123,18 @@ GROQ_URL = "https://api.groq.com/openai/v1"
 # GROK_MODEL in Fly secrets, not the code. Grok is expensive vs
 # DeepSeek (about $2/1M input, $6/1M output), so it only runs when
 # GROK_API_KEY is set; without the key the order is unchanged
-# (DeepSeek first). A Grok failure — including its daily limit —
-# falls through to DeepSeek automatically in ai_generate. Grok has
+# (Groq first, DeepSeek second). A Grok failure — including its daily limit —
+# falls through to Zen automatically in ai_generate. Grok has
 # no voice transcription — ai_transcribe stays on Groq Whisper.
 # The key is a Fly secret, never in code. NOTE: GROQ_API_KEY is a
 # different company (Groq) and cannot be used for Grok.
 GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
 GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4")
 GROK_URL = "https://api.x.ai/v1"
-# DeepSeek — the FIRST AI since the evening of 13 Nov 2026: Groq's
-# free tier hit its daily token limit (73% used by 21:48 EAT) and
+# DeepSeek — the SECOND AI since 17 Nov 2026 (owner: Groq first,
+# DeepSeek second); it was the first AI from the evening of
+# 13 Nov 2026, when Groq's free tier hit its daily token limit
+# (73% used by 21:48 EAT) and
 # Groq had temporarily disabled Developer (paid) upgrades, so the
 # owner said "use DeepSeek". DeepSeek's API is OpenAI-compatible
 # (same chat-completions shape as Groq/OpenAI). Default model
@@ -152,13 +155,14 @@ DEEPSEEK_URL = "https://api.deepseek.com/v1"
 # Zen retires the model, switch ZEN_MODEL in Render, not the code.
 # Amharic is unproven on Zen — Amharic messages go through the
 # Gemini translate-bridge (see below) instead. It only runs after
-# DeepSeek failed, and a Zen failure falls through to Qwen, then
-# Mistral, then Groq, then OpenAI, then Gemini, then Kilo, then
+# Groq, DeepSeek and Grok failed, and a Zen failure falls through
+# to Qwen, then Mistral, then OpenAI, then Gemini, then Kilo, then
 # OpenRouter, then GLM. The key is a Render env var, never in code.
 ZEN_API_KEY = os.environ.get("ZEN_API_KEY", "")
 ZEN_MODEL = os.environ.get("ZEN_MODEL", "deepseek-v4.1-flash-free")
 ZEN_URL = os.environ.get("ZEN_URL", "https://opencode.ai/zen/v1")
-# Qwen-Turbo (Alibaba) — the THIRD AI since 13 Nov 2026: ~3x
+# Qwen-Turbo (Alibaba) — the FIFTH AI since 17 Nov 2026 (third
+# from 13 Nov 2026): ~3x
 # cheaper than DeepSeek ($0.05/1M input, $0.20/1M output) via the
 # international DashScope endpoint, which is OpenAI-compatible
 # (same chat-completions shape as DeepSeek/Groq/OpenAI). Amharic is
@@ -205,7 +209,8 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 # any provider, so nothing sensitive goes there.
 KILO_MODEL = os.environ.get("KILO_MODEL", "kilo-auto/free")
 KILO_URL = "https://api.kilo.ai/api/gateway"
-# Mistral (La Plateforme) — the fourth provider since 14 Nov 2026:
+# Mistral (La Plateforme) — the sixth provider since 17 Nov 2026
+# (fourth from 14 Nov 2026):
 # pay-as-you-go (owner's choice, 14 Nov 2026 — $0.10/$0.30 per 1M
 # tokens; PAYG needs $10 prepaid credits first (min buy $10,
 # no monthly minimum; he adds the card himself). The Free plan has no API access, so a key needs billing
@@ -216,9 +221,9 @@ KILO_URL = "https://api.kilo.ai/api/gateway"
 # provider, so nothing sensitive goes there. Amharic is unproven on
 # Mistral — Amharic messages go through the Gemini translate-bridge
 # (see below) instead. It only runs after Qwen failed, and a
-# Mistral failure falls through to Groq, then OpenAI, then Gemini,
-# then Kilo, then OpenRouter, then GLM. The key is a Render env
-# var, never in code.
+# Mistral failure falls through to OpenAI, then Gemini, then Kilo,
+# then OpenRouter, then GLM. The key is a Render env var, never in
+# code.
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
 MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
 MISTRAL_URL = "https://api.mistral.ai/v1"
@@ -7008,9 +7013,11 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT,
 # the bot classifies, transcribes and reads pictures with OpenAI
 # instead. The three functions mirror the Gemini ones exactly (same
 # inputs, same outputs, same retry shape), and the ai_* wrappers
-# below pick DeepSeek first, Qwen second, Groq third, OpenAI fourth,
-# Gemini fifth, GLM last — so with no DeepSeek, Qwen, Groq or OpenAI
-# key the bot behaves exactly as before.
+# below pick Groq first, DeepSeek second, Grok third, Zen fourth,
+# Qwen fifth, Mistral sixth, OpenAI seventh, Gemini eighth, Kilo
+# ninth, OpenRouter tenth, GLM last — so with no Groq, DeepSeek,
+# Grok, Zen, Qwen, Mistral or OpenAI key the bot behaves exactly
+# as before.
 
 async def _openai_post(path: str, headers=None, json=None, data=None,
                        files=None) -> dict:
@@ -7106,7 +7113,8 @@ async def openai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:
 
 # -------------------------------------------------------- Groq --------
 # Groq was the first AI (13 Nov 2026, until DeepSeek took over
-# that evening): OpenAI's $5 credit could not be bought — the
+# that evening; first again since 17 Nov 2026, owner: Groq first,
+# DeepSeek second): OpenAI's $5 credit could not be bought — the
 # owner's Bybit card was declined — so the bot uses Groq's free
 # tier, which needs no card. Groq's API is OpenAI-compatible, so
 # the two functions below mirror the OpenAI ones exactly (same
@@ -7197,8 +7205,8 @@ async def groq_transcribe(audio_bytes: bytes, language: str = None) -> str:
 
 
 # ------------------------------------------------------ Grok ------
-# Grok (xAI) is the first AI (17 Nov 2026, owner: Grok first,
-# DeepSeek second as fallback). xAI's API is OpenAI-compatible, so
+# Grok (xAI) is the third AI since 17 Nov 2026 (owner: Groq first,
+# DeepSeek second, Grok third). xAI's API is OpenAI-compatible, so
 # the three functions below mirror the DeepSeek ones exactly (same
 # inputs, same outputs, same retry shape), with xAI's base URL and
 # its own key/model env vars. Grok has no voice transcription —
@@ -7252,8 +7260,9 @@ async def grok_generate(prompt: str, system: str = None) -> str:
 
 
 # --------------------------------------------------- DeepSeek ------
-# DeepSeek is the first AI (13 Nov 2026, evening): Groq's free
-# tier kept hitting its daily token limit and Groq had temporarily
+# DeepSeek is the second AI since 17 Nov 2026 (first from the
+# evening of 13 Nov 2026): Groq's free tier kept hitting its daily
+# token limit and Groq had temporarily
 # disabled paid upgrades, so the owner said "use DeepSeek".
 # DeepSeek's API is OpenAI-compatible, so the two functions below
 # mirror the Groq ones exactly (same inputs, same outputs, same
@@ -7528,9 +7537,9 @@ async def kilo_generate(prompt: str, system: str = None) -> str:
 # same outputs, same retry shape), with Zen's base URL and its own
 # key/model env vars. The default model "deepseek-v4.1-flash-free"
 # is the free DeepSeek V4.1 Flash served by Zen. It sits between
-# DeepSeek and Qwen in ai_generate — only after DeepSeek failed; a
-# Zen failure falls through to Qwen, then Mistral, then Groq, then
-# OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM.
+# Grok and Qwen in ai_generate — only after Groq, DeepSeek and
+# Grok failed; a Zen failure falls through to Qwen, then Mistral,
+# then OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM.
 
 async def _zen_post(path: str, headers=None, json=None) -> dict:
     """One POST to the OpenCode Zen API, with retries on rate limits
@@ -7650,11 +7659,13 @@ def _log_ai_failure(message: str, exc) -> None:
 
 
 async def ai_generate(prompt: str, system: str = None) -> str:
-    """Text from the AI: Grok when GROK_API_KEY is set (first since
-    17 Nov 2026, owner: Grok first, DeepSeek second as fallback;
-    Grok is expensive vs DeepSeek, and a Grok failure — including
-    its daily limit — falls through to DeepSeek), else DeepSeek when
-    DEEPSEEK_API_KEY is set, else
+    """Text from the AI: Groq when GROQ_API_KEY is set (first since
+    17 Nov 2026, owner: Groq first, DeepSeek second; Groq's free
+    tier is fast and free, but it has a daily limit — a Groq failure
+    falls through to DeepSeek), else DeepSeek when DEEPSEEK_API_KEY
+    is set, else Grok when GROK_API_KEY is set (third since 17 Nov
+    2026; Grok is expensive vs DeepSeek, and a Grok failure —
+    including its daily limit — falls through to Zen), else
     Zen when ZEN_API_KEY is set (model deepseek-v4.1-flash-free —
     free tier, no card, owner approved 14 Nov 2026; a Zen failure
     falls through to Qwen), else Qwen when QWEN_API_KEY is set,
@@ -7662,7 +7673,7 @@ async def ai_generate(prompt: str, system: str = None) -> str:
     mistral-small-latest — pay-as-you-go, owner approved 14 Nov
     2026: $0.10/$0.30 per 1M tokens, PAYG needs $10 prepaid credits
     first, no monthly minimum; a Mistral failure falls through to
-    Groq), else Groq when GROQ_API_KEY is set, else ChatGPT when
+    OpenAI), else ChatGPT when
     OPENAI_API_KEY is set, else Gemini, else Kilo (no key — free
     gateway, only after Gemini failed, so it never burns its per-IP
     hourly cap), else OpenRouter when OPENROUTER_API_KEY is set
@@ -7678,17 +7689,23 @@ async def ai_generate(prompt: str, system: str = None) -> str:
     silent). The last provider's error is re-raised — never retried
     — so a total failure fails once, not twice."""
     last_exc = None
-    if GROK_API_KEY:
+    if GROQ_API_KEY:
         try:
-            return await grok_generate(prompt, system=system)
+            return await groq_generate(prompt, system=system)
         except Exception as exc:
-            _log_ai_failure("Grok generate failed, trying next provider", exc)
+            _log_ai_failure("Groq generate failed, trying next provider", exc)
             last_exc = exc
     if DEEPSEEK_API_KEY:
         try:
             return await deepseek_generate(prompt, system=system)
         except Exception as exc:
             _log_ai_failure("DeepSeek generate failed, trying next provider", exc)
+            last_exc = exc
+    if GROK_API_KEY:
+        try:
+            return await grok_generate(prompt, system=system)
+        except Exception as exc:
+            _log_ai_failure("Grok generate failed, trying next provider", exc)
             last_exc = exc
     if ZEN_API_KEY:
         try:
@@ -7707,12 +7724,6 @@ async def ai_generate(prompt: str, system: str = None) -> str:
             return await mistral_generate(prompt, system=system)
         except Exception as exc:
             _log_ai_failure("Mistral generate failed, trying next provider", exc)
-            last_exc = exc
-    if GROQ_API_KEY:
-        try:
-            return await groq_generate(prompt, system=system)
-        except Exception as exc:
-            _log_ai_failure("Groq generate failed, trying next provider", exc)
             last_exc = exc
     if OPENAI_API_KEY:
         try:
@@ -28441,9 +28452,9 @@ async def on_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------------- context-aware media ----
-# Media replies — DeepSeek first (owner, 14 Nov 2026): when the
+# Media replies — Groq first (owner, 17 Nov 2026): when the
 # user sends a GIF, a sticker or a bare emoji, the AI (the normal
-# chain, DeepSeek first, same as free chat) reacts FIRST,
+# chain, Groq first, same as free chat) reacts FIRST,
 # naturally, like a person reacting to that GIF/sticker/emoji —
 # in the user's language. THEN, and only then, the system's
 # memory is added: when the most recent order is actually delayed
@@ -28569,7 +28580,7 @@ def _media_ai_prompt(kind, emoji):
 
 async def media_ai_reply(kind, emoji, lang: str):
     """The AI's natural reaction to one GIF, sticker or bare emoji
-    — DeepSeek first, the same chain as free chat (owner, 14 Nov
+    — Groq first, the same chain as free chat (owner, 17 Nov
     2026). The prompt carries only the media (kind + emoji) and
     the language: no order info, so the AI can never drag an order
     into the reply. Returns the reply text, or None when the AI is

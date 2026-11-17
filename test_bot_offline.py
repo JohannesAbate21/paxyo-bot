@@ -10607,9 +10607,11 @@ class GroqFlakyClient(OpenAIFlakyClient):
 
 
 class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
-    """Groq is the first AI (13 Nov 2026): OpenAI's $5 credit could
-    not be bought, so the bot uses Groq's free tier instead, with
-    OpenAI second and Gemini third."""
+    """Groq is the first AI again since 17 Nov 2026 (owner: Groq
+    first, DeepSeek second): OpenAI's $5 credit could not be
+    bought, so the bot uses Groq's free tier instead, with DeepSeek
+    second, Grok third, Zen fourth, Qwen fifth, Mistral sixth,
+    OpenAI seventh and Gemini eighth."""
 
     def _status_error(self, status):
         req = bot.httpx.Request(
@@ -10802,13 +10804,14 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
-    """Grok (xAI) is the first AI (17 Nov 2026, owner: Grok first,
-    DeepSeek second as fallback). xAI's API is OpenAI-compatible,
-    so the provider mirrors DeepSeek exactly.
-    Order: Grok -> DeepSeek -> Zen -> Qwen -> Mistral -> Groq ->
+    """Grok (xAI) is the third AI since 17 Nov 2026 (owner: Groq
+    first, DeepSeek second, Grok third). xAI's API is
+    OpenAI-compatible, so the provider mirrors DeepSeek exactly.
+    Order: Groq -> DeepSeek -> Grok -> Zen -> Qwen -> Mistral ->
     OpenAI -> Gemini -> Kilo -> OpenRouter -> GLM. Grok is
     expensive vs DeepSeek and only runs when GROK_API_KEY is set;
-    without the key the order is unchanged (DeepSeek first).
+    without the key the order is unchanged (Groq first, DeepSeek
+    second).
     Grok has no voice transcription — ai_transcribe stays on
     Groq Whisper. NOTE: GROQ_API_KEY is a different company
     (Groq) and cannot be used for Grok."""
@@ -10867,29 +10870,46 @@ class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await bot.grok_generate("hi"), "hello")
         self.assertEqual(len(client.posts), 2)
 
-    async def test_ai_generate_prefers_grok_over_deepseek(self):
-        with mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
+    async def test_ai_generate_grok_third_after_groq_and_deepseek_fail(self):
+        # Groq and DeepSeek both fail: Grok answers third.
+        with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
              mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("groq down")
+                 ),
+             ) as groq, \
              mock.patch(
                  "bot.grok_generate",
                  new=mock.AsyncMock(return_value="k"),
              ) as grok, \
              mock.patch(
-                 "bot.deepseek_generate", new=mock.AsyncMock()
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("deepseek down")
+                 ),
              ) as deepseek, \
              mock.patch(
                  "bot.gemini_generate", new=mock.AsyncMock()
              ) as gem:
             self.assertEqual(await bot.ai_generate("hello"), "k")
+        groq.assert_awaited_once()
+        deepseek.assert_awaited_once()
         grok.assert_awaited_once()
-        deepseek.assert_not_called()
         gem.assert_not_called()
 
-    async def test_ai_generate_falls_back_to_deepseek_when_grok_raises(self):
-        # Grok 429s (daily limit) after its own retries: DeepSeek
-        # takes over.
-        with mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
-             mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+    async def test_ai_generate_falls_back_to_zen_when_grok_raises(self):
+        # Groq and DeepSeek unset, Grok 429s (daily limit) after
+        # its own retries: Zen takes over.
+        with mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "GROK_API_KEY", "xai-test"), \
+             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
+             mock.patch(
+                 "bot.groq_generate", new=mock.AsyncMock()
+             ) as groq, \
              mock.patch(
                  "bot.grok_generate",
                  new=mock.AsyncMock(
@@ -10897,21 +10917,31 @@ class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
                  ),
              ) as grok, \
              mock.patch(
-                 "bot.deepseek_generate",
-                 new=mock.AsyncMock(return_value="d"),
+                 "bot.deepseek_generate", new=mock.AsyncMock()
              ) as deepseek, \
+             mock.patch(
+                 "bot.zen_generate",
+                 new=mock.AsyncMock(return_value="z"),
+             ) as zen, \
              mock.patch(
                  "bot.gemini_generate", new=mock.AsyncMock()
              ) as gem:
-            self.assertEqual(await bot.ai_generate("hello"), "d")
+            self.assertEqual(await bot.ai_generate("hello"), "z")
+        groq.assert_not_called()
+        deepseek.assert_not_called()
         grok.assert_awaited_once()
-        deepseek.assert_awaited_once()
+        zen.assert_awaited_once()
         gem.assert_not_called()
 
-    async def test_ai_generate_deepseek_first_without_grok_key(self):
-        # No GROK_API_KEY: the order is unchanged, DeepSeek first.
-        with mock.patch.object(bot, "GROK_API_KEY", ""), \
+    async def test_ai_generate_deepseek_first_without_groq_and_grok_keys(self):
+        # No GROQ_API_KEY and no GROK_API_KEY: the order is
+        # unchanged, DeepSeek first.
+        with mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "GROK_API_KEY", ""), \
              mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch(
+                 "bot.groq_generate", new=mock.AsyncMock()
+             ) as groq, \
              mock.patch(
                  "bot.grok_generate", new=mock.AsyncMock()
              ) as grok, \
@@ -10923,6 +10953,7 @@ class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
                  "bot.gemini_generate", new=mock.AsyncMock()
              ) as gem:
             self.assertEqual(await bot.ai_generate("hello"), "d")
+        groq.assert_not_called()
         grok.assert_not_called()
         deepseek.assert_awaited_once()
         gem.assert_not_called()
@@ -10949,11 +10980,14 @@ class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):
-    """DeepSeek is the first AI (13 Nov 2026, evening): Groq's free
-    tier hit its daily token limit and Groq had temporarily disabled
-    paid upgrades, so the owner said "use DeepSeek". DeepSeek's API
-    is OpenAI-compatible, so the provider mirrors Groq exactly.
-    Order: DeepSeek -> Groq -> OpenAI -> Gemini. DeepSeek has no
+    """DeepSeek is the second AI since 17 Nov 2026 (owner: Groq
+    first, DeepSeek second). It was the first AI from the evening
+    of 13 Nov 2026, when Groq's free tier hit its daily token
+    limit and Groq had temporarily disabled paid upgrades, so the
+    owner said "use DeepSeek". DeepSeek's API is OpenAI-compatible,
+    so the provider mirrors Groq exactly.
+    Order: Groq -> DeepSeek -> Grok -> Zen -> Qwen -> Mistral ->
+    OpenAI -> Gemini -> Kilo -> OpenRouter -> GLM. DeepSeek has no
     voice transcription — ai_transcribe stays on Groq Whisper."""
 
     def _status_error(self, status):
@@ -11012,38 +11046,12 @@ class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await bot.deepseek_generate("hi"), "hello")
         self.assertEqual(len(client.posts), 2)
 
-    async def test_ai_generate_prefers_deepseek_over_groq(self):
+    async def test_ai_generate_prefers_groq_over_deepseek(self):
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
              mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
              mock.patch(
-                 "bot.deepseek_generate",
-                 new=mock.AsyncMock(return_value="d"),
-             ) as deepseek, \
-             mock.patch(
-                 "bot.groq_generate", new=mock.AsyncMock()
-             ) as groq, \
-             mock.patch(
-                 "bot.openai_generate", new=mock.AsyncMock()
-             ) as gen, \
-             mock.patch(
-                 "bot.gemini_generate", new=mock.AsyncMock()
-             ) as gem:
-            self.assertEqual(await bot.ai_generate("hello"), "d")
-        deepseek.assert_awaited_once()
-        groq.assert_not_called()
-        gen.assert_not_called()
-        gem.assert_not_called()
-
-    async def test_ai_generate_falls_back_to_groq_when_deepseek_raises(self):
-        # DeepSeek 429s after its own retries: Groq takes over.
-        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
-             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch(
-                 "bot.deepseek_generate",
-                 new=mock.AsyncMock(
-                     side_effect=RuntimeError("deepseek down")
-                 ),
+                 "bot.deepseek_generate", new=mock.AsyncMock()
              ) as deepseek, \
              mock.patch(
                  "bot.groq_generate",
@@ -11056,8 +11064,34 @@ class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):
                  "bot.gemini_generate", new=mock.AsyncMock()
              ) as gem:
             self.assertEqual(await bot.ai_generate("hello"), "g")
-        deepseek.assert_awaited_once()
         groq.assert_awaited_once()
+        deepseek.assert_not_called()
+        gen.assert_not_called()
+        gem.assert_not_called()
+
+    async def test_ai_generate_falls_back_to_deepseek_when_groq_raises(self):
+        # Groq 429s after its own retries: DeepSeek takes over.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
+             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(return_value="d"),
+             ) as deepseek, \
+             mock.patch(
+                 "bot.groq_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("groq down")
+                 ),
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_generate", new=mock.AsyncMock()
+             ) as gen, \
+             mock.patch(
+                 "bot.gemini_generate", new=mock.AsyncMock()
+             ) as gem:
+            self.assertEqual(await bot.ai_generate("hello"), "d")
+        groq.assert_awaited_once()
+        deepseek.assert_awaited_once()
         gen.assert_not_called()
         gem.assert_not_called()
 
@@ -14001,11 +14035,12 @@ class TestRoundSevenFixes(unittest.IsolatedAsyncioTestCase):
 
 
 class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
-    """Qwen-Turbo is the second AI (13 Nov 2026): ~3x cheaper than
-    DeepSeek ($0.05/$0.20 per 1M tokens) via Alibaba's international
-    DashScope endpoint, which is OpenAI-compatible, so the provider
-    mirrors DeepSeek exactly. Order: DeepSeek -> Qwen -> Groq ->
-    OpenAI -> Gemini -> GLM."""
+    """Qwen-Turbo is the fifth AI since 17 Nov 2026 (second from
+    13 Nov 2026): ~3x cheaper than DeepSeek ($0.05/$0.20 per 1M
+    tokens) via Alibaba's international DashScope endpoint, which
+    is OpenAI-compatible, so the provider mirrors DeepSeek exactly.
+    Order: Groq -> DeepSeek -> Grok -> Zen -> Qwen -> Mistral ->
+    OpenAI -> Gemini -> Kilo -> OpenRouter -> GLM."""
 
     def _status_error(self, status):
         req = bot.httpx.Request(
@@ -14066,10 +14101,11 @@ class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await bot.qwen_generate("hi"), "hello")
         self.assertEqual(len(client.posts), 2)
 
-    async def test_ai_generate_prefers_qwen_when_deepseek_unset(self):
+    async def test_ai_generate_prefers_qwen_when_groq_deepseek_and_grok_unset(self):
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(bot, "GROQ_API_KEY", ""), \
+             mock.patch.object(bot, "GROK_API_KEY", ""), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
-             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
              mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
              mock.patch(
                  "bot.deepseek_generate", new=mock.AsyncMock()
@@ -14082,6 +14118,9 @@ class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
                  "bot.groq_generate", new=mock.AsyncMock()
              ) as groq, \
              mock.patch(
+                 "bot.grok_generate", new=mock.AsyncMock()
+             ) as grok, \
+             mock.patch(
                  "bot.openai_generate", new=mock.AsyncMock()
              ) as gen, \
              mock.patch(
@@ -14091,21 +14130,33 @@ class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
         deepseek.assert_not_called()
         qwen.assert_awaited_once()
         groq.assert_not_called()
+        grok.assert_not_called()
         gen.assert_not_called()
         gem.assert_not_called()
 
-    async def test_ai_generate_falls_back_to_groq_when_qwen_raises(self):
-        # DeepSeek unset, Qwen 429s after its own retries: Groq takes over.
-        with mock.patch.object(bot, "DEEPSEEK_API_KEY", ""), \
+    async def test_ai_generate_falls_back_to_qwen_when_groq_and_deepseek_raise(self):
+        # Groq and DeepSeek 429 after their own retries, Grok and
+        # Zen unset: Qwen takes over.
+        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(bot, "GROK_API_KEY", ""), \
+             mock.patch.object(bot, "ZEN_API_KEY", ""), \
+             mock.patch(
+                 "bot.deepseek_generate",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("deepseek down")
+                 ),
+             ) as deepseek, \
              mock.patch(
                  "bot.qwen_generate",
-                 new=mock.AsyncMock(side_effect=RuntimeError("qwen down")),
+                 new=mock.AsyncMock(return_value="q"),
              ) as qwen, \
              mock.patch(
                  "bot.groq_generate",
-                 new=mock.AsyncMock(return_value="g"),
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("groq down")
+                 ),
              ) as groq, \
              mock.patch(
                  "bot.openai_generate", new=mock.AsyncMock()
@@ -14113,9 +14164,10 @@ class TestQwenProvider(unittest.IsolatedAsyncioTestCase):
              mock.patch(
                  "bot.gemini_generate", new=mock.AsyncMock()
              ) as gem:
-            self.assertEqual(await bot.ai_generate("hello"), "g")
-        qwen.assert_awaited_once()
+            self.assertEqual(await bot.ai_generate("hello"), "q")
         groq.assert_awaited_once()
+        deepseek.assert_awaited_once()
+        qwen.assert_awaited_once()
         gen.assert_not_called()
         gem.assert_not_called()
 
@@ -14769,16 +14821,16 @@ class TestKiloProvider(unittest.IsolatedAsyncioTestCase):
 
 
 class TestZenProvider(unittest.IsolatedAsyncioTestCase):
-    """OpenCode Zen is second in the chain (owner, 14 Nov 2026):
-    a free gateway (email-only signup, no card) serving free models
-    via an OpenAI-compatible API. Default model
-    "deepseek-v4.1-flash-free" — the owner's favourite model, free
-    here. 10 requests/minute on the free tier; the free roster
-    rotates, so the model is an env var (ZEN_MODEL). It only runs
-    after DeepSeek failed, and a Zen failure falls through to Qwen,
-    then Mistral, then Groq, then OpenAI, then Gemini, then Kilo,
-    then OpenRouter, then GLM. The provider mirrors OpenRouter
-    exactly."""
+    """OpenCode Zen is fourth in the chain since 17 Nov 2026
+    (second from 14 Nov 2026): a free gateway (email-only signup,
+    no card) serving free models via an OpenAI-compatible API.
+    Default model "deepseek-v4.1-flash-free" — the owner's
+    favourite model, free here. 10 requests/minute on the free
+    tier; the free roster rotates, so the model is an env var
+    (ZEN_MODEL). It only runs after Groq, DeepSeek and Grok failed,
+    and a Zen failure falls through to Qwen, then Mistral, then
+    OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM. The
+    provider mirrors OpenRouter exactly."""
 
     def _status_error(self, status):
         req = bot.httpx.Request(
@@ -14854,23 +14906,31 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
             client.posts[0]["json"]["model"], "glm-5.3-flash-free"
         )
 
-    async def test_ai_generate_calls_zen_when_deepseek_fails(self):
-        # DeepSeek fails: Zen answers, Qwen, Mistral, Groq,
-        # OpenAI, Gemini, Kilo, OpenRouter and GLM are never
-        # reached, each provider tried once.
-        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
-             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
-             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
-             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
-             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
-             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
-             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
-             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+    async def test_ai_generate_calls_zen_when_groq_deepseek_and_grok_fail(self):
+        # Groq, DeepSeek and Grok fail: Zen answers, Qwen,
+        # Mistral, OpenAI, Gemini, Kilo, OpenRouter and GLM are
+        # never reached, each provider tried once.
+        with mock.patch.multiple(
+                bot,
+                DEEPSEEK_API_KEY="sk-deepseek-test",
+                ZEN_API_KEY="sk-zen-test",
+                QWEN_API_KEY="sk-qwen-test",
+                GROQ_API_KEY="gsk-test",
+                GROK_API_KEY="xai-test",
+                OPENAI_API_KEY="sk-test",
+                GEMINI_API_KEY="test-key",
+                MISTRAL_API_KEY="sk-mistral-test",
+                OPENROUTER_API_KEY="sk-or-test",
+                GLM_API_KEY="sk-glm-test",
+            ), \
              mock.patch(
                  "bot.deepseek_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("d")),
              ) as deepseek, \
+             mock.patch(
+                 "bot.grok_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as grok, \
              mock.patch(
                  "bot.zen_generate",
                  new=mock.AsyncMock(return_value="zen"),
@@ -14885,7 +14945,7 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
              ) as mistral, \
              mock.patch(
                  "bot.groq_generate",
-                 new=mock.AsyncMock(return_value="groq"),
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
              ) as groq, \
              mock.patch(
                  "bot.openai_generate",
@@ -14908,11 +14968,10 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "zen")
-        for fn in (deepseek, zen):
+        for fn in (groq, deepseek, grok, zen):
             fn.assert_awaited_once()
         qwen.assert_not_awaited()
         mistral.assert_not_awaited()
-        groq.assert_not_awaited()
         gen.assert_not_awaited()
         gem.assert_not_awaited()
         kilo.assert_not_awaited()
@@ -14920,21 +14979,30 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
         glm.assert_not_awaited()
 
     async def test_ai_generate_skips_zen_without_key(self):
-        # No ZEN_API_KEY: the chain jumps straight from DeepSeek
-        # to Qwen, and zen_generate is never called.
-        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
-             mock.patch.object(bot, "ZEN_API_KEY", ""), \
-             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
-             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
-             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
-             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
-             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
-             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+        # No ZEN_API_KEY: Groq, DeepSeek and Grok fail, the chain
+        # jumps straight from Grok to Qwen, and zen_generate is
+        # never called.
+        with mock.patch.multiple(
+                bot,
+                DEEPSEEK_API_KEY="sk-deepseek-test",
+                ZEN_API_KEY="",
+                QWEN_API_KEY="sk-qwen-test",
+                GROQ_API_KEY="gsk-test",
+                GROK_API_KEY="xai-test",
+                OPENAI_API_KEY="sk-test",
+                GEMINI_API_KEY="test-key",
+                MISTRAL_API_KEY="sk-mistral-test",
+                OPENROUTER_API_KEY="sk-or-test",
+                GLM_API_KEY="sk-glm-test",
+            ), \
              mock.patch(
                  "bot.deepseek_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("d")),
-             ), \
+             ) as deepseek, \
+             mock.patch(
+                 "bot.grok_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as grok, \
              mock.patch(
                  "bot.zen_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("z")),
@@ -14949,7 +15017,7 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
              ) as mistral, \
              mock.patch(
                  "bot.groq_generate",
-                 new=mock.AsyncMock(return_value="groq"),
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
              ) as groq, \
              mock.patch(
                  "bot.openai_generate",
@@ -14972,10 +15040,11 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "qwen")
+        for fn in (groq, deepseek, grok):
+            fn.assert_awaited_once()
         zen.assert_not_awaited()
         qwen.assert_awaited_once()
         mistral.assert_not_awaited()
-        groq.assert_not_awaited()
         gen.assert_not_awaited()
         gem.assert_not_awaited()
         kilo.assert_not_awaited()
@@ -14983,22 +15052,30 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
         glm.assert_not_awaited()
 
     async def test_ai_generate_falls_back_to_qwen_when_zen_raises(self):
-        # Zen fails after DeepSeek: Qwen answers, Mistral, Groq,
-        # OpenAI, Gemini, Kilo, OpenRouter and GLM are never
-        # reached.
-        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
-             mock.patch.object(bot, "ZEN_API_KEY", "sk-zen-test"), \
-             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
-             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
-             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
-             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
-             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
-             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+        # Groq, DeepSeek, Grok and Zen fail: Qwen answers,
+        # Mistral, OpenAI, Gemini, Kilo, OpenRouter and GLM are
+        # never reached.
+        with mock.patch.multiple(
+                bot,
+                DEEPSEEK_API_KEY="sk-deepseek-test",
+                ZEN_API_KEY="sk-zen-test",
+                QWEN_API_KEY="sk-qwen-test",
+                GROQ_API_KEY="gsk-test",
+                GROK_API_KEY="xai-test",
+                OPENAI_API_KEY="sk-test",
+                GEMINI_API_KEY="test-key",
+                MISTRAL_API_KEY="sk-mistral-test",
+                OPENROUTER_API_KEY="sk-or-test",
+                GLM_API_KEY="sk-glm-test",
+            ), \
              mock.patch(
                  "bot.deepseek_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("d")),
-             ), \
+             ) as deepseek, \
+             mock.patch(
+                 "bot.grok_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as grok, \
              mock.patch(
                  "bot.zen_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("z")),
@@ -15013,7 +15090,7 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
              ) as mistral, \
              mock.patch(
                  "bot.groq_generate",
-                 new=mock.AsyncMock(return_value="groq"),
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
              ) as groq, \
              mock.patch(
                  "bot.openai_generate",
@@ -15036,10 +15113,10 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "qwen")
-        zen.assert_awaited_once()
+        for fn in (groq, deepseek, grok, zen):
+            fn.assert_awaited_once()
         qwen.assert_awaited_once()
         mistral.assert_not_awaited()
-        groq.assert_not_awaited()
         gen.assert_not_awaited()
         gem.assert_not_awaited()
         kilo.assert_not_awaited()
@@ -15087,15 +15164,15 @@ class TestZenProvider(unittest.IsolatedAsyncioTestCase):
 
 
 class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
-    """Mistral is third in the chain (owner, 14 Nov 2026): La
-    Plateforme pay-as-you-go — $0.10/$0.30 per 1M tokens, no minimum
-    deposit, no monthly minimum; ~1 request/second on the free tier,
-    higher once billing is on. Default model "mistral-small-latest"
-    via an OpenAI-compatible API. It only runs after DeepSeek and
-    Qwen failed — both are dead/unpaid right now, so on live days it
-    answers first — and a Mistral failure falls through to Groq,
-    then OpenAI, then Gemini, then Kilo, then OpenRouter, then GLM.
-    The provider mirrors OpenRouter exactly."""
+    """Mistral is sixth in the chain since 17 Nov 2026 (third
+    from 14 Nov 2026): La Plateforme pay-as-you-go — $0.10/$0.30
+    per 1M tokens, no minimum deposit, no monthly minimum; ~1
+    request/second on the free tier, higher once billing is on.
+    Default model "mistral-small-latest" via an OpenAI-compatible
+    API. It only runs after Groq, DeepSeek, Grok, Zen and Qwen
+    failed, and a Mistral failure falls through to OpenAI, then
+    Gemini, then Kilo, then OpenRouter, then GLM. The provider
+    mirrors OpenRouter exactly."""
 
     def _status_error(self, status):
         req = bot.httpx.Request(
@@ -15170,29 +15247,42 @@ class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
             client.posts[0]["json"]["model"], "mistral-medium-latest"
         )
 
-    async def test_ai_generate_calls_mistral_when_qwen_fails(self):
+    async def test_ai_generate_calls_mistral_when_groq_deepseek_grok_zen_and_qwen_fail(self):
         # Every provider before Mistral fails: Mistral answers,
-        # Groq, OpenAI, Gemini, Kilo, OpenRouter and GLM are never
+        # OpenAI, Gemini, Kilo, OpenRouter and GLM are never
         # reached, each provider tried once.
-        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
-             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
-             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
-             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
-             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
-             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
-             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+        with mock.patch.multiple(
+                bot,
+                DEEPSEEK_API_KEY="sk-deepseek-test",
+                QWEN_API_KEY="sk-qwen-test",
+                GROQ_API_KEY="gsk-test",
+                GROK_API_KEY="xai-test",
+                ZEN_API_KEY="sk-zen-test",
+                OPENAI_API_KEY="sk-test",
+                GEMINI_API_KEY="test-key",
+                MISTRAL_API_KEY="sk-mistral-test",
+                OPENROUTER_API_KEY="sk-or-test",
+                GLM_API_KEY="sk-glm-test",
+            ), \
              mock.patch(
                  "bot.deepseek_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("d")),
              ) as deepseek, \
+             mock.patch(
+                 "bot.grok_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as grok, \
+             mock.patch(
+                 "bot.zen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("z")),
+             ) as zen, \
              mock.patch(
                  "bot.qwen_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("q")),
              ) as qwen, \
              mock.patch(
                  "bot.groq_generate",
-                 new=mock.AsyncMock(return_value="groq"),
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
              ) as groq, \
              mock.patch(
                  "bot.openai_generate",
@@ -15219,9 +15309,8 @@ class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
             self.assertEqual(await bot.ai_generate("hello"), "mistral")
-        for fn in (deepseek, qwen, mistral):
+        for fn in (groq, deepseek, grok, zen, qwen, mistral):
             fn.assert_awaited_once()
-        groq.assert_not_awaited()
         gen.assert_not_awaited()
         gem.assert_not_awaited()
         kilo.assert_not_awaited()
@@ -15229,8 +15318,8 @@ class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
         glm.assert_not_awaited()
 
     async def test_ai_generate_skips_mistral_without_key(self):
-        # No MISTRAL_API_KEY: the chain jumps straight from
-        # Qwen to Groq, and mistral_generate is never called.
+        # No MISTRAL_API_KEY: Groq answers first, and
+        # mistral_generate is never called.
         with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
              mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
              mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
@@ -15284,28 +15373,41 @@ class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
         router.assert_not_awaited()
         glm.assert_not_awaited()
 
-    async def test_ai_generate_falls_back_to_groq_when_mistral_raises(self):
-        # Mistral fails after Qwen: Groq answers, OpenAI,
-        # Gemini, Kilo, OpenRouter and GLM are never reached.
-        with mock.patch.object(bot, "DEEPSEEK_API_KEY", "sk-deepseek-test"), \
-             mock.patch.object(bot, "QWEN_API_KEY", "sk-qwen-test"), \
-             mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(bot, "OPENAI_API_KEY", "sk-test"), \
-             mock.patch.object(bot, "GEMINI_API_KEY", "test-key"), \
-             mock.patch.object(bot, "MISTRAL_API_KEY", "sk-mistral-test"), \
-             mock.patch.object(bot, "OPENROUTER_API_KEY", "sk-or-test"), \
-             mock.patch.object(bot, "GLM_API_KEY", "sk-glm-test"), \
+    async def test_ai_generate_falls_back_to_openai_when_mistral_raises(self):
+        # Mistral fails after Qwen: OpenAI answers, Gemini,
+        # Kilo, OpenRouter and GLM are never reached.
+        with mock.patch.multiple(
+                bot,
+                DEEPSEEK_API_KEY="sk-deepseek-test",
+                QWEN_API_KEY="sk-qwen-test",
+                GROQ_API_KEY="gsk-test",
+                GROK_API_KEY="xai-test",
+                ZEN_API_KEY="sk-zen-test",
+                OPENAI_API_KEY="sk-test",
+                GEMINI_API_KEY="test-key",
+                MISTRAL_API_KEY="sk-mistral-test",
+                OPENROUTER_API_KEY="sk-or-test",
+                GLM_API_KEY="sk-glm-test",
+            ), \
              mock.patch(
                  "bot.deepseek_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("d")),
-             ), \
+             ) as deepseek, \
+             mock.patch(
+                 "bot.grok_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("k")),
+             ) as grok, \
+             mock.patch(
+                 "bot.zen_generate",
+                 new=mock.AsyncMock(side_effect=RuntimeError("z")),
+             ) as zen, \
              mock.patch(
                  "bot.qwen_generate",
                  new=mock.AsyncMock(side_effect=RuntimeError("q")),
-             ), \
+             ) as qwen, \
              mock.patch(
                  "bot.groq_generate",
-                 new=mock.AsyncMock(return_value="groq"),
+                 new=mock.AsyncMock(side_effect=RuntimeError("g")),
              ) as groq, \
              mock.patch(
                  "bot.openai_generate",
@@ -15331,10 +15433,10 @@ class TestMistralProvider(unittest.IsolatedAsyncioTestCase):
                  "bot.glm_generate",
                  new=mock.AsyncMock(return_value="glm"),
              ) as glm:
-            self.assertEqual(await bot.ai_generate("hello"), "groq")
-        mistral.assert_awaited_once()
-        groq.assert_awaited_once()
-        gen.assert_not_awaited()
+            self.assertEqual(await bot.ai_generate("hello"), "openai")
+        for fn in (groq, deepseek, grok, zen, qwen, mistral):
+            fn.assert_awaited_once()
+        gen.assert_awaited_once()
         gem.assert_not_awaited()
         kilo.assert_not_awaited()
         router.assert_not_awaited()
@@ -20311,7 +20413,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         pending = list(bot.PENDING.values())[0]
         self.assertEqual(pending["service"]["service"], 1723)
         self.assertEqual(pending["quantity"], 10)
-        # DeepSeek-first (owner, 14 Nov 2026): the media reply is
+        # Groq-first (owner, 17 Nov 2026): the media reply is
         # the AI's natural reaction — it never drags the pending
         # card (or any order) into the chat. Updated deliberately:
         # the old reply named the waiting Confirm card.
@@ -20597,7 +20699,7 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
     # (3b) a wave is a greeting, not thanks -------------------------
 
     async def test_wave_sticker_gets_a_greeting(self):
-        # DeepSeek-first (owner, 14 Nov 2026): the greeting comes
+        # Groq-first (owner, 17 Nov 2026): the greeting comes
         # from the AI now, not a canned line.
         msg = FakeMessage()
         msg.caption = ""
@@ -20637,7 +20739,7 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         # 🙏 as a sticker is still thanks — only the wave emoji
         # changed. (Bare 🙏 as TEXT starts a reactions order now;
         # a 🙏 sticker is a different signal.) The thanks comes
-        # from the AI under DeepSeek-first (owner, 14 Nov 2026).
+        # from the AI under Groq-first (owner, 17 Nov 2026).
         msg = FakeMessage()
         msg.caption = ""
         msg.sticker = mock.Mock(emoji="🙏")
@@ -20699,10 +20801,10 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         )
 
 
-class TestDeepSeekFirstMediaReplies(_LanguageRoundBase):
-    """DeepSeek-first media replies (owner, 14 Nov 2026): when the
+class TestGroqFirstMediaReplies(_LanguageRoundBase):
+    """Groq-first media replies (owner, 17 Nov 2026): when the
     user sends a GIF, a sticker or a bare emoji, the AI (the normal
-    chain, DeepSeek first, same as free chat) reacts FIRST,
+    chain, Groq first, same as free chat) reacts FIRST,
     naturally, like a person — in the user's language. THEN, and
     only then, the system's memory is added: one short
     deterministic line, and only when the most recent order is
