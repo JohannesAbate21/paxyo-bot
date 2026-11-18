@@ -12032,6 +12032,94 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
             bot._transcription_usable("مرحبا كيف حالك", "ti")
         )
 
+    def test_transcription_usable_rejects_garbled_english(self):
+        # Owner, 18 Nov 2026, live 08:00 EAT: the voice note was
+        # ENGLISH, and Groq's winning text — "Mentioned this and
+        # I'll deposit me there again." — was garbled English the
+        # user did not say (the bot still read the deposit intent
+        # right, but the "You said:" line was wrong). The old
+        # "one known word is enough" bar passed it ("deposit",
+        # "me", "there"); the stricter coverage test rejects it
+        # under every hint — am, en and no hint alike.
+        for hint in ("am", "en", None):
+            self.assertFalse(
+                bot._transcription_usable(
+                    "Mentioned this and I'll deposit me there again.",
+                    hint,
+                )
+            )
+
+    def test_transcription_usable_coverage_matrix(self):
+        # The stricter bar must not take the fast path away from
+        # real speech: every phrase below still wins the race,
+        # under every hint. Measured 18 Nov 2026: the garble's
+        # known-word coverage is 0.67, the lowest real English
+        # here is 0.80 ("Please deposit one hundred birr").
+        for phrase in (
+            "How much is it",
+            "Thank you",
+            "My balance",
+            "ok",
+            "12 thousand",
+            "1000 birr",
+            "ሰላም የኢንስታግራም ፎሎወር ፈልጌ ነበረ",
+            "12 ሺህ ፎሎወር እፈልጋለሁ",
+            "galatoomi",
+            "Please deposit one hundred birr",
+            "I want to deposit one thousand birr please",
+            "I want two thousand Instagram followers",
+            "What is the price of one thousand views",
+            "I want to order TikTok likes",
+            "How much is one thousand followers",
+            "I want to cancel my order",
+            "Deposit please",
+            "Send me the link",
+        ):
+            for hint in ("am", "en", None):
+                self.assertTrue(
+                    bot._transcription_usable(phrase, hint), phrase
+                )
+
+    def test_transcription_usable_bias_rejects_unknown_word_english(self):
+        # Deliberate bias, owner 18 Nov 2026: short real English
+        # with a word the bot does not know ("need", and "did not
+        # arrive" — known-word coverage 0.67 and 0.60) loses the
+        # fast path rather than risking a wrong "You said:".
+        # Rejecting it only costs seconds: Gemini/Chirp still
+        # transcribe it correctly, just slower.
+        for phrase in ("I need followers", "My order did not arrive"):
+            for hint in ("am", "en", None):
+                self.assertFalse(
+                    bot._transcription_usable(phrase, hint), phrase
+                )
+
+    async def test_ai_transcribe_race_groq_garbled_english_waits_for_gemini(self):
+        # Owner, 18 Nov 2026, live 08:00 EAT: Groq's fast answer
+        # was garbled English, so the race waits for Gemini's
+        # correct text instead of showing words the user did not
+        # say — same shape as the Amharic-gibberish race test,
+        # but the garble is English, not Latin-script Amharic.
+        async def slow_gemini(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return "ሰላም የኢንስታግራም ፎሎወር ፈልጌ ነበረ"
+
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=slow_gemini),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(
+                return_value="Mentioned this and I'll deposit me "
+                "there again."
+            ),
+        ) as groq:
+            result = await bot.ai_transcribe(b"x", language="en")
+        self.assertEqual(
+            result, "ሰላም የኢንስታግራም ፎሎወር ፈልጌ ነበረ"
+        )
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
     async def test_ai_transcribe_race_groq_fast_usable_cancels_gemini(self):
         # Owner, 18 Nov 2026, live 07:34 EAT: Gemini took 30s +
         # 30s + 17s = 80s on the free tier while Groq answers in

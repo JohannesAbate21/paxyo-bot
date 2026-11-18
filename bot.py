@@ -8250,6 +8250,73 @@ async def translate_to_amharic(text: str) -> str:
     return await translate_to_language(text, "am")
 
 
+def _latin_words_readable(text: str) -> bool:
+    """Stricter test for a Latin-script transcription — the race's
+    guard against fluent-looking garble (owner, 18 Nov 2026).
+    Measured 18 Nov 2026: Groq's garbled English of an English
+    voice note, "Mentioned this and I'll deposit me there
+    again.", passed the old guard because it contains recognisable
+    words ("deposit", "me", "there") — recognised-word coverage
+    0.33 with a longest known run of 3, HIGHER than real English
+    ("I want one thousand followers" is 0.20 / run 1, "I want to
+    cancel my order" 0.17 / run 1). No coverage or run threshold
+    separates it: any bar the garble clears, real English fails.
+    So a Latin transcription wins only when (a) at least 80% of
+    its words are words the bot knows (the garble is 0.67; the
+    lowest real English measured is 0.80, "Please deposit one
+    hundred birr"), or (b) it is at most two words and every word
+    is recognised ("Thank you"), or (c) it names two domain
+    things ("Salam, TikTok followers hâlliâ?" — tiktok +
+    followers). Oromo words pass it outright, and text with no
+    Latin words passes vacuously. The bias is deliberate:
+    rejecting a correct transcription only costs seconds
+    (Gemini/Chirp still answer it), while accepting a garbled one
+    shows the user words he did not say — so short real English
+    with an unknown word ("I need followers", "My order did not
+    arrive") loses the fast path rather than risking a wrong
+    "You said:". The recognised-word check reuses
+    _recognisable_english one word at a time, so the two can
+    never drift apart."""
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    if not words:
+        return True
+    if set(words) & _OROMO_WORDS:
+        return True
+    if (
+        sum(1 for w in words if w in _GARBLED_KNOWN_WORDS) / len(words)
+        >= 0.80
+    ):
+        return True
+    if (
+        all(_recognisable_english(w) for w in words)
+        and len(words) <= 2
+    ):
+        return True
+    # Domain content words: the bot's own metrics, platforms and
+    # state words, plus the domain nouns and verbs it already
+    # carries in _GARBLED_KNOWN_WORDS. A transcription with two
+    # of these is naming things the bot sells or does ("Salam,
+    # TikTok followers hâlliâ?" has tiktok + followers); one on
+    # its own ("deposit" in the 08:00 garble) is not enough.
+    # Built inline like _recognisable_english builds its union.
+    content = (
+        set(_METRICS)
+        | set(_PLATFORM_WORDS)
+        | set(_REPORT_METRIC_WORDS)
+        | {w for s in _SIMPLE_STATE_WORDS for w in s.split()}
+        | {
+            "balance", "price", "order", "deposit", "cancel",
+            "status", "history", "link", "pay", "payment", "help",
+            "support", "service", "profile", "account", "video",
+            "post", "watch", "hours", "like", "likes", "cheap",
+            "cheapest", "fast", "fastest",
+        }
+    )
+    if sum(1 for w in words if w in content) >= 2:
+        return True
+    return False
+
+
 def _transcription_usable(text, language=None) -> bool:
     """True when a transcription is worth using — the race's win
     condition, and the garbage guard's rule (owner, 18 Nov 2026).
@@ -8260,19 +8327,34 @@ def _transcription_usable(text, language=None) -> bool:
     (14 Nov 2026) — so it does not win the race for those hints;
     for any other hint it may be a genuine Arabic speaker, so it
     passes here and the Arabic retry in transcribe_voice_with_retry
-    handles it. Otherwise usable means not garbled: Ge'ez script,
-    a digit, a link, or a word the bot knows in English or Oromo.
-    The three live Groq garblings (\"Azra Olede Shifor or Rafaell
-    Galo.\", \"Asherahulet tishifu lorafel li galo.\", \"Yansar
-    alutte si forora veli vello.\") fail it; \"Salam, TikTok
-    followers hâlliâ?\" passes it (\"followers\" is a known word)."""
+    handles it. Ge'ez script, a digit, a link, an @handle or an
+    emoji is readable as before and passes at once. Anything else
+    is Latin-script words, and those must ALSO clear the stricter
+    coverage test in _latin_words_readable -- the old "one known
+    word is enough" bar let Groq's garbled English win the race
+    live on 18 Nov 2026 ("Mentioned this and I'll deposit me
+    there again." for an English voice note: the "You said:"
+    showed words the user did not say, though the deposit intent
+    still read correctly). The three live Groq garblings of
+    Amharic ("Azra Olede Shifor or Rafaell Galo.",
+    "Asherahulet tishifu lorafel li galo.", "Yansar alutte si
+    forora veli vello.") still fail it; "Salam, TikTok followers
+    hâlliâ?" still passes it (two domain words)."""
     if not isinstance(text, str) or not text.strip():
         return False
     if _has_arabic_script(text):
         return language not in ("am", "ti")
-    return not (
-        _looks_garbled(text) and not _recognisable_english(text)
-    )
+    if re.search(r"[\u1200-\u137f]", text):
+        return True
+    if (
+        re.search(r"\d", text)
+        or "://" in text
+        or text.strip().startswith("@")
+        or " @" in text
+        or any(emoji_meanings(text))
+    ):
+        return True
+    return _latin_words_readable(text)
 
 
 async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
