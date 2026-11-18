@@ -3238,14 +3238,33 @@ TEXT = {
 }
 
 
+def _strip_dashes(text: str) -> str:
+    """Remove the long dash (em dash, U+2014) from user-facing reply
+    text (owner, 17 Nov 2026: no long dash in any bot reply).
+    " — " becomes ", " so the words either side stay separated and
+    the sentence stays grammatical; a bare "—" becomes one space,
+    and doubled spaces collapse. Pure: safe on any reply text,
+    including AI-generated text and substituted values (service
+    names, transcriptions). A minus sign or a number range never
+    uses the em dash, so nothing numeric is touched."""
+    if "—" not in text:
+        return text
+    text = text.replace(" — ", ", ")
+    text = text.replace("—", " ")
+    return re.sub(r" {2,}", " ", text)
+
+
 def t(key: str, lang: str, **kw) -> str:
     """Short reply in the user's language. Falls back to English
     when the key has no translation in that language — a prose
     reply is then translated by the bridge at send time, and a
     card/button reply stays English (cards are never translated,
-    in any language)."""
+    in any language). The returned text is dash-free (see
+    _strip_dashes): templates may still carry a "—" in source,
+    but it never reaches the user, including inside substituted
+    values such as a service name or a transcription."""
     entry = TEXT[key]
-    return (entry.get(lang) or entry["en"]).format(**kw)
+    return _strip_dashes((entry.get(lang) or entry["en"]).format(**kw))
 
 
 def is_amharic(text: str) -> bool:
@@ -9914,6 +9933,10 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
             _translated = await translate_to_language(text, _target)
         if _translated:
             out_text, out_lang = _translated, _target
+    # No long dash in any reply (owner, 17 Nov 2026): strip it here
+    # so AI-generated text and locally built text are clean too.
+    # The conversation history keeps the original (recorded below).
+    out_text = _strip_dashes(out_text)
     if voice and reply_markup is None:
         ogg = await speak_reply(out_text, out_lang)
         if ogg:
@@ -15248,7 +15271,7 @@ async def orders_history_text(user_id: int, lang: str,
         name = short_service_name(o.get("service_name") or "") or f"service {o.get('service_id')}"
         lines.append(
             f"#{o.get('id') or o.get('order_id') or '?'} {name} "
-            f"×{int(o.get('quantity') or 0)} — {icon} {status} — "
+            f"×{int(o.get('quantity') or 0)}, {icon} {status}, "
             f"{format_money(o.get('charge', 0) or 0)} ETB"
         )
     return "\n".join(lines)
@@ -15477,7 +15500,7 @@ def confirm_card_text(lang: str, service, quantity, total, link,
         lines.append("")
     lines.extend([
         f"{name} (#{service.get('service')})",
-        f"⏱ {service.get('average_time') or '—'}",
+        f"⏱ {service.get('average_time') or 'n/a'}",
         f"💰 {format_money(service.get('rate_etb_per_1000', 0))} ETB / 1000",
         f"🔢 {quantity}",
         f"🧾 {format_money(total)} ETB (estimated)",
@@ -15485,7 +15508,9 @@ def confirm_card_text(lang: str, service, quantity, total, link,
         "",
         t("public_reminder", lang),
     ])
-    return "\n".join(lines)
+    # No long dash in any reply (owner, 17 Nov 2026): a provider
+    # service name can carry one, so strip it from the whole card.
+    return _strip_dashes("\n".join(lines))
 
 
 def pending_note(user_id: int, lang: str) -> str:
@@ -16628,7 +16653,7 @@ def reorder_keyboard(orders) -> InlineKeyboardMarkup:
             continue
         buttons.append([
             InlineKeyboardButton(
-                f"⚠️ Report a problem — #{order_id}",
+                f"⚠️ Report a problem #{order_id}",
                 callback_data=f"report:{order_id}",
             )
         ])
@@ -16966,12 +16991,12 @@ def _split_test_admin_text(order_id, service, test_qty, refunded,
     defaults to the refunded figure."""
     amount = cost if cost is not None else refunded
     if refunded is None:
-        money = "Not refunded yet — please cancel it manually."
+        money = "Not refunded yet, please cancel it manually."
     else:
         money = f"Refunded {format_money(refunded)} ETB."
     return (
         f"⚠️ Split test {'failed' if failed else 'stalled'}: "
-        f"order #{order_id} — "
+        f"order #{order_id}, "
         f"{short_service_name(service.get('name')) or 'service'} "
         f"×{int(test_qty or 0)} ({format_money(amount or 0)} ETB). "
         f"{money} {next_step}"
@@ -17264,7 +17289,7 @@ async def _decline_rescue_proposal(app, order_id, watched, proposal):
                 order_id, service, test_qty,
                 (refund or {}).get("refunded_etb"),
                 (proposal or {}).get("failed", False),
-                "The customer said no to a new test — refunded.",
+                "The customer said no to a new test, refunded.",
                 cost=watched.get("total"),
             ),
         )
@@ -20693,7 +20718,7 @@ async def delayed_orders_text(user_id: int, lang: str) -> str:
             else f"service {order.get('service_id')}"
         )
         lines.append(
-            f"{i}. {name} ×{order.get('quantity')} — "
+            f"{i}. {name} ×{order.get('quantity')} at "
             f"{format_eat_run_at(order.get('run_at'))}"
         )
     return "\n".join(lines)
@@ -20713,7 +20738,7 @@ def delayed_cancel_keyboard(orders):
     the memory id, both short enough for Telegram's 64-byte limit."""
     buttons = []
     for order in orders:
-        label = f"Cancel ×{order.get('quantity')} — {format_eat_run_at(order.get('run_at'))}"
+        label = f"Cancel ×{order.get('quantity')} at {format_eat_run_at(order.get('run_at'))}"
         buttons.append([
             InlineKeyboardButton(
                 label, callback_data=f"canceldelay:{order.get('id')}"
@@ -21240,8 +21265,11 @@ async def send_order_result(message, lang: str, pending, user_id: int):
     brief = user_tone(user_id) == "brief"
     if not brief:
         shaped += "\n" + humor_line(user_id, lang)
+    # No long dash in any reply (owner, 17 Nov 2026): the humour
+    # line can carry one ("Order in — nice choice!"), and this
+    # send bypasses reply_message, so strip it here.
     await message.reply_text(
-        shaped,
+        _strip_dashes(shaped),
         reply_markup=markup,
     )
     if not brief:
@@ -23609,7 +23637,7 @@ def deposit_confirm_card(user_id: int, amount, lang: str):
                 ),
             )
         )
-    return "\n".join(lines), confirm_keyboard(confirm_id)
+    return _strip_dashes("\n".join(lines)), confirm_keyboard(confirm_id)
 
 
 async def handle_deposit_text(update, text, intent, lang, voice=False):
@@ -24497,7 +24525,7 @@ def _browse_page_text(entry, page: int) -> str:
     lines = [f"{entry['label']} services (fastest first):"]
     for i, s in enumerate(page_items, start + 1):
         lines.append(
-            f"{i}. {short_service_name(s.get('name'))} — "
+            f"{i}. {short_service_name(s.get('name'))}, "
             f"{format_money(s.get('rate_etb_per_1000', 0))} ETB/1000"
         )
     if total > BROWSE_PAGE_SIZE:
@@ -24524,7 +24552,7 @@ def _browse_keyboard(entry, page: int):
         name = short_service_name(s.get("name")) or f"service {sid}"
         price = format_money(s.get("rate_etb_per_1000", 0))
         buttons.append([InlineKeyboardButton(
-            f"{name[:28]} — {price}",
+            f"{name[:28]}: {price}",
             callback_data=f"browse:{service_combined_id(s)}",
         )])
     total_pages = (len(services) + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE
@@ -25443,7 +25471,7 @@ def batch_result_text(results, lang: str) -> str:
         if error is None:
             lines.append(f"✅ {draft['quantity']} {name} → Order {order_id}")
         else:
-            lines.append(f"❌ {draft['quantity']} {name} — could not be placed")
+            lines.append(f"❌ {draft['quantity']} {name}, could not be placed")
     return "\n".join(lines)
 
 
@@ -25664,7 +25692,7 @@ async def handle_post_bundle(update, text, intent, lang, voice=False):
             f"{short_service_name(o['service'].get('name'))} "
             f"×{o['quantity']} → {o['link']}"
             for o in ready
-        ) or "—"
+        ) or "none"
         await reply_message(
             update.message,
             t(
@@ -25895,7 +25923,7 @@ async def handle_split_text(update, text, split, lang, voice=False):
         understood = "\n".join(
             f"{short_service_name(o['service'].get('name'))} ×{o['quantity']} → {o['link']}"
             for o in ready
-        ) or "—"
+        ) or "none"
         await reply_message(
             update.message,
             t("batch_missing", lang, understood=understood,
@@ -26018,7 +26046,7 @@ async def handle_batch_text(update, text, intent, lang, voice=False):
         understood = "\n".join(
             f"{short_service_name(o['service'].get('name'))} ×{o['quantity']} → {o['link']}"
             for o in ready
-        ) or "—"
+        ) or "none"
         await reply_message(
             update.message,
             t("batch_missing", lang, understood=understood,
@@ -27562,7 +27590,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     )
                     await update.message.reply_text(text, reply_markup=markup)
                 else:
-                    await update.message.reply_text(error)
+                    await update.message.reply_text(_strip_dashes(error))
                 return
             await update.message.reply_text(
                 t(
@@ -29600,17 +29628,17 @@ def delay_line(ctx: dict, lang: str) -> str:
         ref = f"orderዎ #{order_id}" if order_id else "የመጨረሻው orderዎ"
         time = f"፣ አብዛኛውን ጊዜ {avg} ያህል ይወስዳል" if avg else ""
         if situation == "failed":
-            return f"በነገራችን ላይ — {ref} ({service}) አልተሳካም።"
+            return f"በነገራችን ላይ፣ {ref} ({service}) አልተሳካም።"
         return (
-            f"በነገራችን ላይ — {ref} ({service}) "
+            f"በነገራችን ላይ፣ {ref} ({service}) "
             f"አሁንም {status} ላይ ነው{time}።"
         )
     ref = f"order #{order_id}" if order_id else "last order"
     time = f", usually about {avg}" if avg else ""
     if situation == "failed":
-        return f"By the way — your {ref} ({service}) didn't go through."
+        return f"By the way, your {ref} ({service}) didn't go through."
     return (
-        f"By the way — your {ref} ({service}) is still {status}{time}."
+        f"By the way, your {ref} ({service}) is still {status}{time}."
     )
 
 
@@ -29677,12 +29705,12 @@ def _media_ai_fallback(emoji, lang: str) -> str:
     mood = media_mood(emoji)
     lines = {
         "greeting": {
-            "en": "Hello! 👋 Great to see you — what would you like to order?",
-            "am": "ሰላም! 👋 ደስ ብሎኛል — ምን ማዘዝ ይፈልጋሉ?",
+            "en": "Hello! 👋 Great to see you, what would you like to order?",
+            "am": "ሰላም! 👋 ደስ ብሎኛል፣ ምን ማዘዝ ይፈልጋሉ?",
         },
         "frustrated": {
-            "en": "I hear you — tell me what happened and I'll sort it out.",
-            "am": "ገብቶኛል — ምን እንደተፈጠረ ንገሩኝ።",
+            "en": "I hear you, tell me what happened and I'll sort it out.",
+            "am": "ገብቶኛል፣ ምን እንደተፈጠረ ንገሩኝ።",
         },
         "thanks": {
             "en": "You're welcome! 😊 Anything else you need?",
@@ -30014,7 +30042,9 @@ async def media_reply(update, emoji, lang: str, voice: bool = False,
     if voice:
         await reply_message(update.message, text, lang, voice=voice)
     else:
-        await update.message.reply_text(text)
+        # No long dash in any reply (owner, 17 Nov 2026): the AI
+        # reply can carry one, and this send bypasses reply_message.
+        await update.message.reply_text(_strip_dashes(text))
     return text
 
 
@@ -30281,7 +30311,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         proposal = watched.get("rescue_proposal")
         if proposal is None:
             await query.edit_message_text(
-                "This one is already handled — nothing more to do here."
+                "This one is already handled, nothing more to do here."
             )
             return
         watched.pop("rescue_proposal", None)
@@ -30290,7 +30320,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await _decline_rescue_proposal(app, arg, watched, proposal)
             )
             return
-        await query.edit_message_text("Moving it — one moment…")
+        await query.edit_message_text("Moving it, one moment…")
         kind = proposal.get("kind")
         if kind == "failed":
             await _attempt_failed_rescue(
@@ -30554,7 +30584,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await query.edit_message_text(text, reply_markup=markup)
             else:
-                await query.edit_message_text(error)
+                await query.edit_message_text(_strip_dashes(error))
             return
         await query.edit_message_text(
             t(
@@ -30760,7 +30790,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if rating not in ("good", "bad") or not order_id:
             return
         rate_lang = LAST_LANG.get(user.id) or lang
-        base = query.message.text or ""
+        # The original message is re-sent with the rating note: strip
+        # any long dash it still carries (a card sent before the
+        # 18 Nov 2026 dash removal) so the edit is dash-free too.
+        base = _strip_dashes(query.message.text or "")
         if order_id in RATED_ORDERS:
             await query.edit_message_text(
                 base + "\n\n" + t("rate_already", rate_lang)
@@ -31082,7 +31115,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pending["double_confirmed"] = True
                 PENDING[arg] = pending
                 await query.edit_message_text(
-                    "This is a big order — "
+                    "This is a big order, "
                     f"{format_money(pending['total'])} ETB. Tap "
                     "Confirm again to place it.",
                     reply_markup=confirm_keyboard(arg),
@@ -31162,7 +31195,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         shaped = tone_order_summary(user.id, lang, summary)
         if user_tone(user.id) != "brief":
             shaped += "\n" + humor_line(user.id, lang)
-        await query.edit_message_text(shaped)
+        # No long dash in any reply (owner, 17 Nov 2026): the humour
+        # line can carry one, and this edit bypasses reply_message.
+        await query.edit_message_text(_strip_dashes(shaped))
         return
 
     rec_draft = PENDING_RECURRING.pop(arg, None)
@@ -31240,7 +31275,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await query.edit_message_text(text, reply_markup=markup)
             else:
-                await query.edit_message_text(error)
+                await query.edit_message_text(_strip_dashes(error))
             return
         await query.edit_message_text(
             t(
@@ -31376,6 +31411,10 @@ async def notify_user(app, user_id: int, text: str, reply_markup=None):
     in QUIET_HELD) instead of sent, and flushed in the morning by
     run_quiet_flush_cycle. Admins are exempt — William's alerts
     always go out, quiet hours or not."""
+    # No long dash in any reply (owner, 17 Nov 2026): strip it
+    # before the quiet-hours hold, so a held message is clean too
+    # when the morning flush re-sends it through here.
+    text = _strip_dashes(text)
     if (
         user_id not in ADMIN_TELEGRAM_IDS
         and in_quiet_hours(user_id)
@@ -31444,7 +31483,7 @@ def _service_pause_admin_text(service, cancel_count, paused_until):
     when = paused_until or "24 hours from now"
     count = cancel_count if cancel_count is not None else 3
     return (
-        f"Service paused: {name} — {count} provider cancels in "
+        f"Service paused: {name}, {count} provider cancels in "
         f"24 hours. Paused until {when}. It will be skipped in "
         "picking until then."
     )

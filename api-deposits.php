@@ -577,7 +577,7 @@ function dep_verify_and_credit($db, $row) {
         if ($dstatus === 'success') {
             // Credit once only, and only when the amounts match.
             if (abs($damount - (float)$row['amount']) > 0.009) {
-                $message = 'Amount mismatch — the deposit was not credited.';
+                $message = 'Amount mismatch, the deposit was not credited.';
                 return [$record, $message];
             }
             $db->begin_transaction();

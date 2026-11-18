@@ -683,6 +683,143 @@ class TestVoiceReply(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.voice_sent, [])
 
 
+class TestStripDashes(unittest.IsolatedAsyncioTestCase):
+    """No long dash (em dash) in any bot reply (owner, 17 Nov 2026).
+
+    A spaced dash becomes a comma so words never join together; a
+    bare dash becomes a space. Hyphen-minuses and en-dash ranges
+    (e.g. "10-20", "22:00–07:00 EAT") are not em dashes and pass
+    through untouched."""
+
+    def test_spaced_dash_becomes_comma(self):
+        self.assertEqual(
+            bot._strip_dashes("I did not understand — please try again."),
+            "I did not understand, please try again.",
+        )
+
+    def test_bare_dash_becomes_space(self):
+        self.assertEqual(
+            bot._strip_dashes("Instagram—Followers"),
+            "Instagram Followers",
+        )
+
+    def test_no_dash_text_unchanged(self):
+        self.assertEqual(
+            bot._strip_dashes("10-20 followers for 22:00–07:00 EAT"),
+            "10-20 followers for 22:00–07:00 EAT",
+        )
+        self.assertEqual(bot._strip_dashes("plain text"), "plain text")
+
+    def test_t_strips_dash(self):
+        text = bot.t("not_understood", "en")
+        self.assertNotIn("—", text)
+        self.assertEqual(
+            text,
+            "I did not understand, please try again. For example: "
+            "“I want 1000 Instagram followers” with your link.",
+        )
+
+    def test_t_strips_dash_in_substituted_value(self):
+        text = bot.t(
+            "batch_missing", "en",
+            understood="Instagram Followers — Fast", missing="link",
+        )
+        self.assertEqual(
+            text, "I understood:\nInstagram Followers, Fast\nMissing:\nlink",
+        )
+
+    async def test_reply_message_strips_ai_dash(self):
+        msg = FakeMessage()
+        await bot.reply_message(
+            msg, "Price — 1,260 ETB per 1000, fastest first", "en",
+        )
+        self.assertEqual(
+            msg.text_sent, ["Price, 1,260 ETB per 1000, fastest first"],
+        )
+
+    async def test_reply_message_voice_fallback_strips_dash(self):
+        msg = FakeMessage()
+        with mock.patch("bot.speak_reply", return_value=None):
+            await bot.reply_message(
+                msg, "Hello — what would you like to order?",
+                "en", voice=True,
+            )
+        self.assertEqual(
+            msg.text_sent, ["Hello, what would you like to order?"],
+        )
+        self.assertEqual(msg.voice_sent, [])
+
+    def test_confirm_card_no_dash_when_no_average_time(self):
+        service = {
+            "name": "Instagram Followers | Fast", "service": 1001,
+            "average_time": None, "rate_etb_per_1000": 42.0,
+        }
+        card = bot.confirm_card_text(
+            "en", service, 1000, 42.0, "https://instagram.com/p/x",
+        )
+        self.assertNotIn("—", card)
+        self.assertIn("n/a", card)
+
+    def test_confirm_card_strips_dash_in_service_name(self):
+        service = {
+            "name": "Instagram—Followers | Fast", "service": 1001,
+            "average_time": "5 minutes", "rate_etb_per_1000": 42.0,
+        }
+        card = bot.confirm_card_text(
+            "en", service, 1000, 42.0, "https://instagram.com/p/x",
+            full_name=True,
+        )
+        self.assertNotIn("—", card)
+
+    async def test_notify_user_strips_dash(self):
+        app = FakeApp()
+        with mock.patch("bot.in_quiet_hours", return_value=False):
+            await bot.notify_user(
+                app, 1, "Service paused — 3 provider cancels today.",
+            )
+        self.assertEqual(
+            app.bot.sent, [(1, "Service paused, 3 provider cancels today.")],
+        )
+
+    async def test_send_order_result_strips_humor_dash(self):
+        # The order-placed confirmation is a direct reply_text, not
+        # reply_message — and it appends a humour line ("Order in —
+        # nice choice!"). The sent text must still come out clean.
+        bot.HUMOR_INDEX.pop(1, None)
+        result = {
+            "service": "Instagram Followers", "quantity": 1000,
+            "link": "https://instagram.com/p/x", "total": 42.0,
+            "order_id": "1827", "status": "pending",
+        }
+        msg = FakeMessage()
+        with mock.patch(
+            "bot.place_pending_order",
+            new=mock.AsyncMock(return_value=(result, None)),
+        ), mock.patch(
+            "bot._maybe_start_auto_repeat",
+            new=mock.AsyncMock(return_value=False),
+        ):
+            await bot.send_order_result(msg, "en", {}, 1)
+        self.assertEqual(len(msg.text_sent), 2)
+        self.assertNotIn("—", "".join(msg.text_sent))
+        self.assertIn("🎉 Order in, nice choice!", msg.text_sent[0])
+
+    async def test_media_reply_strips_ai_dash(self):
+        # A bare-emoji reply is a direct reply_text too, and the
+        # text can be raw AI output ("Nice one — love it!").
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.media_ai_reply",
+            new=mock.AsyncMock(return_value="Nice one — love it!"),
+        ), mock.patch(
+            "bot.media_order_context",
+            new=mock.AsyncMock(return_value={}),
+        ):
+            await bot.media_reply(update, "👀", "en")
+        self.assertEqual(msg.text_sent, ["Nice one, love it!"])
+
+
 class FakeUser:
     def __init__(self, user_id=1, language_code="en"):
         self.id = user_id
@@ -2263,8 +2400,7 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["I'm the Paxyo order bot — I can only help with Paxyo orders. "
-             "What would you like to order?"],
+            ["I'm the Paxyo order bot, I can only help with Paxyo orders. What would you like to order?"],
         )
 
     async def test_cancel_without_pending_says_nothing_to_cancel(self):
@@ -2342,8 +2478,7 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
             await bot.handle_order_text(update, None, "What time does Paxyo open?")
         self.assertEqual(
             msg.text_sent,
-            ["Paxyo is a social media service — followers, likes "
-             "and views at paxyo.et. What would you like to order?"],
+            ['Paxyo is a social media service, followers, likes and views at paxyo.et. What would you like to order?'],
         )
 
     async def test_order_intent_still_flows_end_to_end(self):
@@ -2918,7 +3053,7 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["That's too often — the shortest repeat is every 30 minutes."],
+            ["That's too often, the shortest repeat is every 30 minutes."],
         )
         self.assertEqual(paxyo.recurring_created, [])
 
@@ -4649,7 +4784,7 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["That's too much — the most you can deposit in one go is 100,000 ETB."],
+            ["That's too much, the most you can deposit in one go is 100,000 ETB."],
         )
         self.assertEqual(fake.deposits_created, [])
         self.assertEqual(bot.PENDING_DEPOSIT, {})
@@ -5002,8 +5137,7 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
             await bot.on_callback(update, None)
         self.assertEqual(
             query.edited,
-            ["Yes — your 100.00 ETB deposit went through. "
-             "Your balance is now 1,010.00 ETB."],
+            ['Yes, your 100.00 ETB deposit went through. Your balance is now 1,010.00 ETB.'],
         )
         self.assertEqual(fake.deposit_status_checked, ["dep-9"])
 
@@ -5461,8 +5595,7 @@ class TestDepositRedesign(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chat_id, 1)
         self.assertEqual(
             text,
-            "Yes — your 10.00 ETB deposit went through. "
-            "Your balance is now 1,010.00 ETB.",
+            'Yes, your 10.00 ETB deposit went through. Your balance is now 1,010.00 ETB.',
         )
 
     async def test_credit_watcher_keeps_watching_while_pending(self):
@@ -5709,8 +5842,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["Yes — your 10.00 ETB deposit went through. "
-             "Your balance is now 1,010.00 ETB."],
+            ['Yes, your 10.00 ETB deposit went through. Your balance is now 1,010.00 ETB.'],
         )
 
     async def test_recheck_falls_back_to_list_after_restart(self):
@@ -5722,9 +5854,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["Not yet — if you haven't finished paying on the payment "
-             "page, tap the deposit button again. If you already paid, "
-             "give it a minute."],
+            ["Not yet, if you haven't finished paying on the payment page, tap the deposit button again. If you already paid, give it a minute."],
         )
         self.assertEqual(fake.deposit_status_checked, ["dep-1"])
 
@@ -5737,9 +5867,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["Not yet — if you haven't finished paying on the payment "
-             "page, tap the deposit button again. If you already paid, "
-             "give it a minute."],
+            ["Not yet, if you haven't finished paying on the payment page, tap the deposit button again. If you already paid, give it a minute."],
         )
 
     async def test_recheck_failed_with_server_reason(self):
@@ -5752,8 +5880,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["It failed — Insufficient balance. You were not charged. "
-             "Try again, or deposit at paxyo.et."],
+            ['It failed, Insufficient balance. You were not charged. Try again, or deposit at paxyo.et.'],
         )
 
     async def test_recheck_failed_without_reason_is_generic(self):
@@ -5801,9 +5928,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         msg = await self._send("I paid", intent_of("unclear"), paxyo=fake)
         self.assertEqual(
             msg.text_sent,
-            ["Not yet — if you haven't finished paying on the payment "
-             "page, tap the deposit button again. If you already paid, "
-             "give it a minute."],
+            ["Not yet, if you haven't finished paying on the payment page, tap the deposit button again. If you already paid, give it a minute."],
         )
 
     async def test_amharic_question_answered_in_amharic(self):
@@ -5815,7 +5940,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["አዎ — 10.00 ETB depositዎ ገብቷል። Balanceዎ አሁን 1,010.00 ETB ነው።"],
+            ['አዎ, 10.00 ETB depositዎ ገብቷል። Balanceዎ አሁን 1,010.00 ETB ነው።'],
         )
 
     async def test_endpoints_not_ready(self):
@@ -5825,8 +5950,7 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["I can't check deposits yet — please check Deposit History "
-             "at paxyo.et."],
+            ["I can't check deposits yet, please check Deposit History at paxyo.et."],
         )
 
 
@@ -6262,7 +6386,7 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
         msg, fake = await self._turns([("PAXYO20", None)])
         self.assertEqual(
             msg.text_sent,
-            ["Code accepted — you'll get 20% extra on your next deposit."],
+            ["Code accepted, you'll get 20% extra on your next deposit."],
         )
         self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
         self.assertEqual(
@@ -6273,7 +6397,7 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
         msg, fake = await self._turns([("my code is WELCOME10", None)])
         self.assertEqual(
             msg.text_sent,
-            ["Code accepted — you'll get 10% extra on your next deposit."],
+            ["Code accepted, you'll get 10% extra on your next deposit."],
         )
         self.assertEqual(fake.promo_validates, [(1, "WELCOME10")])
         self.assertEqual(
@@ -6308,7 +6432,7 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
         msg, fake = await self._turns([("PAXYO20", None)], paxyo=fake)
         self.assertEqual(
             msg.text_sent,
-            ["Promo codes aren't switched on yet — I'll let you know when they are."],
+            ["Promo codes aren't switched on yet, I'll let you know when they are."],
         )
         self.assertEqual(fake.promo_validates, [])
         self.assertEqual(bot.VALIDATED_PROMO, {})
@@ -6413,7 +6537,7 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(
             msg.text_sent[1],
-            "Code accepted — you'll get 20% extra on your next deposit.",
+            "Code accepted, you'll get 20% extra on your next deposit.",
         )
         self.assertEqual(fake.promo_validates, [(1, "PAXYO20")])
         self.assertEqual(
@@ -6426,7 +6550,7 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
             ("PAXYO20 please", None),
             ("no", None),
         ])
-        self.assertEqual(msg.text_sent[1], "Okay — no problem.")
+        self.assertEqual(msg.text_sent[1], 'Okay, no problem.')
         self.assertEqual(fake.promo_validates, [])
         self.assertEqual(bot.PROMO_OFFER, {})
         self.assertEqual(bot.VALIDATED_PROMO, {})
@@ -6752,7 +6876,7 @@ class TestInviteCodeEntry(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["That's your own code — share it with a friend instead."],
+            ["That's your own code, share it with a friend instead."],
         )
         self.assertEqual(fake.referrals_recorded, [])
 
@@ -6761,7 +6885,7 @@ class TestInviteCodeEntry(unittest.IsolatedAsyncioTestCase):
         msg, fake = await self._turns([("REF21I3V91C", None)])
         self.assertEqual(
             msg.text_sent,
-            ["I don't recognise that code — check it and try again."],
+            ["I don't recognise that code, check it and try again."],
         )
         self.assertEqual(fake.referrals_recorded, [])
 
@@ -6780,7 +6904,7 @@ class TestInviteCodeEntry(unittest.IsolatedAsyncioTestCase):
         msg, fake = await self._turns([(other, None)], paxyo=fake)
         self.assertEqual(
             msg.text_sent,
-            ["You already have a referrer — this code can't be used."],
+            ["You already have a referrer, this code can't be used."],
         )
         self.assertEqual(fake.referrals_recorded, [])
 
@@ -6802,8 +6926,7 @@ class TestInviteCodeEntry(unittest.IsolatedAsyncioTestCase):
             [(self.FRIEND_CODE, None)], paxyo=fake)
         self.assertEqual(
             msg.text_sent,
-            ["I couldn't save that code right now — please try "
-             "again later."],
+            ["I couldn't save that code right now, please try again later."],
         )
         self.assertEqual(fake.referrals_recorded, [])
 
@@ -6813,7 +6936,7 @@ class TestInviteCodeEntry(unittest.IsolatedAsyncioTestCase):
         self.assertIn("REF163", msg.text_sent[0])
         self.assertIn(
             "https://t.me/paxorder_bot?start=REF163", msg.text_sent[0])
-        self.assertIn("they get a 20% bonus — and so do you",
+        self.assertIn('they get a 20% bonus, and so do you',
                       msg.text_sent[0])
 
     async def test_first_deposit_credits_both_once(self):
@@ -6972,7 +7095,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         msg, _ = await self._turns([(other, None)], paxyo=fake)
         self.assertEqual(
             msg.text_sent,
-            ["You already have a referrer — this code can't be used."],
+            ["You already have a referrer, this code can't be used."],
         )
         self.assertEqual(msg.bot.sent, [])
 
@@ -6983,7 +7106,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["That's your own code — share it with a friend instead."],
+            ["That's your own code, share it with a friend instead."],
         )
         self.assertEqual(msg.bot.sent, [])
 
@@ -6993,8 +7116,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
             [(self.FRIEND_CODE, None)], paxyo=fake)
         self.assertEqual(
             msg.text_sent,
-            ["I couldn't save that code right now — please try "
-             "again later."],
+            ["I couldn't save that code right now, please try again later."],
         )
         self.assertEqual(msg.bot.sent, [])
 
@@ -7023,13 +7145,12 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         app = FakeApp()
         text = await self._recheck(fake, app=app)
         self.assertIn(
-            "Yes — your 100.00 ETB deposit went through.", text)
+            'Yes, your 100.00 ETB deposit went through.', text)
         self.assertIn(
-            "Your 20% referral bonus landed — 20.00 ETB added to "
-            "your balance.", text)
+            'Your 20% referral bonus landed, 20.00 ETB added to your balance.', text)
         self.assertEqual(app.bot.sent, [(
             self.REFERRER,
-            "Your friend made their first deposit — your 20% bonus "
+            "Your friend made their first deposit, your 20% bonus "
             "landed: 20.00 ETB.",
         )])
         self.assertEqual(fake.referral_bonus_acks, [
@@ -7055,7 +7176,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         app = FakeApp()
         text = await self._recheck(fake, app=app)
         self.assertIn(
-            "Yes — your 100.00 ETB deposit went through.", text)
+            'Yes, your 100.00 ETB deposit went through.', text)
         self.assertNotIn("referral bonus landed", text)
         self.assertEqual(app.bot.sent, [])
         self.assertEqual(fake.referral_bonus_acks, [])
@@ -7069,8 +7190,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
             balance=1120.0, deposits=[self._bonus_deposit()])
         text = await self._recheck(fake, app=None)
         self.assertIn(
-            "Your 20% referral bonus landed — 20.00 ETB added to "
-            "your balance.", text)
+            'Your 20% referral bonus landed, 20.00 ETB added to your balance.', text)
         self.assertEqual(fake.referral_bonus_acks, [
             {"telegram_id": 1, "deposit_id": "dep-1", "side": "invitee"},
         ])
@@ -7082,11 +7202,10 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         app = FakeApp()
         text = await self._recheck(fake, app=app)
         self.assertIn(
-            "Your 20% referral bonus landed — 20.00 ETB added to "
-            "your balance.", text)
+            'Your 20% referral bonus landed, 20.00 ETB added to your balance.', text)
         self.assertEqual(app.bot.sent, [(
             self.REFERRER,
-            "Your friend made their first deposit — your 20% bonus "
+            "Your friend made their first deposit, your 20% bonus "
             "landed: 20.00 ETB.",
         )])
         self.assertEqual(fake.referral_bonus_acks, [])
@@ -7099,7 +7218,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         await self._recheck(fake, app=app)
         self.assertEqual(app.bot.sent, [(
             self.REFERRER,
-            "ጓደኛህ የመጀመሪያ depositውን አድርጓል — የ20% bonusህ "
+            "ጓደኛህ የመጀመሪያ depositውን አድርጓል, የ20% bonusህ "
             "ደርሷል: 20.00 ETB።",
         )])
 
@@ -7113,8 +7232,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         app = FakeApp()
         text = await self._recheck(fake, app=app)
         self.assertIn(
-            "Your 20% referral bonus landed — 20.00 ETB added to "
-            "your balance.", text)
+            'Your 20% referral bonus landed, 20.00 ETB added to your balance.', text)
         self.assertEqual(app.bot.sent, [])
         self.assertEqual(fake.referral_bonus_acks, [
             {"telegram_id": 1, "deposit_id": "dep-1", "side": "invitee"},
@@ -7569,8 +7687,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(query.answered)
         self.assertEqual(len(query.edited), 1)
         self.assertEqual(
-            query.edited[0], "What's wrong with order #1827? Send me "
-            "one message describing it — or say \"cancel\" to drop it.")
+            query.edited[0], 'What\'s wrong with order #1827? Send me one message describing it, or say "cancel" to drop it.')
         self.assertEqual(
             bot.REPORT_PENDING[1],
             {"order_id": 1827, "step": "describe"})
@@ -7580,8 +7697,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
             [("report a problem with order 1841", None)])
         self.assertEqual(
             msg.text_sent,
-            ["What's wrong with order #1841? Send me one message "
-             "describing it — or say \"cancel\" to drop it."])
+            ['What\'s wrong with order #1841? Send me one message describing it, or say "cancel" to drop it.'])
         self.assertEqual(
             bot.REPORT_PENDING[1],
             {"order_id": 1841, "step": "describe"})
@@ -7618,10 +7734,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(
             msg.text_sent[1],
-            "Reported — I've sent this to our support team with order "
-            "#1841. They'll look into it. This doesn't refund the "
-            "order — if you need a refund, talk to support at "
-            "t.me/paxyo.")
+            "Reported, I've sent this to our support team with order #1841. They'll look into it. This doesn't refund the order, if you need a refund, talk to support at t.me/paxyo.")
 
     async def test_no_order_id_asks_which_order(self):
         fake = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER, self.SECOND_ORDER])
@@ -7687,17 +7800,14 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertEqual(
             msg.text_sent[2],
-            "Reported — I've sent this to our support team. They'll "
-            "look into it. This doesn't refund any order — if you "
-            "need a refund, talk to support at t.me/paxyo.")
+            "Reported, I've sent this to our support team. They'll look into it. This doesn't refund any order, if you need a refund, talk to support at t.me/paxyo.")
 
     async def test_no_order_button_files_without_order(self):
         fake = FakePaxyo()
         query = await self._run_callback("report:none", paxyo=fake)
         self.assertEqual(
             query.edited[0],
-            "What's wrong? Send me one message describing it — or "
-            "say \"cancel\" to drop it.")
+            'What\'s wrong? Send me one message describing it, or say "cancel" to drop it.')
         self.assertEqual(
             bot.REPORT_PENDING[1],
             {"order_id": None, "step": "describe"})
@@ -7718,9 +7828,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.reports_filed, [])
         self.assertEqual(
             msg.text_sent[1],
-            "I couldn't file that right now — please message our "
-            "support at t.me/paxyo with order #1841 and what "
-            "happened.")
+            "I couldn't file that right now, please message our support at t.me/paxyo with order #1841 and what happened.")
         self.assertNotIn("Reported", msg.text_sent[1])
 
     async def test_endpoint_error_answered_honestly(self):
@@ -7743,8 +7851,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.reports_filed, [])
         self.assertEqual(
             msg.text_sent[2],
-            "I couldn't file that right now — please message our "
-            "support at t.me/paxyo and tell them what happened.")
+            "I couldn't file that right now, please message our support at t.me/paxyo and tell them what happened.")
         self.assertNotIn("Reported", msg.text_sent[2])
 
     async def test_cancel_drops_flow_with_no_report(self):
@@ -7754,7 +7861,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(fake.reports_filed, [])
         self.assertEqual(bot.REPORT_PENDING, {})
-        self.assertEqual(msg.text_sent[1], "Okay — I didn't send anything.")
+        self.assertEqual(msg.text_sent[1], "Okay, I didn't send anything.")
 
     async def test_cancel_in_pick_step_drops_flow(self):
         msg, fake = await self._turns([
@@ -7763,7 +7870,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(fake.reports_filed, [])
         self.assertEqual(bot.REPORT_PENDING, {})
-        self.assertEqual(msg.text_sent[1], "Okay — I didn't send anything.")
+        self.assertEqual(msg.text_sent[1], "Okay, I didn't send anything.")
 
     async def test_bare_yes_in_describe_step_reasks(self):
         msg, fake = await self._turns([
@@ -7796,8 +7903,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.REPORT_PENDING, {})
         self.assertEqual(
             msg.text_sent[1],
-            "You have an order in progress — finish it or tap Cancel "
-            "first, then tell me what's wrong.")
+            "You have an order in progress, finish it or tap Cancel first, then tell me what's wrong.")
         # The draft is untouched: the link is still missing, so the
         # next message still completes the same order.
         self.assertEqual(bot.PARTIAL[1].get("platform"), "instagram")
@@ -7840,8 +7946,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
                 update, None, "The views never showed up")
         self.assertEqual(
             msg.text_sent[0],
-            "What's wrong with order #1841? Send me one message "
-            "describing it — or say \"cancel\" to drop it.")
+            'What\'s wrong with order #1841? Send me one message describing it, or say "cancel" to drop it.')
         self.assertEqual(fake.reports_filed, [{
             "telegram_id": 1, "order_id": 1841,
             "message": "the views never showed up",
@@ -8313,8 +8418,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(query.answered)
         self.assertEqual(
             query.edited,
-            ["Yes — your 10.00 ETB deposit went through. "
-             "Your balance is now 1,010.00 ETB."],
+            ['Yes, your 10.00 ETB deposit went through. Your balance is now 1,010.00 ETB.'],
         )
         self.assertEqual(bot.RECEIPT_OFFER, {})
 
@@ -8335,8 +8439,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.voice_sent, [])
         self.assertEqual(
             msg.text_sent,
-            ["Yes — your 10.00 ETB deposit went through. "
-             "Your balance is now 1,010.00 ETB."],
+            ['Yes, your 10.00 ETB deposit went through. Your balance is now 1,010.00 ETB.'],
         )
         self.assertEqual(bot.RECEIPT_OFFER, {})
 
@@ -8454,8 +8557,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["I couldn't read that picture — can you type what it "
-             "shows, or send a clearer screenshot?"],
+            ["I couldn't read that picture, can you type what it shows, or send a clearer screenshot?"],
         )
         self.assertEqual(bot.PARTIAL, {})
 
@@ -8465,8 +8567,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["I found the profile someone — please send the link for "
-             "the order."],
+            ['I found the profile someone, please send the link for the order.'],
         )
 
     async def test_support_photo_summarised_with_follow_up(self):
@@ -8491,16 +8592,14 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         msg, _ = await self._send_photo("not json at all")
         self.assertEqual(
             msg.text_sent,
-            ["I couldn't read that picture — can you type what it "
-             "shows, or send a clearer screenshot?"],
+            ["I couldn't read that picture, can you type what it shows, or send a clearer screenshot?"],
         )
 
     async def test_empty_vision_falls_back(self):
         msg, _ = await self._send_photo("")
         self.assertEqual(
             msg.text_sent,
-            ["I couldn't read that picture — can you type what it "
-             "shows, or send a clearer screenshot?"],
+            ["I couldn't read that picture, can you type what it shows, or send a clearer screenshot?"],
         )
 
     async def test_vision_failure_falls_back_once(self):
@@ -8509,8 +8608,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["I couldn't read that picture — can you type what it "
-             "shows, or send a clearer screenshot?"],
+            ["I couldn't read that picture, can you type what it shows, or send a clearer screenshot?"],
         )
         self.assertEqual(vision.call_count, 1)  # never retries in a loop
 
@@ -8521,8 +8619,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["That picture is too big — please send a smaller one "
-             "(under 10 MB)."],
+            ['That picture is too big, please send a smaller one (under 10 MB).'],
         )
         vision.assert_not_called()
 
@@ -8536,8 +8633,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["That picture is too big — please send a smaller one "
-             "(under 10 MB)."],
+            ['That picture is too big, please send a smaller one (under 10 MB).'],
         )
         vision.assert_not_called()
 
@@ -8548,8 +8644,7 @@ class TestPhotoUnderstanding(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["I couldn't read that picture — can you type what it "
-             "shows, or send a clearer screenshot?"],
+            ["I couldn't read that picture, can you type what it shows, or send a clearer screenshot?"],
         )
 
     async def test_amharic_caption_answered_in_amharic(self):
@@ -9653,8 +9748,7 @@ class TestSecrecy(unittest.IsolatedAsyncioTestCase):
         msg = await self._send("who is your provider?")
         self.assertEqual(
             msg.text_sent,
-            ["Paxyo delivers your order directly — the price you see is "
-             "the price you pay. Is there a service I can help you order?"],
+            ['Paxyo delivers your order directly, the price you see is the price you pay. Is there a service I can help you order?'],
         )
         self._assert_clean(msg.text_sent[0])
 
@@ -9850,8 +9944,7 @@ class TestUsual(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["I don't have a usual order for you yet — tell me the "
-             "platform and link, and I'll remember it next time."],
+            ["I don't have a usual order for you yet, tell me the platform and link, and I'll remember it next time."],
         )
 
     async def test_usual_without_service_id_guesses_platform(self):
@@ -9923,7 +10016,7 @@ class TestGoalAndBudget(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["Which one matters most — views, likes, shares or followers?"],
+            ['Which one matters most, views, likes, shares or followers?'],
         )
         self.assertEqual(bot.PENDING, {})
 
@@ -10044,7 +10137,7 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
             intent_of("batch", orders=self._three_orders()),
         )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("Please confirm — 3 orders:", msg.text_sent[0])
+        self.assertIn('Please confirm, 3 orders:', msg.text_sent[0])
         self.assertIn("@user1", msg.text_sent[0])
         self.assertIn("https://instagram.com/p/a", msg.text_sent[0])
         self.assertIn("Total: 136.50 ETB", msg.text_sent[0])
@@ -10134,7 +10227,7 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
         )
         links = "\n".join(f"https://instagram.com/p/{i}" for i in range(1, 6))
         msg = await self._send(links, intent_of("unclear"))
-        self.assertIn("Please confirm — 5 orders:", msg.text_sent[0])
+        self.assertIn('Please confirm, 5 orders:', msg.text_sent[0])
         self.assertEqual(msg.text_sent[0].count("×1000"), 5)
         self.assertIn("Total: 210.00 ETB", msg.text_sent[0])
 
@@ -10172,7 +10265,7 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["That's too often — the shortest repeat is every 30 minutes."],
+            ["That's too often, the shortest repeat is every 30 minutes."],
         )
 
 
@@ -10330,7 +10423,7 @@ class TestPostBundle(unittest.IsolatedAsyncioTestCase):
     async def test_bundle_full_flow_shows_combined_card(self):
         msg, _ = await self._open_card()
         card = msg.text_sent[2]
-        self.assertIn("Please confirm — boost this post:", card)
+        self.assertIn('Please confirm, boost this post:', card)
         self.assertIn("Telegram Post Views", card)
         self.assertIn("Telegram Post Likes", card)
         self.assertIn("Telegram Reactions", card)
@@ -10679,8 +10772,7 @@ class TestMidOrderChanges(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["There's no order waiting to change — what would you like "
-             "to order?"],
+            ["There's no order waiting to change, what would you like to order?"],
         )
 
     async def test_cancel_wrong_link_clears_pending(self):
@@ -10894,7 +10986,7 @@ class TestTrustAndPolicy(unittest.IsolatedAsyncioTestCase):
             "Will this get my account banned?",
             intent_of("safety"),
         )
-        self.assertIn("No — no social media platform bans or strikes",
+        self.assertIn('No, no social media platform bans or strikes',
                       msg.text_sent[0])
         self.assertIn("without your permission",
                       msg.text_sent[0])
@@ -11278,7 +11370,7 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
             "Will this get my account banned?",
             intent_of("safety"),
         )
-        self.assertIn("No — no social media platform bans or strikes",
+        self.assertIn('No, no social media platform bans or strikes',
                       msg.text_sent[0])
         self.assertIn("still waiting for Confirm", msg.text_sent[0])
         self.assertIn("Instagram Followers", msg.text_sent[0])
@@ -13464,8 +13556,7 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["Paxyo is a social media service — followers, likes "
-             "and views at paxyo.et. What would you like to order?"],
+            ['Paxyo is a social media service, followers, likes and views at paxyo.et. What would you like to order?'],
         )
 
     # (6) video likes / comment likes / comments ---------------------
@@ -14137,7 +14228,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertIn("Order placed!", msg.text_sent[1])
         self.assertTrue(
-            any(line in msg.text_sent[1] for line in bot.HUMOR_LINES["en"]),
+            any(bot._strip_dashes(line) in msg.text_sent[1] for line in bot.HUMOR_LINES["en"]),
             msg.text_sent[1],
         )
 
@@ -14316,7 +14407,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
             ("can my social media account get banned or shadow banned?",
              intent_of("safety")),
         ])
-        self.assertIn("No — no social media platform bans or strikes",
+        self.assertIn('No, no social media platform bans or strikes',
                       msg.text_sent[0])
         self.assertIn("without your permission",
                       msg.text_sent[0])
@@ -14338,7 +14429,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
                 (question, intent_of("safety")),
             ])
             self.assertIn(
-                "No — no social media platform bans or strikes",
+                'No, no social media platform bans or strikes',
                 msg.text_sent[0],
             )
             self.assertNotIn("it can happen", msg.text_sent[0])
@@ -14364,7 +14455,7 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
                 ("accountዬ ሊታገድ ይችላል?",
                  intent_of("safety")),
             ])
-        self.assertIn("No — no social media platform bans or strikes", msg.text_sent[0])
+        self.assertIn('No, no social media platform bans or strikes', msg.text_sent[0])
         self.assertNotIn("it can happen", msg.text_sent[0])
         to_am.assert_awaited_once()
 
@@ -15394,7 +15485,7 @@ class TestRoundSixFixes(unittest.IsolatedAsyncioTestCase):
             ("can my social media account get banned or shadow banned?",
              intent_of("safety")),
         ])
-        self.assertIn("No — no social media platform bans or strikes",
+        self.assertIn('No, no social media platform bans or strikes',
                       msg.text_sent[0])
         self.assertIn("shadowban", msg.text_sent[0])
         self.assertNotIn("it can happen", msg.text_sent[0])
@@ -17648,7 +17739,7 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
         # Round 8.1 (14 Nov 2026): the emoji is the reaction
         # choice, so it is acknowledged first, then the link asked
         # for — never the stock link line on its own.
-        self.assertIn("Got it — 👍 reactions", msg1.text_sent[0])
+        self.assertIn('Got it, 👍 reactions', msg1.text_sent[0])
         self.assertNotIn(
             "Please send the link the order is for.", msg1.text_sent[0]
         )
@@ -17804,11 +17895,11 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
         )
         # Round 8.1 (14 Nov 2026): the emoji is acknowledged
         # first, then the link asked for.
-        self.assertIn("Got it — 👍 reactions", msg1.text_sent[0])
+        self.assertIn('Got it, 👍 reactions', msg1.text_sent[0])
         msg2 = await self._send(
             "👍", intent_of("unclear"), paxyo=ReactionsPaxyo()
         )
-        self.assertIn("Got it — 👍 reactions", msg2.text_sent[0])
+        self.assertIn('Got it, 👍 reactions', msg2.text_sent[0])
         self.assertIn("link", msg2.text_sent[0].lower())
         self.assertNotIn("I did not understand", msg2.text_sent[0])
         self.assertEqual(
@@ -17824,7 +17915,7 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
         # the stock link request on its own.
         msg = await self._send("👍", intent_of("unclear"))
         self.assertIn(
-            "Got it — 👍 thumbs-up reactions!", msg.text_sent[0]
+            'Got it, 👍 thumbs-up reactions!', msg.text_sent[0]
         )
         self.assertIn("link", msg.text_sent[0].lower())
         self.assertNotIn(
@@ -17912,7 +18003,7 @@ class TestRoundEightFixes(unittest.IsolatedAsyncioTestCase):
             intent_of("safety"), ai_reply="CHATTY-MOCK",
         )
         self.assertIn(
-            "No — no social media platform bans or strikes", msg.text_sent[0]
+            'No, no social media platform bans or strikes', msg.text_sent[0]
         )
         self.assertNotIn("CHATTY-MOCK", msg.text_sent[0])
 
@@ -18860,7 +18951,7 @@ class TestRoundEightOneFixes(unittest.IsolatedAsyncioTestCase):
                       service_hint="telegram reactions"),
             paxyo=RealReactionsPaxyo(),
         )
-        self.assertIn("Got it — 👍 reactions", msg2.text_sent[0])
+        self.assertIn('Got it, 👍 reactions', msg2.text_sent[0])
         # The draft quantity survived step 2 (its intent named
         # no quantity of its own).
         self.assertEqual(bot.PARTIAL[1].get("quantity"), 1000)
@@ -18916,7 +19007,7 @@ class TestRoundEightOneFixes(unittest.IsolatedAsyncioTestCase):
                     emoji, intent_of("unclear"),
                     paxyo=RealReactionsPaxyo(),
                 )
-                self.assertIn(f"Got it — {emoji} reactions", msg.text_sent[0])
+                self.assertIn(f"Got it, {emoji} reactions", msg.text_sent[0])
                 self.assertIn("link", msg.text_sent[0].lower())
                 self.assertEqual(
                     bot.PARTIAL[1].get("reaction_emoji"), emoji
@@ -18925,7 +19016,7 @@ class TestRoundEightOneFixes(unittest.IsolatedAsyncioTestCase):
 
     async def test_bare_emoji_fresh_context_gets_natural_reply(self):
         msg = await self._send("🔥", intent_of("unclear"))
-        self.assertIn("Got it — 🔥 fire reactions!", msg.text_sent[0])
+        self.assertIn('Got it, 🔥 fire reactions!', msg.text_sent[0])
         self.assertIn("link", msg.text_sent[0].lower())
         self.assertNotIn(
             "Please send the link the order is for.", msg.text_sent[0]
@@ -19927,8 +20018,7 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent[0],
-            "Telegram Reactions + Free Views — Thumbs up 👍: "
-            "5.46 ETB for 1,000 (5.46 ETB per 1000).",
+            'Telegram Reactions + Free Views, Thumbs up 👍: 5.46 ETB for 1,000 (5.46 ETB per 1000).',
         )
         self.assertEqual(msg.text_sent[0].count("5.46 ETB for 1,000"), 1)
 
@@ -19988,7 +20078,7 @@ class TestDeterministicPriceFix(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Thumbs up 👍", reply)
         self.assertIn("5.46 ETB for 1,000", reply)
         self.assertEqual(reply.count("5.46 ETB for 1,000"), 1)
-        self.assertIn("Got it — 👍 reactions", reply)
+        self.assertIn('Got it, 👍 reactions', reply)
         self.assertIn("Send the link to the post", reply)
 
 
@@ -21213,7 +21303,7 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("Paris is the capital", msg.text_sent[0])
         self.assertIn(
-            "By the way — what would you like to order?",
+            'By the way, what would you like to order?',
             msg.text_sent[0],
         )
 
@@ -21230,7 +21320,7 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
         ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
             "bot.ai_generate",
             new=mock.AsyncMock(
-                return_value="Open your TikTok profile — your username is under your photo."
+                return_value='Open your TikTok profile, your username is under your photo.'
             ),
         ), mock.patch("bot.speak_reply"):
             await bot.handle_order_text(
@@ -21239,7 +21329,7 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
             )
         self.assertEqual(
             msg.text_sent,
-            ["Open your TikTok profile — your username is under your photo."],
+            ['Open your TikTok profile, your username is under your photo.'],
         )
 
     def test_is_question(self):
@@ -21446,7 +21536,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         # bans or strikes over fake followers, likes or views)
         # and survives the sanitizer.
         self.assertIn(
-            "No — no social media platform bans or strikes",
+            'No, no social media platform bans or strikes',
             bot.strip_moralizing(bot.t("ban_no", "en")),
         )
         self.assertIn(
@@ -21478,7 +21568,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
              intent_of("safety")),
         ])
         self.assertIn(
-            "No — no social media platform bans or strikes", msg.text_sent[0]
+            'No, no social media platform bans or strikes', msg.text_sent[0]
         )
         self.assertIn(
             "without your permission", msg.text_sent[0]
@@ -23215,7 +23305,7 @@ class TestGroqFirstMediaReplies(_LanguageRoundBase):
         self.assertEqual(len(msg.text_sent), 1)
         self.assertEqual(
             msg.text_sent[0],
-            "Hello! 👋 Great to see you — what would you like to order?",
+            'Hello! 👋 Great to see you, what would you like to order?',
         )
 
     async def test_failed_order_gif_delay_line_present(self):
@@ -24065,7 +24155,7 @@ class TestReactionPicker(unittest.IsolatedAsyncioTestCase):
         ], paxyo=RealReactionsPaxyo())
         self.assertIn("Which reaction?", msg.text_sent[0])
         query = await self._tap("react:👍", fake)
-        self.assertEqual(query.edited, ["👍 reactions — got it."])
+        self.assertEqual(query.edited, ['👍 reactions, got it.'])
         self.assertIn("How many?", query.message.text_sent[0])
         self.assertEqual(bot.PARTIAL[1].get("reaction_emoji"), "👍")
         self.assertEqual(len(bot.PENDING), 0)
@@ -24087,7 +24177,7 @@ class TestReactionPicker(unittest.IsolatedAsyncioTestCase):
         }
         fake = RealReactionsPaxyo()
         query = await self._tap("react:❤️", fake)
-        self.assertEqual(query.edited, ["❤️ reactions — got it."])
+        self.assertEqual(query.edited, ['❤️ reactions, got it.'])
         self.assertEqual(len(bot.PENDING), 1)
         pending = next(iter(bot.PENDING.values()))
         self.assertEqual(pending["service"]["service"], 6537)
@@ -24109,8 +24199,7 @@ class TestReactionPicker(unittest.IsolatedAsyncioTestCase):
         query = await self._tap("react:👍", RealReactionsPaxyo())
         self.assertEqual(
             query.edited,
-            ["That order is no longer open — send a new order "
-             "to start again."],
+            ['That order is no longer open, send a new order to start again.'],
         )
         self.assertEqual(query.message.text_sent, [])
 
@@ -25518,7 +25607,7 @@ class TestManyEmojiReactions(_LanguageRoundBase):
                 msg = await self._turns([(emoji, intent_of("unclear"))])
                 self.assertEqual(len(msg.text_sent), 1)
                 self.assertIn(
-                    f"Got it — {emoji} {meaning} reactions!",
+                    f"Got it, {emoji} {meaning} reactions!",
                     msg.text_sent[0],
                 )
                 self.assertEqual(
@@ -25539,7 +25628,7 @@ class TestManyEmojiReactions(_LanguageRoundBase):
                 msg = await self._turns([(emoji, intent_of("unclear"))])
                 self.assertEqual(len(msg.text_sent), 1)
                 self.assertIn(
-                    f"Got it — {emoji} {meaning} reactions!",
+                    f"Got it, {emoji} {meaning} reactions!",
                     msg.text_sent[0],
                 )
                 self.assertEqual(
@@ -29832,8 +29921,7 @@ class TestSupportNeverNamesAPerson(unittest.IsolatedAsyncioTestCase):
     def test_templates_keep_support_wording(self):
         self.assertEqual(
             bot.t("contact_owner", "en"),
-            "You can reach our customer support by t.me/paxyo "
-            "— they will help you.",
+            'You can reach our customer support by t.me/paxyo, they will help you.',
         )
         self.assertIn(
             "our customer support",
@@ -30941,7 +31029,7 @@ class TestPerUserPersonality(_SmartLoopBase):
         self.assertIn("18.90", summary)
         # Brief: the summary alone — no humour line.
         self.assertFalse(
-            any(line in summary for line in bot.HUMOR_LINES["en"]),
+            any(bot._strip_dashes(line) in summary for line in bot.HUMOR_LINES["en"]),
             summary,
         )
 
@@ -30954,10 +31042,10 @@ class TestPerUserPersonality(_SmartLoopBase):
         query, _ = await self._place_views_order(paxyo=fake)
         summary = query.edited[0]
         self.assertIn("Order placed!", summary)
-        self.assertIn("Thanks so much — enjoy the boost!", summary)
+        self.assertIn('Thanks so much, enjoy the boost!', summary)
         # Chatty keeps the humour line too.
         self.assertTrue(
-            any(line in summary for line in bot.HUMOR_LINES["en"]),
+            any(bot._strip_dashes(line) in summary for line in bot.HUMOR_LINES["en"]),
             summary,
         )
 
@@ -30987,7 +31075,7 @@ class TestPerUserPersonality(_SmartLoopBase):
         self.assertEqual(len(msg.text_sent), 2)
         self.assertIn("Order placed!", msg.text_sent[0])
         self.assertTrue(
-            any(line in msg.text_sent[0] for line in bot.HUMOR_LINES["en"]),
+            any(bot._strip_dashes(line) in msg.text_sent[0] for line in bot.HUMOR_LINES["en"]),
             msg.text_sent[0],
         )
         # The hint no longer names buttons (16 Nov 2026 triage):
@@ -31995,7 +32083,7 @@ class TestFridayPatterns(_SmartLoopBase):
         update = FakeCallbackUpdate(query)
         with mock.patch("bot.paxyo", fake):
             await bot.on_callback(update, None)
-        self.assertEqual(query.edited, ["No problem — just message me when you want it."])
+        self.assertEqual(query.edited, ['No problem, just message me when you want it.'])
         msg2, _ = await self._turns(
             [("Hello", intent_of("greeting"))], paxyo=fake
         )
@@ -32014,7 +32102,7 @@ class TestFridayPatterns(_SmartLoopBase):
         self.assertIn("usually order", msg.text_sent[0])
         self.assertEqual(
             msg.text_sent[1],
-            "No problem — just message me when you want it.",
+            'No problem, just message me when you want it.',
         )
         self.assertNotIn("usually order", msg.text_sent[2])
 
@@ -32503,7 +32591,7 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
             "order_id": "1839", "telegram_id": 1, "rating": "good",
         }])
         self.assertEqual(len(query.edited), 1)
-        self.assertIn("Thanks — noted.", query.edited[0])
+        self.assertIn('Thanks, noted.', query.edited[0])
         self.assertIn("delivered", query.edited[0])
         self.assertIn("1839", bot.RATED_ORDERS)
 
@@ -32546,7 +32634,7 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
         working = FakePaxyo()
         query = await self._run_callback("rate:1839:good", paxyo=working)
         self.assertEqual(len(working.ratings_filed), 1)
-        self.assertIn("Thanks — noted.", query.edited[0])
+        self.assertIn('Thanks, noted.', query.edited[0])
 
     async def test_ignored_ask_never_reappears_on_later_messages(self):
         self._watch("1839")
@@ -32826,7 +32914,7 @@ class TestBulkOrders(unittest.IsolatedAsyncioTestCase):
             intent_of("batch"),
         )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("Please confirm — 2 orders:", msg.text_sent[0])
+        self.assertIn('Please confirm, 2 orders:', msg.text_sent[0])
         self.assertIn(links[0], msg.text_sent[0])
         self.assertIn(links[1], msg.text_sent[0])
         self.assertEqual(msg.text_sent[0].count("×1000"), 2)
@@ -32840,7 +32928,7 @@ class TestBulkOrders(unittest.IsolatedAsyncioTestCase):
             "100 followers for these: " + " ".join(links),
             intent_of("batch"),
         )
-        self.assertIn("Please confirm — 5 orders:", msg.text_sent[0])
+        self.assertIn('Please confirm, 5 orders:', msg.text_sent[0])
         self.assertEqual(msg.text_sent[0].count("×100"), 5)
         self.assertIn("Total: 21.00 ETB", msg.text_sent[0])
 
@@ -32850,7 +32938,7 @@ class TestBulkOrders(unittest.IsolatedAsyncioTestCase):
             f"1000 followers {links[0]}, 2000 followers {links[1]}",
             intent_of("batch"),
         )
-        self.assertIn("Please confirm — 2 orders:", msg.text_sent[0])
+        self.assertIn('Please confirm, 2 orders:', msg.text_sent[0])
         self.assertIn("×1000", msg.text_sent[0])
         self.assertIn("×2000", msg.text_sent[0])
         self.assertIn("Total: 126.00 ETB", msg.text_sent[0])
@@ -32863,7 +32951,7 @@ class TestBulkOrders(unittest.IsolatedAsyncioTestCase):
                       service_hint="followers", link=links[0],
                       quantity=1000),
         )
-        self.assertIn("Please confirm — 2 orders:", msg.text_sent[0])
+        self.assertIn('Please confirm, 2 orders:', msg.text_sent[0])
         self.assertIn("Total: 84.00 ETB", msg.text_sent[0])
         self.assertEqual(bot.PENDING, {})
         self.assertEqual(len(bot.PENDING_BATCH), 1)
@@ -34169,8 +34257,7 @@ class TestLoyaltyBonus(_SmartLoopBase):
         )
         self.assertIn("already in your balance", user_text)
         self.assertIn(
-            "Loyalty bonus credited: 4.62 ETB to @testuser (1) "
-            "— their 10th completed order.",
+            'Loyalty bonus credited: 4.62 ETB to @testuser (1), their 10th completed order.',
             admin_text,
         )
 
@@ -34195,7 +34282,7 @@ class TestLoyaltyBonus(_SmartLoopBase):
             loyalty_result=self._awarded(username=None),
         )
         app = await self._deliver(fake)
-        self.assertIn("to user 1 — their 10th completed order",
+        self.assertIn('to user 1, their 10th completed order',
                       app.bot.sent[0][1])
 
     async def test_non_milestone_announces_nothing(self):
@@ -34272,8 +34359,7 @@ class TestLoyaltyBonus(_SmartLoopBase):
             paxyo=FakePaxyo(),
         )
         self.assertEqual(msg.text_sent, [
-            "The loyalty bonus isn't switched on yet — I'll let "
-            "you know when it is.",
+            "The loyalty bonus isn't switched on yet, I'll let you know when it is.",
         ])
 
     async def test_loyalty_question_awarded_tells_user(self):
@@ -34499,7 +34585,7 @@ class TestFeedbackCheck(_SmartLoopBase):
     async def test_good_thanks(self):
         query = await self._run_callback("feedback:good:1827")
         self.assertEqual(
-            query.edited, ["Thanks — glad it went well!"]
+            query.edited, ['Thanks, glad it went well!']
         )
         self.assertEqual(bot.FEEDBACK_PENDING, {})
 
@@ -34508,8 +34594,7 @@ class TestFeedbackCheck(_SmartLoopBase):
         query = await self._run_callback("feedback:bad:1827", paxyo=fake)
         self.assertEqual(
             query.edited,
-            ["Sorry to hear that — what went wrong with order #1827? "
-             "Tell me in one message and I'll pass it to support."],
+            ["Sorry to hear that, what went wrong with order #1827? Tell me in one message and I'll pass it to support."],
         )
         self.assertEqual(bot.FEEDBACK_PENDING, {1: {"order_id": 1827}})
         msg, _ = await self._turns(
@@ -34518,7 +34603,7 @@ class TestFeedbackCheck(_SmartLoopBase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["Thanks — I've passed that to support about order #1827. "
+            ["Thanks, I've passed that to support about order #1827. "
              "They'll look into it."],
         )
         self.assertEqual(fake.reports_filed, [{
@@ -34534,7 +34619,7 @@ class TestFeedbackCheck(_SmartLoopBase):
             [("cancel", intent_of("cancel"))], paxyo=fake
         )
         self.assertEqual(
-            msg.text_sent, ["No problem — I won't send anything."]
+            msg.text_sent, ["No problem, I won't send anything."]
         )
         self.assertEqual(fake.reports_filed, [])
         self.assertEqual(bot.FEEDBACK_PENDING, {})
@@ -37524,7 +37609,7 @@ class TestMidOrderUnderstanding(unittest.IsolatedAsyncioTestCase):
             resume=False)
         self.assertEqual(
             msg.text_sent[2],
-            "That's your own code — share it with a friend instead.")
+            "That's your own code, share it with a friend instead.")
         self.assertEqual(fake.referrals_recorded, [])
 
     async def test_invalid_code_mid_order_card_pending(self):
@@ -37534,7 +37619,7 @@ class TestMidOrderUnderstanding(unittest.IsolatedAsyncioTestCase):
             paxyo=TikTokPaxyo(), resume=False)
         self.assertEqual(
             msg.text_sent[2],
-            "I don't recognise that code — check it and try again.")
+            "I don't recognise that code, check it and try again.")
         self.assertEqual(fake.referrals_recorded, [])
 
 
