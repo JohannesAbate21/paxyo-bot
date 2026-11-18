@@ -22,9 +22,10 @@ The code is structured so a status monitor can be added later: see
 All configuration comes from environment variables. No secret is ever
 written to a file or a log by this program.
 
-Voice input: a voice message is downloaded and transcribed with
-Gemini (Groq Whisper only as an emergency fallback if Gemini
-errors) and handled exactly like the same typed message; the
+Voice input: a voice message is downloaded and transcribed by
+racing Gemini and Groq Whisper in parallel (first usable result
+wins; owner, 18 Nov 2026) and handled exactly like the same typed
+message; the
 same typed message; the transcription is shown to the user ("You
 said: ...") so they can see what the bot heard. The bot answers in
 text and does NOT claim to take orders by voice (owner, 13 Nov 2026)
@@ -89,6 +90,16 @@ PAXYO_API_BASE = os.environ.get("PAXYO_API_BASE", "https://paxyo.et/api/bot").rs
 BOT_API_SECRET = os.environ.get("BOT_API_SECRET", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# Transcription model, separately configurable (owner, 18 Nov 2026):
+# gemini_transcribe is its only caller; chat, translate and vision
+# keep GEMINI_MODEL. Defaults to GEMINI_MODEL — no model switch is
+# made blind here (a wrong model name would break transcription
+# outright, and there is no live key in this repo to test one
+# against); the owner can point transcription at a faster model
+# later without a code change, once one is verified live.
+GEMINI_TRANSCRIBE_MODEL = os.environ.get(
+    "GEMINI_TRANSCRIBE_MODEL", GEMINI_MODEL
+)
 # OpenAI (ChatGPT) — the seventh AI since 17 Nov 2026, now behind
 # Groq, DeepSeek, Grok, Zen, Qwen and Mistral: the Gemini free-tier key kept hitting its
 # per-minute limit (429), so when OPENAI_API_KEY is set the bot
@@ -127,8 +138,8 @@ GROQ_URL = "https://api.groq.com/openai/v1"
 # GROK_API_KEY is set; without the key the order is unchanged
 # (Groq first, DeepSeek second). A Grok failure — including its daily limit —
 # falls through to Zen automatically in ai_generate. Grok has
-# no voice transcription — ai_transcribe is Gemini (Groq only as
-# emergency fallback).
+# no voice transcription — ai_transcribe races Gemini and Groq
+# Whisper in parallel.
 # The key is a Fly secret, never in code. NOTE: GROQ_API_KEY is a
 # different company (Groq) and cannot be used for Grok.
 GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
@@ -144,7 +155,7 @@ GROK_URL = "https://api.x.ai/v1"
 # deepseek-chat (V4.1 Flash): $0.15/1M input, $0.60/1M output
 # off-peak (double at peak); new accounts get 5M free tokens for
 # 30 days. DeepSeek has no voice transcription — ai_transcribe
-# is Gemini (Groq only as emergency fallback). The key is a Render env var, never in code.
+# races Gemini and Groq Whisper in parallel. The key is a Render env var, never in code.
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_URL = "https://api.deepseek.com/v1"
@@ -6953,7 +6964,8 @@ GEMINI_MEDIA_TIMEOUT_SECONDS = 30.0
 
 
 async def _gemini_post(payload: dict,
-                       timeout: float = AI_POST_TIMEOUT_SECONDS) -> dict:
+                       timeout: float = AI_POST_TIMEOUT_SECONDS,
+                       model: str = None) -> dict:
     """One POST to the Gemini API, with fast failover (17 Nov 2026):
     HTTP errors are never retried.
 
@@ -6966,8 +6978,10 @@ async def _gemini_post(payload: dict,
     json payload), so tests that mock the client still pass.
     Media callers (transcription, vision) pass the longer
     GEMINI_MEDIA_TIMEOUT_SECONDS budget instead (18 Nov 2026).
+    `model` overrides GEMINI_MODEL for this one call — only
+    gemini_transcribe uses it (GEMINI_TRANSCRIBE_MODEL).
     """
-    url = GEMINI_URL.format(model=GEMINI_MODEL)
+    url = GEMINI_URL.format(model=model or GEMINI_MODEL)
     for attempt in (0, 1):
         try:
             async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -7059,7 +7073,9 @@ async def gemini_transcribe(audio_bytes: bytes, language: str = None) -> str:
         ]
     }
     data = await _gemini_post(
-        payload, timeout=GEMINI_MEDIA_TIMEOUT_SECONDS
+        payload,
+        timeout=GEMINI_MEDIA_TIMEOUT_SECONDS,
+        model=GEMINI_TRANSCRIBE_MODEL,
     )
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -7338,7 +7354,7 @@ async def groq_transcribe(audio_bytes: bytes, language: str = None) -> str:
 # the three functions below mirror the DeepSeek ones exactly (same
 # inputs, same outputs, same retry shape), with xAI's base URL and
 # its own key/model env vars. Grok has no voice transcription —
-# ai_transcribe is Gemini (Groq only as emergency fallback) —
+# ai_transcribe races Gemini and Groq Whisper in parallel —
 # and pictures stay on
 # OpenAI/Gemini vision.
 
@@ -7401,8 +7417,8 @@ async def grok_generate(prompt: str, system: str = None) -> str:
 # DeepSeek's API is OpenAI-compatible, so the two functions below
 # mirror the Groq ones exactly (same inputs, same outputs, same
 # retry shape), with DeepSeek's base URL and its own key/model env
-# vars. DeepSeek has no voice transcription — ai_transcribe is
-# Gemini (Groq only as emergency fallback) — and pictures stay on OpenAI/Gemini vision.
+# vars. DeepSeek has no voice transcription — ai_transcribe races
+# Gemini and Groq Whisper in parallel — and pictures stay on OpenAI/Gemini vision.
 
 async def _deepseek_post(path: str, headers=None, json=None) -> dict:
     """One POST to the DeepSeek API, with fast failover (17 Nov 2026): an HTTP error
@@ -8110,53 +8126,104 @@ async def translate_to_amharic(text: str) -> str:
     return await translate_to_language(text, "am")
 
 
+def _transcription_usable(text, language=None) -> bool:
+    """True when a transcription is worth using — the race's win
+    condition, and the garbage guard's rule (owner, 18 Nov 2026).
+    Non-string results (a mock returning a MagicMock) and blank
+    text are unusable. Arabic script is a mis-detection when the
+    transcriber was told the language is a Ge'ez language
+    (Amharic/Tigrinya) — Whisper mis-hears Amharic as Arabic
+    (14 Nov 2026) — so it does not win the race for those hints;
+    for any other hint it may be a genuine Arabic speaker, so it
+    passes here and the Arabic retry in transcribe_voice_with_retry
+    handles it. Otherwise usable means not garbled: Ge'ez script,
+    a digit, a link, or a word the bot knows in English or Oromo.
+    The three live Groq garblings (\"Azra Olede Shifor or Rafaell
+    Galo.\", \"Asherahulet tishifu lorafel li galo.\", \"Yansar
+    alutte si forora veli vello.\") fail it; \"Salam, TikTok
+    followers hâlliâ?\" passes it (\"followers\" is a known word)."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if _has_arabic_script(text):
+        return language not in ("am", "ti")
+    return not (
+        _looks_garbled(text) and not _recognisable_english(text)
+    )
+
+
 async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
-    """Voice transcription: Gemini for every voice note (owner,
-    18 Nov 2026 — all voice transcription goes to Gemini, which
-    hears Amharic correctly where Groq Whisper mis-heard it, e.g.
-    "12 ሺህ ፎሎወር እፈልጋለሁ"). Groq Whisper is only an emergency
-    fallback when Gemini itself raises, so a voice note never
-    goes silent because one provider is down — except for
-    Amharic speech, where Groq Whisper garbles the audio into
-    confident Latin gibberish (live, 18 Nov 2026, twice:
-    "Azra Olede Shifor or Rafaell Galo.", "Asherahulet tishifu
-    lorafel li galo.") and must never be the fallback: for
-    language "am" a Gemini failure retries Gemini once more
-    with the hint instead, and returns "" when that fails too.
-    `language` is a hint ("am", "ti", "om", "en") — None means
-    auto-detect. Returns "" when every provider fails, so the
-    caller answers honestly instead of feeding wrong text to
-    the order flow."""
+    """Voice transcription, RACED (owner, 18 Nov 2026): Gemini and
+    Groq Whisper run IN PARALLEL and the first USABLE result wins.
+    Live 18 Nov 2026, 07:34 EAT: Gemini hears Amharic correctly
+    (\"ሰላም የኢንስታግራም ፎሎወር ፈልጌ ነበረ\") but took 30s + 30s + 17s
+    = 80s on the free tier, while Groq answers in ~0.3s but
+    garbles Amharic 3 times in 4 — so Gemini-then-Groq is slow
+    and Groq-then-Gemini is wrong. Racing takes Groq's answer
+    when it is readable (~1-2s) and waits for Gemini when it is
+    not. Gemini is attempted ONCE per call — no second 30s
+    retry: the 30+30 doubling is what made 80s. When one wins
+    the other task is cancelled, so the bot does not pay for
+    both; when both finish at once Gemini's text wins, because
+    it hears Amharic right where Groq garbles it. Worst case
+    per call is one Gemini media budget (~30s) plus the chat
+    reply — when Gemini is unreachable AND Groq garbles, the
+    answer is an honest \"could not understand\" after ~30s,
+    not another 30s retry. Returns \"\" when nothing usable
+    arrives, so the caller answers honestly instead of feeding
+    wrong text to the order flow.
+    `language` is a hint (\"am\", \"ti\", \"om\", \"en\") — None means
+    auto-detect."""
+    gemini_task = asyncio.create_task(
+        gemini_transcribe(audio_bytes, language=language)
+    )
+    groq_task = asyncio.create_task(
+        groq_transcribe(audio_bytes, language=language)
+    )
+    pending = {gemini_task, groq_task}
     try:
-        return await gemini_transcribe(audio_bytes, language=language)
-    except Exception as exc:
-        if language == "am":
-            _log_ai_failure(
-                "Gemini transcribe failed, retrying Gemini", exc,
-                note=_exc_note(exc, GEMINI_MEDIA_TIMEOUT_SECONDS),
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
             )
-            try:
-                return await gemini_transcribe(
-                    audio_bytes, language="am"
+            # Gemini first on a tie: when both already finished,
+            # its text wins — it hears Amharic right where Groq
+            # garbles it. (In real time the first finisher wins;
+            # a tie only happens when both answered at once.)
+            for task in (gemini_task, groq_task):
+                if task not in done:
+                    continue
+                try:
+                    text = task.result()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _log_ai_failure(
+                        "Gemini transcribe failed"
+                        if task is gemini_task
+                        else "Groq transcribe failed",
+                        exc,
+                        note=_exc_note(
+                            exc,
+                            GEMINI_MEDIA_TIMEOUT_SECONDS
+                            if task is gemini_task
+                            else AI_POST_TIMEOUT_SECONDS,
+                        ),
+                    )
+                    continue
+                if _transcription_usable(text, language):
+                    for other in pending:
+                        other.cancel()
+                    return text
+                log.warning(
+                    "%s transcribe unusable, waiting for the other",
+                    "Gemini" if task is gemini_task else "Groq",
                 )
-            except Exception as exc2:
-                _log_ai_failure(
-                    "Gemini transcribe retry failed", exc2,
-                    note=_exc_note(exc2, GEMINI_MEDIA_TIMEOUT_SECONDS),
-                )
-            return ""
-        _log_ai_failure(
-            "Gemini transcribe failed, trying Groq", exc,
-            note=_exc_note(exc, GEMINI_MEDIA_TIMEOUT_SECONDS),
-        )
-    try:
-        return await groq_transcribe(audio_bytes, language=language)
-    except Exception as exc:
-        _log_ai_failure(
-            "Groq transcribe failed", exc,
-            note=_exc_note(exc, AI_POST_TIMEOUT_SECONDS),
-        )
-    return ""
+        return ""
+    finally:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 def _has_arabic_script(text: str) -> bool:
@@ -8254,14 +8321,15 @@ def _recognisable_english(text: str) -> bool:
 
 
 async def transcribe_voice_with_retry(audio, user_id: int, user_lang: str) -> str:
-    """Transcribe a voice note with Gemini (owner, 18 Nov 2026:
-    all voice transcription goes to Gemini — it hears Amharic
-    correctly where Groq Whisper mis-heard it, e.g. "12 ሺህ
-    ፎሎወር እፈልጋለሁ"). The first try hints the user's language
+    """Transcribe a voice note — ai_transcribe races Gemini and
+    Groq Whisper in parallel (owner, 18 Nov 2026) and the first
+    usable result wins; Gemini hears Amharic correctly where
+    Groq Whisper mis-heard it, e.g. "12 ሺህ ፎሎወር እፈልጋለሁ".
+    The first try hints the user's language
     when it is known (LAST_LANG, else Telegram language), so
-    Gemini is told "in Amharic, in the Ge'ez alphabet" from the
-    start instead of auto-detecting; auto-detect is only for a
-    genuinely unknown language, so an Amharic-language user
+    the transcribers are told "in Amharic, in the Ge'ez alphabet"
+    from the start instead of auto-detecting; auto-detect is only
+    for a genuinely unknown language, so an Amharic-language user
     speaking English is still heard in English. One
     language-hinted retry is kept for the case the first try
     comes back in Arabic script (owner, 14 Nov 2026: a

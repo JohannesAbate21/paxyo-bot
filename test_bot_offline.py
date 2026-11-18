@@ -11384,16 +11384,23 @@ class TestOpenAIProvider(unittest.IsolatedAsyncioTestCase):
         gen.assert_not_called()
 
     async def test_ai_transcribe_and_vision_fall_back_without_key(self):
+        # Raced (owner, 18 Nov 2026): Groq runs in parallel even
+        # here, but its empty result is unusable, so Gemini's
+        # "hi" wins; vision is untouched by the race.
         with mock.patch(
             "bot.gemini_transcribe",
             new=mock.AsyncMock(return_value="hi"),
         ) as tr, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value=""),
+        ) as gr, mock.patch(
             "bot.gemini_vision",
             new=mock.AsyncMock(return_value="seen"),
         ) as vi:
             self.assertEqual(await bot.ai_transcribe(b"x"), "hi")
             self.assertEqual(await bot.ai_vision(b"x"), "seen")
         tr.assert_awaited_once()
+        gr.assert_awaited_once()
         vi.assert_awaited_once()
 
     async def test_extract_intent_calls_ai_generate(self):
@@ -11578,31 +11585,34 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
         gen.assert_not_called()
 
     async def test_ai_transcribe_prefers_gemini(self):
-        # Owner, 18 Nov 2026: ALL voice transcription goes to
-        # Gemini (it hears Amharic correctly where Groq Whisper
-        # mis-heard "12 ሺህ ፎሎወር እፈልጋለሁ"). Groq and OpenAI are
-        # not called when Gemini answers.
+        # Owner, 18 Nov 2026: transcription is a RACE — Gemini
+        # and Groq run in parallel. When both answer at once
+        # (instant mocks), Gemini's text wins the tie: it hears
+        # Amharic correctly where Groq Whisper mis-heard
+        # "12 ሺህ ፎሎወር እፈልጋለሁ". Groq is raced, not skipped,
+        # and OpenAI is not called.
         with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
              mock.patch(
                  "bot.groq_transcribe",
-                 new=mock.AsyncMock(return_value="g"),
+                 new=mock.AsyncMock(return_value="Hello"),
              ) as groq, \
              mock.patch(
                  "bot.openai_transcribe", new=mock.AsyncMock()
              ) as oai, \
              mock.patch(
                  "bot.gemini_transcribe",
-                 new=mock.AsyncMock(return_value="gem"),
+                 new=mock.AsyncMock(return_value="ሰላም"),
              ) as gem:
-            self.assertEqual(await bot.ai_transcribe(b"x"), "gem")
+            self.assertEqual(await bot.ai_transcribe(b"x"), "ሰላም")
         gem.assert_awaited_once()
-        groq.assert_not_called()
+        groq.assert_awaited_once()
         oai.assert_not_called()
 
-    async def test_ai_transcribe_falls_back_to_groq_when_gemini_raises(self):
-        # Gemini down: Groq Whisper is the emergency fallback, so
-        # a voice note never goes silent because one provider is
-        # down. OpenAI is not in the transcription path any more.
+    async def test_ai_transcribe_uses_groq_when_gemini_raises(self):
+        # Gemini down: Groq Whisper is raced in parallel, so its
+        # readable answer wins at once — a voice note never goes
+        # silent because one provider is down. OpenAI is not in
+        # the transcription path any more.
         with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
              mock.patch(
                  "bot.gemini_transcribe",
@@ -11612,12 +11622,12 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
              ) as gem, \
              mock.patch(
                  "bot.groq_transcribe",
-                 new=mock.AsyncMock(return_value="g"),
+                 new=mock.AsyncMock(return_value="hello"),
              ) as groq, \
              mock.patch(
                  "bot.openai_transcribe", new=mock.AsyncMock()
              ) as oai:
-            self.assertEqual(await bot.ai_transcribe(b"x"), "g")
+            self.assertEqual(await bot.ai_transcribe(b"x"), "hello")
         gem.assert_awaited_once()
         groq.assert_awaited_once()
         oai.assert_not_called()
@@ -11639,7 +11649,9 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_transcribe_passes_language_hint_to_gemini(self):
         # The hint reaches Gemini (it names the language in its
-        # prompt), so a hinted retry is really hinted.
+        # prompt) — and Groq is raced with the same hint. Groq's
+        # mock result is not a string, so it is unusable and
+        # Gemini's "ሰላም" wins.
         with mock.patch(
             "bot.gemini_transcribe",
             new=mock.AsyncMock(return_value="ሰላም"),
@@ -11653,14 +11665,15 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             gem.await_args.kwargs, {"language": "am"}
         )
-        groq.assert_not_called()
+        groq.assert_awaited_once()
 
     async def test_ai_transcribe_timeout_log_names_timeout(self):
         # Owner, 18 Nov 2026: three voice notes failed with a
         # bare "transport error" and no way to tell a 5s timeout
         # from a dropped connection. The failure line now names
         # the exception type and the timeout budget — never the
-        # URL or the key.
+        # URL or the key. Groq is already racing, so its
+        # readable answer wins at once.
         req = bot.httpx.Request(
             "POST",
             "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -11675,53 +11688,222 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
             ),
         ), mock.patch(
             "bot.groq_transcribe",
-            new=mock.AsyncMock(return_value="g"),
+            new=mock.AsyncMock(return_value="hello"),
         ), self.assertLogs("paxorder_bot", level="WARNING") as logs:
-            self.assertEqual(await bot.ai_transcribe(b"x"), "g")
+            self.assertEqual(await bot.ai_transcribe(b"x"), "hello")
         joined = "\n".join(logs.output)
         self.assertIn(
-            "Gemini transcribe failed, trying Groq "
+            "Gemini transcribe failed "
             "(TimeoutException after 30.0s)",
             joined,
         )
         self.assertNotIn("FAKESECRETKEY", joined)
         self.assertNotIn("key=", joined)
 
-    async def test_ai_transcribe_amharic_retries_gemini_not_groq(self):
-        # Owner, 18 Nov 2026: Groq Whisper garbles Amharic into
-        # confident Latin gibberish, so for language "am" a
-        # Gemini failure retries Gemini once more with the hint
-        # — Groq is never called. When Gemini fails twice the
-        # result is "" so the caller answers honestly.
+    async def test_ai_transcribe_amharic_gemini_timeout_groq_gibberish_fails_honestly(self):
+        # Owner, 18 Nov 2026, live 07:34 EAT: Gemini took 30s +
+        # 30s + 17s = 80s because a failed Gemini attempt was
+        # retried once more. Raced, Gemini is attempted ONCE per
+        # call: it times out, Groq's answer is gibberish, so the
+        # result is "" for an honest reply — no second 30s
+        # attempt, no gibberish in the order flow.
+        req = bot.httpx.Request(
+            "POST",
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "x:generateContent?key=FAKESECRETKEY",
+        )
         with mock.patch(
             "bot.gemini_transcribe",
-            new=mock.AsyncMock(side_effect=RuntimeError("gemini down")),
+            new=mock.AsyncMock(
+                side_effect=bot.httpx.TimeoutException(
+                    "timed out", request=req
+                )
+            ),
         ) as gem, mock.patch(
-            "bot.groq_transcribe", new=mock.AsyncMock(return_value="g")
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(
+                return_value="Asherahulet tishifu lorafel li galo."
+            ),
         ) as groq:
             self.assertEqual(
                 await bot.ai_transcribe(b"x", language="am"), ""
             )
-        self.assertEqual(gem.await_count, 2)
-        self.assertEqual(
-            gem.await_args_list[1].kwargs, {"language": "am"}
-        )
-        groq.assert_not_called()
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
 
-    async def test_ai_transcribe_english_still_falls_back_to_groq(self):
-        # Only Amharic skips the Groq fallback: an English user
-        # keeps Gemini -> Groq, so a voice note never goes
-        # silent because one provider is down.
+    async def test_ai_transcribe_english_uses_groq_when_gemini_raises(self):
+        # English: Gemini down, Groq's readable answer wins the
+        # race at once — a voice note never goes silent because
+        # one provider is down.
         with mock.patch(
             "bot.gemini_transcribe",
             new=mock.AsyncMock(side_effect=RuntimeError("gemini down")),
         ) as gem, mock.patch(
             "bot.groq_transcribe",
-            new=mock.AsyncMock(return_value="g"),
+            new=mock.AsyncMock(return_value="hello"),
         ) as groq:
             self.assertEqual(
-                await bot.ai_transcribe(b"x", language="en"), "g"
+                await bot.ai_transcribe(b"x", language="en"), "hello"
             )
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
+    def test_transcription_usable_unit(self):
+        # The race's win condition, pinned directly: Ge'ez and
+        # readable English/Oromo win; the three live Groq
+        # garblings, blank text and non-strings do not; Arabic
+        # wins except when the hint says a Ge'ez language.
+        self.assertTrue(bot._transcription_usable("ሰላም"))
+        self.assertTrue(
+            bot._transcription_usable("I want one thousand followers")
+        )
+        self.assertTrue(bot._transcription_usable("akkam"))
+        self.assertTrue(bot._transcription_usable("12000"))
+        self.assertTrue(bot._transcription_usable("yes"))
+        self.assertTrue(
+            bot._transcription_usable("Salam, TikTok followers hâlliâ?")
+        )
+        for gibberish in (
+            "Asherahulet tishifu lorafel li galo.",
+            "Azra Olede Shifor or Rafaell Galo.",
+            "Yansar alutte si forora veli vello.",
+        ):
+            self.assertFalse(bot._transcription_usable(gibberish))
+        self.assertFalse(bot._transcription_usable(""))
+        self.assertFalse(bot._transcription_usable("   "))
+        self.assertFalse(bot._transcription_usable(None))
+        self.assertFalse(bot._transcription_usable(object()))
+        self.assertTrue(
+            bot._transcription_usable("مرحبا كيف حالك")
+        )
+        self.assertTrue(
+            bot._transcription_usable("مرحبا كيف حالك", "en")
+        )
+        self.assertFalse(
+            bot._transcription_usable("مرحبا كيف حالك", "am")
+        )
+        self.assertFalse(
+            bot._transcription_usable("مرحبا كيف حالك", "ti")
+        )
+
+    async def test_ai_transcribe_race_groq_fast_usable_cancels_gemini(self):
+        # Owner, 18 Nov 2026, live 07:34 EAT: Gemini took 30s +
+        # 30s + 17s = 80s on the free tier while Groq answers in
+        # ~0.3s. Raced, Groq's readable answer wins at once and
+        # the slow Gemini task is cancelled — no 30s wait.
+        cancelled = []
+
+        async def slow_gemini(*args, **kwargs):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return "ሰላም"
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=slow_gemini),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value="Hello"),
+        ) as groq:
+            result = await bot.ai_transcribe(b"x")
+        elapsed = loop.time() - start
+        self.assertEqual(result, "Hello")
+        self.assertEqual(cancelled, [True])
+        self.assertLess(elapsed, 5)
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
+    async def test_ai_transcribe_race_groq_gibberish_waits_for_gemini(self):
+        # Groq's fast answer is gibberish, so the race waits for
+        # Gemini's correct Ge'ez instead of using it.
+        async def slow_gemini(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return "ሰላም የኢንስታግራም ፎሎወር ፈልጌ ነበረ"
+
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=slow_gemini),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(
+                return_value="Asherahulet tishifu lorafel li galo."
+            ),
+        ) as groq:
+            result = await bot.ai_transcribe(b"x", language="am")
+        self.assertEqual(
+            result, "ሰላም የኢንስታግራም ፎሎወር ፈልጌ ነበረ"
+        )
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
+    async def test_ai_transcribe_race_gemini_fast_wins_tie(self):
+        # Both answer at once (instant mocks): Gemini's text wins
+        # the tie — it hears Amharic right where Groq garbles it.
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(return_value="ሰላም"),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value="Hello"),
+        ) as groq:
+            self.assertEqual(
+                await bot.ai_transcribe(b"x", language="am"), "ሰላም"
+            )
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
+    async def test_ai_transcribe_race_arabic_unusable_for_geez_hint(self):
+        # Whisper mis-hears Amharic as Arabic (14 Nov 2026): for
+        # a Ge'ez hint, Arabic script does not win the race —
+        # the race waits for Gemini's Ge'ez instead.
+        async def slow_gemini(*args, **kwargs):
+            await asyncio.sleep(0.1)
+            return "ሰላም"
+
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=slow_gemini),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value="مرحبا كيف حالك"),
+        ) as groq:
+            self.assertEqual(
+                await bot.ai_transcribe(b"x", language="am"), "ሰላም"
+            )
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
+    async def test_ai_transcribe_race_arabic_usable_without_hint(self):
+        # No hint: Arabic script may be a genuine Arabic speaker,
+        # so it wins the race at once and the slow Gemini task is
+        # cancelled; the Arabic retry in transcribe_voice_with_retry
+        # handles a mis-detection from there.
+        cancelled = []
+
+        async def slow_gemini(*args, **kwargs):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return "ሰላም"
+
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=slow_gemini),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value="مرحبا كيف حالك"),
+        ) as groq:
+            self.assertEqual(
+                await bot.ai_transcribe(b"x"), "مرحبا كيف حالك"
+            )
+        self.assertEqual(cancelled, [True])
         gem.assert_awaited_once()
         groq.assert_awaited_once()
 
@@ -21662,14 +21844,13 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertIn("could not understand", msg.text_sent[0].lower())
         self.assertNotIn("You said:", msg.text_sent[0])
 
-    async def test_voice_amharic_uses_gemini_not_groq(self):
+    async def test_voice_amharic_race_uses_gemini_text(self):
         # Owner, 18 Nov 2026: he said "12 ሺህ ፎሎወር እፈልጋለሁ"
         # ("I want 12 thousand followers") and Groq Whisper
-        # mis-heard it while Gemini heard it correctly — so ALL
-        # voice transcription goes to Gemini. An Amharic user
-        # speaking Amharic must be transcribed by Gemini, Groq
-        # must not be called, and the phrase must reach the order
-        # flow with quantity 12000 and followers.
+        # mis-heard it while Gemini heard it correctly. Raced,
+        # Gemini's Ge'ez text wins (Groq's mock result is not a
+        # string, so it is unusable) and the phrase reaches the
+        # order flow with quantity 12000 and followers.
         bot.LAST_LANG[1] = "am"
         msg = FakeVoiceMessage()
         update = FakeUpdate(msg)
@@ -21696,7 +21877,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         # "in Amharic, in the Ge'ez alphabet" from the start
         # instead of auto-detecting.
         self.assertEqual(gem.await_args.kwargs, {"language": "am"})
-        groq.assert_not_called()
+        groq.assert_awaited_once()
         self.assertIn("You said:", msg.text_sent[0])
         self.assertIn("12 ሺህ ፎሎወር እፈልጋለሁ", msg.text_sent[0])
         self.assertEqual(bot.PARTIAL[1]["quantity"], 12000)
@@ -21743,13 +21924,14 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertEqual(bot.PARTIAL[1]["quantity"], 12000)
         self.assertEqual(bot.PARTIAL[1]["service_hint"], "followers")
 
-    async def test_voice_english_uses_gemini_not_groq(self):
+    async def test_voice_english_race_uses_gemini_text(self):
         # An Amharic-language user speaking English: the first
         # attempt is hinted "am" (owner, 18 Nov 2026), but the
         # hint must not force the wrong language — Gemini returns
         # the English, and the garbage guard accepts it because
         # "followers" is recognisable English, so it still flows
-        # to the order flow. Groq is never called.
+        # to the order flow. Groq is raced but its mock result
+        # is unusable.
         bot.LAST_LANG[1] = "am"
         msg = FakeVoiceMessage()
         update = FakeUpdate(msg)
@@ -21773,16 +21955,17 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             await bot.on_voice(update, None)
         gem.assert_awaited_once()
         self.assertEqual(gem.await_args.kwargs, {"language": "am"})
-        groq.assert_not_called()
+        groq.assert_awaited_once()
         self.assertIn("You said:", msg.text_sent[0])
         self.assertIn(
             "I want one thousand followers", msg.text_sent[0]
         )
 
-    async def test_voice_gemini_empty_fails_honestly_without_groq(self):
+    async def test_voice_gemini_empty_fails_honestly(self):
         # Gemini returns empty text: answer honestly
-        # (transcribe_failed) — do not fall back to another
-        # provider and risk feeding wrong text to the order flow.
+        # (transcribe_failed) — Groq is raced too, but its mock
+        # result is unusable, so nothing usable arrives and no
+        # wrong text reaches the order flow.
         msg = FakeVoiceMessage()
         update = FakeUpdate(msg)
         with mock.patch(
@@ -21794,7 +21977,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             mock.patch("bot.speak_reply"):
             await bot.on_voice(update, None)
         gem.assert_awaited_once()
-        groq.assert_not_called()
+        groq.assert_awaited_once()
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("could not understand", msg.text_sent[0].lower())
         self.assertNotIn("You said:", msg.text_sent[0])
@@ -21805,7 +21988,8 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         # Amharic, it flowed into the order flow and was classified
         # off_topic. The garbage guard must reject Latin gibberish
         # for an Amharic user: one honest line, no "You said:",
-        # Groq never called, nothing parked in the draft.
+        # Groq is raced but its mock result is unusable, nothing
+        # parked in the draft.
         bot.LAST_LANG[1] = "am"
         msg = FakeVoiceMessage()
         update = FakeUpdate(msg)
@@ -21822,7 +22006,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             await bot.on_voice(update, None)
         gem.assert_awaited_once()
         self.assertEqual(gem.await_args.kwargs, {"language": "am"})
-        groq.assert_not_called()
+        groq.assert_awaited_once()
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("could not understand", msg.text_sent[0].lower())
         self.assertNotIn("You said:", msg.text_sent[0])
@@ -21853,7 +22037,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
                 "bot.paxyo", FakePaxyo()
             ), mock.patch("bot.speak_reply"):
                 await bot.on_voice(update, None)
-            groq.assert_not_called()
+            groq.assert_awaited_once()
             self.assertEqual(len(msg.text_sent), 1)
             self.assertIn(
                 "could not understand", msg.text_sent[0].lower()
@@ -22033,7 +22217,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             await bot.on_voice(update, None)
         self.assertEqual(fake.session_loads, [1])
         self.assertEqual(gem.await_args.kwargs, {"language": "am"})
-        groq.assert_not_called()
+        groq.assert_awaited_once()
         self.assertIn("12 ሺህ ፎሎወር እፈልጋለሁ", msg.text_sent[0])
 
     def test_recognisable_english_rejects_whisper_gibberish(self):
@@ -25607,6 +25791,56 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
         text = client.posts[0]["json"]["contents"][0]["parts"][0]["text"]
         self.assertIn("English", text)
         self.assertNotIn("Ge'ez", text)
+
+    async def test_gemini_transcribe_uses_transcribe_model(self):
+        # Owner, 18 Nov 2026: the transcription model is
+        # separately configurable (GEMINI_TRANSCRIBE_MODEL) so the
+        # owner can point transcription at a faster model later
+        # without a code change. It defaults to GEMINI_MODEL and
+        # only gemini_transcribe reads it.
+        self.assertEqual(
+            bot.GEMINI_TRANSCRIBE_MODEL, bot.GEMINI_MODEL
+        )
+        client = FlakyClient([
+            FakeCloudTTSResponse({"candidates": [{"content": {"parts": [
+                {"text": "hi"}]}}]})
+        ])
+        with mock.patch.object(
+            bot, "GEMINI_TRANSCRIBE_MODEL", "gemini-2.0-flash"
+        ), mock.patch.object(
+            bot, "GEMINI_MODEL", "gemini-3.5-flash"
+        ), mock.patch(
+            "bot.httpx.AsyncClient", return_value=client
+        ), mock.patch.object(
+            bot.asyncio, "sleep", new=mock.AsyncMock()
+        ):
+            self.assertEqual(
+                await bot.gemini_transcribe(b"fake-ogg"), "hi"
+            )
+        self.assertIn("gemini-2.0-flash", client.posts[0]["url"])
+        self.assertNotIn("gemini-3.5-flash", client.posts[0]["url"])
+
+    async def test_gemini_generate_uses_chat_model_not_transcribe_model(self):
+        # Chat keeps GEMINI_MODEL even when a different
+        # transcription model is configured.
+        client = FlakyClient([
+            FakeCloudTTSResponse({"candidates": [{"content": {"parts": [
+                {"text": "hi"}]}}]})
+        ])
+        with mock.patch.object(
+            bot, "GEMINI_TRANSCRIBE_MODEL", "gemini-2.0-flash"
+        ), mock.patch.object(
+            bot, "GEMINI_MODEL", "gemini-3.5-flash"
+        ), mock.patch(
+            "bot.httpx.AsyncClient", return_value=client
+        ), mock.patch.object(
+            bot.asyncio, "sleep", new=mock.AsyncMock()
+        ):
+            self.assertEqual(
+                await bot.gemini_generate("hello"), "hi"
+            )
+        self.assertIn("gemini-3.5-flash", client.posts[0]["url"])
+        self.assertNotIn("gemini-2.0-flash", client.posts[0]["url"])
 
     # (5) Golden-dataset rows at the handler level --------------------
 
