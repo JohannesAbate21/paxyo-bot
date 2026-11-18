@@ -23,7 +23,7 @@ All configuration comes from environment variables. No secret is ever
 written to a file or a log by this program.
 
 Voice input: a voice message is downloaded and transcribed by
-racing Gemini and Groq Whisper in parallel (first usable result
+racing Gemini, Chirp 3 and Groq Whisper in parallel (first usable result
 wins; owner, 18 Nov 2026) and handled exactly like the same typed
 message; the
 same typed message; the transcription is shown to the user ("You
@@ -100,6 +100,30 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 GEMINI_TRANSCRIBE_MODEL = os.environ.get(
     "GEMINI_TRANSCRIBE_MODEL", GEMINI_MODEL
 )
+# Google Cloud Speech-to-Text (Chirp 3) — the THIRD voice
+# transcriber (owner, 18 Nov 2026: Gemini hears Amharic right
+# but takes 17-30s+ on the free tier, Groq is fast but garbles
+# Amharic — Chirp 3 is the paid dedicated speech system to try
+# first). Chirp 3 is V2-only, model id "chirp_3", and supports
+# Amharic am-ET (Preview). Auth is an API key in the
+# x-goog-api-key header — the same shape the bot already uses
+# for Google Cloud TTS (cloud_tts_speak) — BUT this is NOT
+# verified for Speech-to-Text V2: the V2 REST reference lists
+# OAuth scope + the speech.recognizers.recognize IAM permission
+# only, and no API key appears in the documented V2 flow. The
+# first live call is the test: a 401/403 means the owner needs
+# a service-account OAuth token instead (which would need a
+# google-auth dependency — not installed — so it is a separate
+# job, not a config change). Location defaults to "us": Chirp 3
+# is GA only in the us and eu multi-regions, and is NOT listed
+# for the global location — a global recognizer path would fail.
+# The key and project id are Fly secrets, never in code. When
+# either is missing, ai_transcribe races exactly as before
+# (Gemini + Groq) — zero behaviour change without credentials.
+GOOGLE_CLOUD_STT_API_KEY = os.environ.get("GOOGLE_CLOUD_STT_API_KEY", "")
+GOOGLE_CLOUD_STT_PROJECT_ID = os.environ.get("GOOGLE_CLOUD_STT_PROJECT_ID", "")
+GOOGLE_CLOUD_STT_MODEL = os.environ.get("GOOGLE_CLOUD_STT_MODEL", "chirp_3")
+GOOGLE_CLOUD_STT_LOCATION = os.environ.get("GOOGLE_CLOUD_STT_LOCATION", "us")
 # OpenAI (ChatGPT) — the seventh AI since 17 Nov 2026, now behind
 # Groq, DeepSeek, Grok, Zen, Qwen and Mistral: the Gemini free-tier key kept hitting its
 # per-minute limit (429), so when OPENAI_API_KEY is set the bot
@@ -138,8 +162,8 @@ GROQ_URL = "https://api.groq.com/openai/v1"
 # GROK_API_KEY is set; without the key the order is unchanged
 # (Groq first, DeepSeek second). A Grok failure — including its daily limit —
 # falls through to Zen automatically in ai_generate. Grok has
-# no voice transcription — ai_transcribe races Gemini and Groq
-# Whisper in parallel.
+# no voice transcription — ai_transcribe races Gemini, Chirp 3
+# and Groq Whisper in parallel.
 # The key is a Fly secret, never in code. NOTE: GROQ_API_KEY is a
 # different company (Groq) and cannot be used for Grok.
 GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
@@ -155,7 +179,7 @@ GROK_URL = "https://api.x.ai/v1"
 # deepseek-chat (V4.1 Flash): $0.15/1M input, $0.60/1M output
 # off-peak (double at peak); new accounts get 5M free tokens for
 # 30 days. DeepSeek has no voice transcription — ai_transcribe
-# races Gemini and Groq Whisper in parallel. The key is a Render env var, never in code.
+# races Gemini, Chirp 3 and Groq Whisper in parallel. The key is a Render env var, never in code.
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_URL = "https://api.deepseek.com/v1"
@@ -6962,6 +6986,15 @@ AI_TRANSIENT_RETRY_DELAY_SECONDS = 0.5
 # guarantee for chat replies depends on it.
 GEMINI_MEDIA_TIMEOUT_SECONDS = 30.0
 
+# Google Cloud Speech-to-Text (Chirp 3) transcription budget
+# (18 Nov 2026): Chirp is a dedicated speech system and should
+# answer in seconds, so one attempt gets 15s — no retry inside
+# chirp_transcribe, the race handles fallbacks. A 15s Chirp
+# timeout is what the worst case costs when Gemini is slow and
+# Groq garbles; the 5s text budget for chat/translate is
+# untouched.
+CHIRP_TRANSCRIBE_TIMEOUT_SECONDS = 15.0
+
 
 async def _gemini_post(payload: dict,
                        timeout: float = AI_POST_TIMEOUT_SECONDS,
@@ -7348,13 +7381,104 @@ async def groq_transcribe(audio_bytes: bytes, language: str = None) -> str:
     return str(data.get("text") or "").strip()
 
 
+# ------------------------------------------- Google Cloud STT (Chirp 3) ----
+# The third voice transcriber (owner, 18 Nov 2026): Google Cloud
+# Speech-to-Text V2, model chirp_3 — a dedicated speech system,
+# not a chatbot AI. Endpoint, body and language codes verified
+# from Google's docs (18 Nov 2026):
+#   https://cloud.google.com/speech-to-text/v2/docs/reference/rest/v2/projects.locations.recognizers/recognize
+#   https://cloud.google.com/speech-to-text/docs/models/chirp-3
+#   https://cloud.google.com/speech-to-text/v2/docs/speech-to-text-supported-languages
+# POST {location}-speech.googleapis.com/v2/projects/{project}/
+# locations/{location}/recognizers/_:recognize — the "_" is an
+# empty implicit Recognizer, so no recognizer resource has to be
+# created first. Auth is the API key in the x-goog-api-key header
+# (same shape as cloud_tts_speak). Amharic is am-ET (Preview for
+# chirp_3); Tigrinya is NOT in Chirp 3's language list at all and
+# Oromo om-ET is chirp_2-only, so both fall back to ["auto"] —
+# Chirp 3's language-agnostic auto-detection (GA) — rather than
+# an invented code. Telegram voice notes are Opus in an Ogg
+# container, so the decoding config is explicit OGG_OPUS at
+# 48000 Hz mono — the sample rate Telegram Opus always uses.
+
+_CHIRP_LANGUAGE_CODES = {"am": ["am-ET"], "en": ["en-US"]}
+
+
+def _chirp_host(location: str) -> str:
+    """Speech-to-Text V2 host for a location: regional endpoints
+    are {location}-speech.googleapis.com (us/eu), the global one
+    is speech.googleapis.com."""
+    if location in ("us", "eu"):
+        return f"{location}-speech.googleapis.com"
+    if location == "global":
+        return "speech.googleapis.com"
+    return f"{location}-speech.googleapis.com"
+
+
+def _chirp_url() -> str:
+    """The recognize URL for the configured project/location."""
+    return (
+        f"https://{_chirp_host(GOOGLE_CLOUD_STT_LOCATION)}/v2/"
+        f"projects/{GOOGLE_CLOUD_STT_PROJECT_ID}/locations/"
+        f"{GOOGLE_CLOUD_STT_LOCATION}/recognizers/_:recognize"
+    )
+
+
+def build_chirp_payload(audio_bytes: bytes, language: str = None) -> dict:
+    """The Speech-to-Text V2 recognize body for a voice note:
+    model + language codes + explicit OGG_OPUS decoding, and the
+    audio as base64 content. A hint the model does not list
+    (Tigrinya, Oromo) becomes ["auto"] — auto-detect — never a
+    guessed code."""
+    return {
+        "config": {
+            "model": GOOGLE_CLOUD_STT_MODEL,
+            "languageCodes": _CHIRP_LANGUAGE_CODES.get(language, ["auto"]),
+            "explicitDecodingConfig": {
+                "encoding": "OGG_OPUS",
+                "sampleRateHertz": 48000,
+                "audioChannelCount": 1,
+            },
+        },
+        "content": base64.b64encode(audio_bytes).decode(),
+    }
+
+
+async def chirp_transcribe(audio_bytes: bytes, language: str = None) -> str:
+    """Transcribe a Telegram voice message (.ogg) with Google
+    Cloud Speech-to-Text (Chirp 3). Returns the best alternative
+    of the first result, or "" when unconfigured or the response
+    carries no transcript. Raises on HTTP/transport failure —
+    one attempt only, no retry inside this function; the race in
+    ai_transcribe handles fallbacks, and the failure is logged
+    there (provider + exception type only, never the key)."""
+    if not GOOGLE_CLOUD_STT_API_KEY or not GOOGLE_CLOUD_STT_PROJECT_ID:
+        return ""
+    async with httpx.AsyncClient(
+        timeout=CHIRP_TRANSCRIBE_TIMEOUT_SECONDS, trust_env=False
+    ) as client:
+        resp = await client.post(
+            _chirp_url(),
+            headers={"x-goog-api-key": GOOGLE_CLOUD_STT_API_KEY},
+            json=build_chirp_payload(audio_bytes, language),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    try:
+        return str(
+            data["results"][0]["alternatives"][0]["transcript"] or ""
+        ).strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 # ------------------------------------------------------ Grok ------
 # Grok (xAI) is the third AI since 17 Nov 2026 (owner: Groq first,
 # DeepSeek second, Grok third). xAI's API is OpenAI-compatible, so
 # the three functions below mirror the DeepSeek ones exactly (same
 # inputs, same outputs, same retry shape), with xAI's base URL and
 # its own key/model env vars. Grok has no voice transcription —
-# ai_transcribe races Gemini and Groq Whisper in parallel —
+# ai_transcribe races Gemini, Chirp 3 and Groq Whisper in parallel —
 # and pictures stay on
 # OpenAI/Gemini vision.
 
@@ -7418,7 +7542,7 @@ async def grok_generate(prompt: str, system: str = None) -> str:
 # mirror the Groq ones exactly (same inputs, same outputs, same
 # retry shape), with DeepSeek's base URL and its own key/model env
 # vars. DeepSeek has no voice transcription — ai_transcribe races
-# Gemini and Groq Whisper in parallel — and pictures stay on OpenAI/Gemini vision.
+# Gemini, Chirp 3 and Groq Whisper in parallel — and pictures stay on OpenAI/Gemini vision.
 
 async def _deepseek_post(path: str, headers=None, json=None) -> dict:
     """One POST to the DeepSeek API, with fast failover (17 Nov 2026): an HTTP error
@@ -8152,19 +8276,23 @@ def _transcription_usable(text, language=None) -> bool:
 
 
 async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
-    """Voice transcription, RACED (owner, 18 Nov 2026): Gemini and
-    Groq Whisper run IN PARALLEL and the first USABLE result wins.
+    """Voice transcription, RACED (owner, 18 Nov 2026): Gemini,
+    Google Cloud Speech-to-Text (Chirp 3) and Groq Whisper run IN
+    PARALLEL and the first USABLE result wins.
     Live 18 Nov 2026, 07:34 EAT: Gemini hears Amharic correctly
     (\"ሰላም የኢንስታግራም ፎሎወር ፈልጌ ነበረ\") but took 30s + 30s + 17s
     = 80s on the free tier, while Groq answers in ~0.3s but
     garbles Amharic 3 times in 4 — so Gemini-then-Groq is slow
     and Groq-then-Gemini is wrong. Racing takes Groq's answer
     when it is readable (~1-2s) and waits for Gemini when it is
-    not. Gemini is attempted ONCE per call — no second 30s
+    not. Chirp 3 joins the race when its key and project id are
+    set (owner, 18 Nov 2026: the paid dedicated speech system);
+    without them the race is exactly Gemini + Groq, unchanged.
+    Gemini is attempted ONCE per call — no second 30s
     retry: the 30+30 doubling is what made 80s. When one wins
     the other task is cancelled, so the bot does not pay for
-    both; when both finish at once Gemini's text wins, because
-    it hears Amharic right where Groq garbles it. Worst case
+    all three; when several finish at once the tie-break is
+    Gemini, then Chirp, then Groq. Worst case
     per call is one Gemini media budget (~30s) plus the chat
     reply — when Gemini is unreachable AND Groq garbles, the
     answer is an honest \"could not understand\" after ~30s,
@@ -8173,23 +8301,33 @@ async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
     wrong text to the order flow.
     `language` is a hint (\"am\", \"ti\", \"om\", \"en\") — None means
     auto-detect."""
-    gemini_task = asyncio.create_task(
-        gemini_transcribe(audio_bytes, language=language)
+    racers = [
+        ("Gemini", gemini_transcribe(audio_bytes, language=language),
+         GEMINI_MEDIA_TIMEOUT_SECONDS),
+    ]
+    if GOOGLE_CLOUD_STT_API_KEY and GOOGLE_CLOUD_STT_PROJECT_ID:
+        racers.append(
+            ("Chirp", chirp_transcribe(audio_bytes, language=language),
+             CHIRP_TRANSCRIBE_TIMEOUT_SECONDS)
+        )
+    racers.append(
+        ("Groq", groq_transcribe(audio_bytes, language=language),
+         AI_POST_TIMEOUT_SECONDS)
     )
-    groq_task = asyncio.create_task(
-        groq_transcribe(audio_bytes, language=language)
-    )
-    pending = {gemini_task, groq_task}
+    tasks = {}
+    for name, coro, timeout in racers:
+        tasks[asyncio.create_task(coro)] = (name, timeout)
+    pending = set(tasks)
     try:
         while pending:
             done, pending = await asyncio.wait(
                 pending, return_when=asyncio.FIRST_COMPLETED
             )
-            # Gemini first on a tie: when both already finished,
-            # its text wins — it hears Amharic right where Groq
-            # garbles it. (In real time the first finisher wins;
-            # a tie only happens when both answered at once.)
-            for task in (gemini_task, groq_task):
+            # Tie-break is the racers order (Gemini, Chirp, Groq):
+            # when several already finished, the most accurate
+            # for Amharic wins. (In real time the first finisher
+            # wins; a tie only happens when they answered at once.)
+            for task, (name, timeout) in tasks.items():
                 if task not in done:
                     continue
                 try:
@@ -8198,16 +8336,9 @@ async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
                     raise
                 except Exception as exc:
                     _log_ai_failure(
-                        "Gemini transcribe failed"
-                        if task is gemini_task
-                        else "Groq transcribe failed",
+                        f"{name} transcribe failed",
                         exc,
-                        note=_exc_note(
-                            exc,
-                            GEMINI_MEDIA_TIMEOUT_SECONDS
-                            if task is gemini_task
-                            else AI_POST_TIMEOUT_SECONDS,
-                        ),
+                        note=_exc_note(exc, timeout),
                     )
                     continue
                 if _transcription_usable(text, language):
@@ -8216,7 +8347,7 @@ async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
                     return text
                 log.warning(
                     "%s transcribe unusable, waiting for the other",
-                    "Gemini" if task is gemini_task else "Groq",
+                    name,
                 )
         return ""
     finally:
@@ -8321,8 +8452,8 @@ def _recognisable_english(text: str) -> bool:
 
 
 async def transcribe_voice_with_retry(audio, user_id: int, user_lang: str) -> str:
-    """Transcribe a voice note — ai_transcribe races Gemini and
-    Groq Whisper in parallel (owner, 18 Nov 2026) and the first
+    """Transcribe a voice note — ai_transcribe races Gemini,
+    Chirp 3 and Groq Whisper in parallel (owner, 18 Nov 2026) and the first
     usable result wins; Gemini hears Amharic correctly where
     Groq Whisper mis-heard it, e.g. "12 ሺህ ፎሎወር እፈልጋለሁ".
     The first try hints the user's language

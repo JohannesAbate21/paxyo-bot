@@ -3936,6 +3936,252 @@ class TestCloudTTS(unittest.IsolatedAsyncioTestCase):
         client_cls.assert_not_called()
 
 
+def chirp_response(transcript="ሰላም"):
+    """A successful Speech-to-Text V2 recognize response."""
+    return FakeCloudTTSResponse(
+        {"results": [{"alternatives": [{"transcript": transcript}]}]}
+    )
+
+
+def chirp_http_error(status):
+    """An httpx HTTPStatusError with the given status, for the
+    mocked Chirp client to raise from raise_for_status."""
+    req = bot.httpx.Request(
+        "POST",
+        "https://us-speech.googleapis.com/v2/projects/test-project/"
+        "locations/us/recognizers/_:recognize",
+    )
+    return bot.httpx.HTTPStatusError(
+        f"{status}", request=req,
+        response=bot.httpx.Response(status, request=req),
+    )
+
+
+class TestChirpTranscribe(unittest.IsolatedAsyncioTestCase):
+    """Google Cloud Speech-to-Text (Chirp 3) transcription,
+    owner 18 Nov 2026: the paid dedicated speech system raced
+    with Gemini and Groq. Endpoint, body and language codes
+    verified from Google's docs — the recognize method, the
+    Chirp 3 model page and the V2 language table — not guessed."""
+
+    def _patched_client(self, response):
+        client = FakeAsyncClient(response)
+        return mock.patch("bot.httpx.AsyncClient", return_value=client), client
+
+    def _configured(self):
+        """Patch the Chirp env vars to a configured state."""
+        return (
+            mock.patch.object(bot, "GOOGLE_CLOUD_STT_API_KEY", "test-chirp-key"),
+            mock.patch.object(bot, "GOOGLE_CLOUD_STT_PROJECT_ID", "test-project"),
+        )
+
+    async def test_chirp_200_returns_geez_text_and_sends_verified_body(self):
+        patcher, client = self._patched_client(chirp_response("ሰላም"))
+        key, project = self._configured()
+        with patcher, key, project:
+            self.assertEqual(
+                await bot.chirp_transcribe(b"fake-ogg-bytes", language="am"),
+                "ሰላም",
+            )
+        self.assertEqual(len(client.posts), 1)
+        post = client.posts[0]
+        self.assertEqual(
+            post["url"],
+            "https://us-speech.googleapis.com/v2/projects/test-project/"
+            "locations/us/recognizers/_:recognize",
+        )
+        self.assertEqual(post["headers"]["x-goog-api-key"], "test-chirp-key")
+        import base64 as _b64
+
+        self.assertEqual(
+            post["json"],
+            {
+                "config": {
+                    "model": "chirp_3",
+                    "languageCodes": ["am-ET"],
+                    "explicitDecodingConfig": {
+                        "encoding": "OGG_OPUS",
+                        "sampleRateHertz": 48000,
+                        "audioChannelCount": 1,
+                    },
+                },
+                "content": _b64.b64encode(b"fake-ogg-bytes").decode(),
+            },
+        )
+
+    async def test_chirp_language_mapping(self):
+        # am-ET is in Chirp 3's list (Preview); en-US is GA.
+        # Tigrinya is in NO Chirp 3 list and Oromo om-ET is
+        # chirp_2-only, so both become ["auto"] — Chirp 3's
+        # language-agnostic auto-detection — never a guessed code.
+        self.assertEqual(
+            bot.build_chirp_payload(b"x", "am")["config"]["languageCodes"],
+            ["am-ET"],
+        )
+        self.assertEqual(
+            bot.build_chirp_payload(b"x", "en")["config"]["languageCodes"],
+            ["en-US"],
+        )
+        for hint in ("ti", "om", None, "fr"):
+            self.assertEqual(
+                bot.build_chirp_payload(b"x", hint)["config"]["languageCodes"],
+                ["auto"],
+            )
+
+    async def test_chirp_endpoint_url_uses_project_and_location(self):
+        key, project = self._configured()
+        with key, project, mock.patch.object(
+            bot, "GOOGLE_CLOUD_STT_LOCATION", "eu"
+        ):
+            self.assertEqual(
+                bot._chirp_url(),
+                "https://eu-speech.googleapis.com/v2/projects/test-project/"
+                "locations/eu/recognizers/_:recognize",
+            )
+        # Default location is us (Chirp 3 is GA only in us/eu,
+        # not global), so the default host is us-speech.
+        with key, project:
+            self.assertIn("us-speech.googleapis.com", bot._chirp_url())
+            self.assertIn("locations/us/", bot._chirp_url())
+
+    async def test_chirp_no_key_returns_empty_without_network(self):
+        with mock.patch("bot.httpx.AsyncClient") as client_cls, \
+             mock.patch.object(bot, "GOOGLE_CLOUD_STT_API_KEY", ""), \
+             mock.patch.object(bot, "GOOGLE_CLOUD_STT_PROJECT_ID", "test-project"):
+            self.assertEqual(await bot.chirp_transcribe(b"x"), "")
+        client_cls.assert_not_called()
+
+    async def test_chirp_no_project_returns_empty_without_network(self):
+        with mock.patch("bot.httpx.AsyncClient") as client_cls, \
+             mock.patch.object(bot, "GOOGLE_CLOUD_STT_API_KEY", "test-key"), \
+             mock.patch.object(bot, "GOOGLE_CLOUD_STT_PROJECT_ID", ""):
+            self.assertEqual(await bot.chirp_transcribe(b"x"), "")
+        client_cls.assert_not_called()
+
+    async def test_chirp_http_error_raises_for_the_race_to_log(self):
+        patcher, _ = self._patched_client(
+            FakeCloudTTSResponse(error=chirp_http_error(403))
+        )
+        key, project = self._configured()
+        with patcher, key, project:
+            with self.assertRaises(bot.httpx.HTTPStatusError):
+                await bot.chirp_transcribe(b"x")
+
+    async def test_chirp_empty_results_returns_empty(self):
+        for payload in ({}, {"results": []}, {"results": [{}]}):
+            patcher, _ = self._patched_client(FakeCloudTTSResponse(payload))
+            key, project = self._configured()
+            with patcher, key, project:
+                self.assertEqual(await bot.chirp_transcribe(b"x"), "")
+
+    async def test_race_chirp_fast_usable_wins_over_slow_gemini(self):
+        # Chirp answers at once while Gemini is still working:
+        # the race returns Chirp's usable Ge'ez text instead of
+        # waiting ~15-30s for Gemini. Groq's gibberish is
+        # unusable, so it never wins.
+        async def slow_gemini(*args, **kwargs):
+            await asyncio.sleep(10)
+            return "ሰላም"
+
+        key, project = self._configured()
+        with key, project, \
+             mock.patch(
+                 "bot.gemini_transcribe", new=mock.AsyncMock(
+                     side_effect=slow_gemini
+                 ),
+             ), mock.patch(
+                 "bot.chirp_transcribe",
+                 new=mock.AsyncMock(return_value="ሰላም የኢንስታግራም"),
+             ) as chirp, mock.patch(
+                 "bot.groq_transcribe",
+                 new=mock.AsyncMock(
+                     return_value="Asherahulet tishifu lorafel li galo."
+                 ),
+             ):
+            self.assertEqual(
+                await bot.ai_transcribe(b"x", language="am"),
+                "ሰላም የኢንስታግራም",
+            )
+        chirp.assert_awaited_once()
+
+    async def test_race_chirp_unconfigured_not_called(self):
+        # No key/project: the race is exactly Gemini + Groq, as
+        # before — Chirp is never even started.
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(return_value="ሰላም"),
+        ) as gem, mock.patch(
+            "bot.chirp_transcribe", new=mock.AsyncMock()
+        ) as chirp, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value="hello"),
+        ) as groq:
+            self.assertEqual(await bot.ai_transcribe(b"x"), "ሰላም")
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+        chirp.assert_not_called()
+
+    async def test_race_chirp_beats_groq_on_tie(self):
+        # Gemini down; Chirp and Groq answer at once: Chirp's
+        # text wins the tie — it is a dedicated speech system,
+        # Groq garbles Amharic.
+        key, project = self._configured()
+        with key, project, \
+             mock.patch(
+                 "bot.gemini_transcribe",
+                 new=mock.AsyncMock(side_effect=RuntimeError("gemini down")),
+             ), mock.patch(
+                 "bot.chirp_transcribe",
+                 new=mock.AsyncMock(return_value="ሰላም"),
+             ) as chirp, mock.patch(
+                 "bot.groq_transcribe",
+                 new=mock.AsyncMock(return_value="hello"),
+             ) as groq:
+            self.assertEqual(await bot.ai_transcribe(b"x"), "ሰላም")
+        chirp.assert_awaited_once()
+        groq.assert_awaited_once()
+
+    async def test_race_chirp_http_errors_fall_through_to_gemini(self):
+        # A Chirp 403, 429 or 500 is logged as failed (provider
+        # + exception type, never the key) and Gemini's usable
+        # text still wins — one provider being down never
+        # silences a voice note. Gemini is slow here on purpose:
+        # if it answered at once it would win the race before
+        # Chirp's failure was ever observed, so the log line
+        # would legitimately never fire.
+        async def slow_gemini(*args, **kwargs):
+            await asyncio.sleep(2)
+            return "ሰላም"
+
+        for status in (403, 429, 500):
+            with self.subTest(status=status):
+                key, project = self._configured()
+                with key, project, \
+                     mock.patch(
+                         "bot.gemini_transcribe",
+                         new=mock.AsyncMock(side_effect=slow_gemini),
+                     ) as gem, mock.patch(
+                         "bot.chirp_transcribe",
+                         new=mock.AsyncMock(
+                             side_effect=chirp_http_error(status)
+                         ),
+                     ) as chirp, mock.patch(
+                         "bot.groq_transcribe",
+                         new=mock.AsyncMock(
+                             return_value="Yansar alutte si forora veli vello."
+                         ),
+                     ), self.assertLogs("paxorder_bot", level="WARNING") as logs:
+                    self.assertEqual(
+                        await bot.ai_transcribe(b"x", language="am"), "ሰላም"
+                    )
+                gem.assert_awaited_once()
+                chirp.assert_awaited_once()
+                joined = "\n".join(logs.output)
+                self.assertIn("Chirp transcribe failed (HTTPStatusError)", joined)
+                self.assertIn(f"HTTP {status}", joined)
+                self.assertNotIn("test-chirp-key", joined)
+
+
 class TestWebhook(unittest.TestCase):
     """Webhook URL/path/port building from the environment.
 
