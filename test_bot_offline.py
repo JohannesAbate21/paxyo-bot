@@ -11500,7 +11500,11 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
         groq.assert_not_called()
         gen.assert_not_called()
 
-    async def test_ai_transcribe_prefers_groq(self):
+    async def test_ai_transcribe_prefers_gemini(self):
+        # Owner, 18 Nov 2026: ALL voice transcription goes to
+        # Gemini (it hears Amharic correctly where Groq Whisper
+        # mis-heard "12 ሺህ ፎሎወር እፈልጋለሁ"). Groq and OpenAI are
+        # not called when Gemini answers.
         with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
              mock.patch(
                  "bot.groq_transcribe",
@@ -11510,29 +11514,69 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
                  "bot.openai_transcribe", new=mock.AsyncMock()
              ) as oai, \
              mock.patch(
-                 "bot.gemini_transcribe", new=mock.AsyncMock()
+                 "bot.gemini_transcribe",
+                 new=mock.AsyncMock(return_value="gem"),
              ) as gem:
-            self.assertEqual(await bot.ai_transcribe(b"x"), "g")
-        groq.assert_awaited_once()
+            self.assertEqual(await bot.ai_transcribe(b"x"), "gem")
+        gem.assert_awaited_once()
+        groq.assert_not_called()
         oai.assert_not_called()
-        gem.assert_not_called()
 
-    async def test_ai_transcribe_falls_through_to_gemini(self):
+    async def test_ai_transcribe_falls_back_to_groq_when_gemini_raises(self):
+        # Gemini down: Groq Whisper is the emergency fallback, so
+        # a voice note never goes silent because one provider is
+        # down. OpenAI is not in the transcription path any more.
         with mock.patch.object(bot, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(bot, "OPENAI_API_KEY", ""), \
-             mock.patch(
-                 "bot.groq_transcribe",
-                 new=mock.AsyncMock(
-                     side_effect=RuntimeError("groq down")
-                 ),
-             ) as groq, \
              mock.patch(
                  "bot.gemini_transcribe",
+                 new=mock.AsyncMock(
+                     side_effect=RuntimeError("gemini down")
+                 ),
+             ) as gem, \
+             mock.patch(
+                 "bot.groq_transcribe",
                  new=mock.AsyncMock(return_value="g"),
-             ) as gem:
+             ) as groq, \
+             mock.patch(
+                 "bot.openai_transcribe", new=mock.AsyncMock()
+             ) as oai:
             self.assertEqual(await bot.ai_transcribe(b"x"), "g")
-        groq.assert_awaited_once()
         gem.assert_awaited_once()
+        groq.assert_awaited_once()
+        oai.assert_not_called()
+
+    async def test_ai_transcribe_returns_empty_when_all_providers_fail(self):
+        # Gemini and Groq both down: "" so the caller answers
+        # honestly (transcribe_failed) instead of feeding wrong
+        # text to the order flow.
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=RuntimeError("gemini down")),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(side_effect=RuntimeError("groq down")),
+        ) as groq:
+            self.assertEqual(await bot.ai_transcribe(b"x"), "")
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
+    async def test_ai_transcribe_passes_language_hint_to_gemini(self):
+        # The hint reaches Gemini (it names the language in its
+        # prompt), so a hinted retry is really hinted.
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(return_value="ሰላም"),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ) as groq:
+            self.assertEqual(
+                await bot.ai_transcribe(b"x", language="am"), "ሰላም"
+            )
+        gem.assert_awaited_once()
+        self.assertEqual(
+            gem.await_args.kwargs, {"language": "am"}
+        )
+        groq.assert_not_called()
 
 
 class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
@@ -11544,8 +11588,8 @@ class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
     expensive vs DeepSeek and only runs when GROK_API_KEY is set;
     without the key the order is unchanged (Groq first, DeepSeek
     second).
-    Grok has no voice transcription — ai_transcribe stays on
-    Groq Whisper. NOTE: GROQ_API_KEY is a different company
+    Grok has no voice transcription — ai_transcribe is Gemini
+    (Groq only as emergency fallback). NOTE: GROQ_API_KEY is a different company
     (Groq) and cannot be used for Grok."""
 
     def _status_error(self, status):
@@ -11724,7 +11768,7 @@ class TestDeepSeekProvider(unittest.IsolatedAsyncioTestCase):
     so the provider mirrors Groq exactly.
     Order: Groq -> DeepSeek -> Grok -> Zen -> Qwen -> Mistral ->
     OpenAI -> Gemini -> Kilo -> OpenRouter -> GLM. DeepSeek has no
-    voice transcription — ai_transcribe stays on Groq Whisper."""
+    voice transcription — ai_transcribe is Gemini (Groq only as emergency fallback)."""
 
     def _status_error(self, status):
         req = bot.httpx.Request(
@@ -21426,6 +21470,137 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             mock.patch("bot.paxyo", FakePaxyo()), \
             mock.patch("bot.speak_reply"):
             await bot.on_voice(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("could not understand", msg.text_sent[0].lower())
+        self.assertNotIn("You said:", msg.text_sent[0])
+
+    async def test_voice_amharic_uses_gemini_not_groq(self):
+        # Owner, 18 Nov 2026: he said "12 ሺህ ፎሎወር እፈልጋለሁ"
+        # ("I want 12 thousand followers") and Groq Whisper
+        # mis-heard it while Gemini heard it correctly — so ALL
+        # voice transcription goes to Gemini. An Amharic user
+        # speaking Amharic must be transcribed by Gemini, Groq
+        # must not be called, and the phrase must reach the order
+        # flow with quantity 12000 and followers.
+        bot.LAST_LANG[1] = "am"
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        intent = intent_of(
+            "order", service_hint="followers", quantity=12000
+        )
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(
+                return_value="12 ሺህ ፎሎወር እፈልጋለሁ"
+            ),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ) as groq, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.on_voice(update, None)
+        gem.assert_awaited_once()
+        # First attempt auto-detects (no forced language): an
+        # Amharic-language user speaking English must still be
+        # heard in English.
+        self.assertEqual(gem.await_args.kwargs, {"language": None})
+        groq.assert_not_called()
+        self.assertIn("You said:", msg.text_sent[0])
+        self.assertIn("12 ሺህ ፎሎወር እፈልጋለሁ", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL[1]["quantity"], 12000)
+        self.assertEqual(bot.PARTIAL[1]["service_hint"], "followers")
+
+    async def test_voice_amharic_phrase_flows_like_typed_text(self):
+        # The exact phrase, once transcribed correctly, behaves
+        # exactly like the same typed message: the voice run adds
+        # only the "You said:" line in front.
+        bot.LAST_LANG[1] = "am"
+        phrase = "12 ሺህ ፎሎወር እፈልጋለሁ"
+        intent = intent_of(
+            "order", service_hint="followers", quantity=12000
+        )
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.handle_order_text(update, None, phrase)
+        typed = list(msg.text_sent)
+        bot.PARTIAL.clear()
+        bot.PENDING.clear()
+        vmsg = FakeVoiceMessage()
+        vupdate = FakeUpdate(vmsg)
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(return_value=phrase),
+        ), mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.on_voice(vupdate, None)
+        self.assertIn("You said:", vmsg.text_sent[0])
+        self.assertIn(phrase, vmsg.text_sent[0])
+        self.assertEqual(vmsg.text_sent[1:], typed)
+        self.assertEqual(bot.PARTIAL[1]["quantity"], 12000)
+        self.assertEqual(bot.PARTIAL[1]["service_hint"], "followers")
+
+    async def test_voice_english_uses_gemini_not_groq(self):
+        # An English voice note goes to Gemini too — no language
+        # is forced, so auto-detect hears the English.
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        intent = intent_of("off_topic")
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(
+                return_value="I want one thousand followers"
+            ),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ) as groq, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ), mock.patch(
+            "bot.ai_generate",
+            new=mock.AsyncMock(return_value="Sure — which platform?"),
+        ):
+            await bot.on_voice(update, None)
+        gem.assert_awaited_once()
+        self.assertEqual(gem.await_args.kwargs, {"language": None})
+        groq.assert_not_called()
+        self.assertIn("You said:", msg.text_sent[0])
+        self.assertIn(
+            "I want one thousand followers", msg.text_sent[0]
+        )
+
+    async def test_voice_gemini_empty_fails_honestly_without_groq(self):
+        # Gemini returns empty text: answer honestly
+        # (transcribe_failed) — do not fall back to another
+        # provider and risk feeding wrong text to the order flow.
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(return_value=""),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ) as groq, mock.patch("bot.paxyo", FakePaxyo()), \
+            mock.patch("bot.speak_reply"):
+            await bot.on_voice(update, None)
+        gem.assert_awaited_once()
+        groq.assert_not_called()
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("could not understand", msg.text_sent[0].lower())
         self.assertNotIn("You said:", msg.text_sent[0])

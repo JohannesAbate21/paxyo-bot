@@ -22,8 +22,9 @@ The code is structured so a status monitor can be added later: see
 All configuration comes from environment variables. No secret is ever
 written to a file or a log by this program.
 
-Voice input: a voice message is downloaded and transcribed (Groq
-Whisper first, then OpenAI, then Gemini) and handled exactly like the
+Voice input: a voice message is downloaded and transcribed with
+Gemini (Groq Whisper only as an emergency fallback if Gemini
+errors) and handled exactly like the same typed message; the
 same typed message; the transcription is shown to the user ("You
 said: ...") so they can see what the bot heard. The bot answers in
 text and does NOT claim to take orders by voice (owner, 13 Nov 2026)
@@ -126,7 +127,8 @@ GROQ_URL = "https://api.groq.com/openai/v1"
 # GROK_API_KEY is set; without the key the order is unchanged
 # (Groq first, DeepSeek second). A Grok failure — including its daily limit —
 # falls through to Zen automatically in ai_generate. Grok has
-# no voice transcription — ai_transcribe stays on Groq Whisper.
+# no voice transcription — ai_transcribe is Gemini (Groq only as
+# emergency fallback).
 # The key is a Fly secret, never in code. NOTE: GROQ_API_KEY is a
 # different company (Groq) and cannot be used for Grok.
 GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
@@ -142,7 +144,7 @@ GROK_URL = "https://api.x.ai/v1"
 # deepseek-chat (V4.1 Flash): $0.15/1M input, $0.60/1M output
 # off-peak (double at peak); new accounts get 5M free tokens for
 # 30 days. DeepSeek has no voice transcription — ai_transcribe
-# stays on Groq Whisper. The key is a Render env var, never in code.
+# is Gemini (Groq only as emergency fallback). The key is a Render env var, never in code.
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_URL = "https://api.deepseek.com/v1"
@@ -7295,7 +7297,8 @@ async def groq_transcribe(audio_bytes: bytes, language: str = None) -> str:
 # the three functions below mirror the DeepSeek ones exactly (same
 # inputs, same outputs, same retry shape), with xAI's base URL and
 # its own key/model env vars. Grok has no voice transcription —
-# ai_transcribe stays on Groq Whisper — and pictures stay on
+# ai_transcribe is Gemini (Groq only as emergency fallback) —
+# and pictures stay on
 # OpenAI/Gemini vision.
 
 async def _grok_post(path: str, headers=None, json=None) -> dict:
@@ -7357,8 +7360,8 @@ async def grok_generate(prompt: str, system: str = None) -> str:
 # DeepSeek's API is OpenAI-compatible, so the two functions below
 # mirror the Groq ones exactly (same inputs, same outputs, same
 # retry shape), with DeepSeek's base URL and its own key/model env
-# vars. DeepSeek has no voice transcription — ai_transcribe stays
-# on Groq Whisper — and pictures stay on OpenAI/Gemini vision.
+# vars. DeepSeek has no voice transcription — ai_transcribe is
+# Gemini (Groq only as emergency fallback) — and pictures stay on OpenAI/Gemini vision.
 
 async def _deepseek_post(path: str, headers=None, json=None) -> dict:
     """One POST to the DeepSeek API, with fast failover (17 Nov 2026): an HTTP error
@@ -8047,22 +8050,24 @@ async def translate_to_amharic(text: str) -> str:
 
 
 async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
-    """Voice transcription: Groq Whisper when GROQ_API_KEY is set,
-    else Whisper when OPENAI_API_KEY is set, else Gemini. A provider
-    that raises falls through to the next one. `language` is a
-    Whisper language hint (\"am\", \"ti\", \"om\", \"en\") — None means
-    auto-detect."""
-    if GROQ_API_KEY:
-        try:
-            return await groq_transcribe(audio_bytes, language=language)
-        except Exception as exc:
-            _log_ai_failure("Groq transcribe failed, trying next provider", exc)
-    if OPENAI_API_KEY:
-        try:
-            return await openai_transcribe(audio_bytes, language=language)
-        except Exception as exc:
-            _log_ai_failure("OpenAI transcribe failed, trying next provider", exc)
-    return await gemini_transcribe(audio_bytes, language=language)
+    """Voice transcription: Gemini for every voice note (owner,
+    18 Nov 2026 — all voice transcription goes to Gemini, which
+    hears Amharic correctly where Groq Whisper mis-heard it, e.g.
+    "12 ሺህ ፎሎወር እፈልጋለሁ"). Groq Whisper is only an emergency
+    fallback when Gemini itself raises, so a voice note never
+    goes silent because one provider is down. `language` is a
+    hint ("am", "ti", "om", "en") — None means auto-detect.
+    Returns "" when every provider fails, so the caller answers
+    honestly instead of feeding wrong text to the order flow."""
+    try:
+        return await gemini_transcribe(audio_bytes, language=language)
+    except Exception as exc:
+        _log_ai_failure("Gemini transcribe failed, trying Groq", exc)
+    try:
+        return await groq_transcribe(audio_bytes, language=language)
+    except Exception as exc:
+        _log_ai_failure("Groq transcribe failed", exc)
+    return ""
 
 
 def _has_arabic_script(text: str) -> bool:
@@ -8075,19 +8080,25 @@ def _has_arabic_script(text: str) -> bool:
 
 
 async def transcribe_voice_with_retry(audio, user_id: int, user_lang: str) -> str:
-    """Transcribe a voice note, with one language-hinted retry
-    when the first try comes back in Arabic script (owner, 14
-    Nov 2026). ROOT CAUSE of the owner's report: Whisper
-    auto-detects the language and its Amharic is weak, so short
-    Amharic clips can be mis-detected as Arabic — both are
-    Semitic languages — and the Arabic-script text then flows
-    into the order flow, where detect_language has no Arabic
-    branch and the AI mirrors the Arabic back. The retry hints
-    the user's last detected language (or their Telegram
-    language, or Amharic) and only then is the result trusted.
-    Returns \"\" when both tries fail or stay Arabic, so the
-    caller answers honestly instead of feeding Arabic to the
-    order flow."""
+    """Transcribe a voice note with Gemini (owner, 18 Nov 2026:
+    all voice transcription goes to Gemini — it hears Amharic
+    correctly where Groq Whisper mis-heard it, e.g. "12 ሺህ
+    ፎሎወር እፈልጋለሁ"). The first try lets Gemini auto-detect the
+    language, so an Amharic-language user speaking English is
+    still heard in English. One language-hinted retry is kept
+    for the case the first try comes back in Arabic script
+    (owner, 14 Nov 2026: a transcriber mis-detecting Amharic as
+    Arabic — both are Semitic languages — and the Arabic-script
+    text then flows into the order flow, where detect_language
+    has no Arabic branch and the AI mirrors the Arabic back).
+    The retry is kept as a guard even though Gemini has not been
+    seen to mis-detect this way: it costs one call only when
+    Arabic script actually appears. The retry hints the user's
+    last detected language (or their Telegram language, or
+    Amharic) and only then is the result trusted. Returns ""
+    when the transcription is empty or both tries fail or stay
+    Arabic, so the caller answers honestly instead of feeding
+    wrong text to the order flow."""
     text = await ai_transcribe(audio)
     if not _has_arabic_script(text):
         return text
@@ -26741,8 +26752,8 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Arabic-script text (owner, 14 Nov 2026): the bot has no
     # Arabic templates and must never mirror Arabic back. It can
-    # only arrive from a mis-transcribed voice note (Whisper
-    # auto-detect confuses Amharic with Arabic) or a typed message
+    # only arrive from a mis-transcribed voice note (a transcriber
+    # mis-detecting Amharic as Arabic) or a typed message
     # in a language the bot does not speak. Answer honestly
     # instead of feeding it to the classifier or the AI.
     if _has_arabic_script(text):
@@ -28916,7 +28927,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A voice message (owner, 13 Nov 2026): download it, transcribe
-    it with Groq Whisper, SHOW the transcription ("You said: ...")
+    it with Gemini, SHOW the transcription ("You said: ...")
     so the user can see what the bot heard, then handle the
     transcribed text exactly like the same typed message. The old
     handler lumped download and transcription into one try block,
