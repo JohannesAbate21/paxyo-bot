@@ -70,17 +70,20 @@ SAFETY (never break):
     and behaviour is exactly the allowlist-only behaviour. Non-
     allowlisted users get the existing refusal and never reach the
     password prompt.
-  * EVERY change (broadcast, setting, refund, promo code) needs an
+  * EVERY change (broadcast, setting, refund, promo code, balance
+    adjustment) needs an
     explicit Confirm step — a Confirm tap or a typed "yes" while a
-    preview is pending. Nothing sends, writes or refunds on a single
-    message.
+    preview is pending. Nothing sends, writes, refunds or adjusts
+    a balance on a single message.
   * Refunds go through the Confirm-gated admin-refund endpoint
     (POST /admin/orders/{id}/refund, HMAC confirm token minted only
     after Confirm): once, never twice, never for a completed order,
-    and only to the user's Paxyo balance — never cash, never a
-    balance touched directly. Promo codes are created the same way:
-    preview, Confirm, then POST /promo-codes. No other money
-    movement happens here.
+    and only to the user's Paxyo balance — never cash. Balance
+    adjustments go through the same pattern (POST
+    /admin/users/{id}/balance/adjust, HMAC confirm token minted
+    only after Confirm, never below zero). Promo codes are created
+    the same way: preview, Confirm, then POST /promo-codes. No
+    other money movement happens here.
   * Never reveal provider names, buying costs, secrets, or the words
     "SMM panel". Only Paxyo selling prices exist, and this bot does
     not quote prices at all.
@@ -96,10 +99,13 @@ matching, so "how much profite did we make" still routes. The AI
 never triggers a broadcast, a setting write, a refund or a
 promo-code creation: those go through the
 deterministic Confirm flow only. The AI
-is minimal — DeepSeek if DEEPSEEK_API_KEY is set, else Gemini if
-GEMINI_API_KEY is set (same keys the order bot already uses); with
-neither key set, free-form gets a short "I didn't understand — try
-..." reply, never silence.
+is minimal — DeepSeek first if DEEPSEEK_API_KEY is set, then
+Gemini (same keys the order bot already uses), each call with a
+5-second budget and fast failover (an HTTP error is never
+retried, a transport failure gets one quick retry); with no key
+set, free-form gets a short "I didn't understand — try
+..." reply, never silence. No Groq: the user bot already uses
+Groq, and the admin bot must not share its free-tier quota.
 
 TECHNICAL — polling, not webhook (simplest on Render free, and no
 webhook conflict with @paxorder_bot since this is a different bot /
@@ -157,6 +163,15 @@ DEEPSEEK_URL = "https://api.deepseek.com/v1"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or ""
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
+# Fast-failover budgets (17 Nov 2026, order bot): a free-form
+# question must not hang for a minute the way two 30s calls did.
+# NO Groq here (18 Nov 2026): the user bot already uses Groq, and
+# the admin bot must not share its free-tier quota — DeepSeek
+# first, then Gemini, each with the same fast-failover shape as
+# bot.py: 5s per attempt, HTTP errors never retried, one quick
+# retry only on a transport failure.
+AI_POST_TIMEOUT_SECONDS = 5.0
+AI_TRANSIENT_RETRY_DELAY_SECONDS = 0.5
 SEND_DELAY_SECONDS = float(os.environ.get("SEND_DELAY_SECONDS", "0.05") or 0.05)
 
 # Ethiopia is UTC+3 all year (no daylight saving).
@@ -504,6 +519,49 @@ class AdminPaxyoClient:
             )
         )
 
+    async def get_user_balance(self, telegram_id):
+        """GET /admin/users/{id}/balance -> {telegram_id, username,
+        first_name, balance}. A 404 with a "User not found" body
+        means the user does not exist -> {"user_not_found": True}.
+        Any other 404 means the endpoint is not live yet -> None
+        (same 404-tolerance as the other admin reads). Other errors
+        raise. (The contract is server/api-admin-user-balance.php.)
+        Users are identified by Telegram id only: the auth table
+        has no phone column (phone lives only in deposit records),
+        so a phone number cannot look a user up."""
+        path = f"/admin/users/{int(telegram_id)}/balance"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                if "user not found" in _error_message(exc).lower():
+                    return {"user_not_found": True}
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def adjust_user_balance(self, telegram_id, delta_etb,
+                                  admin_telegram_id, confirm_token):
+        """POST /admin/users/{id}/balance/adjust {delta_etb,
+        admin_telegram_id, confirm_token} -> {ok, telegram_id,
+        old_balance, new_balance, delta_etb}. Errors raise — the
+        caller maps 404/403/409 to the plain messages in
+        server/api-admin-user-balance.php. (The contract is that
+        file; the HMAC token is minted by mint_admin_balance_token,
+        only after William taps Confirm.)"""
+        return await self._send(
+            build_api_request(
+                "POST",
+                f"/admin/users/{int(telegram_id)}/balance/adjust",
+                {
+                    "delta_etb": float(delta_etb),
+                    "admin_telegram_id": int(admin_telegram_id),
+                    "confirm_token": confirm_token,
+                },
+            )
+        )
+
     async def create_promo_code(self, code, percent=None, expires_at=None,
                                 max_uses=None, fixed_etb=None):
         """POST /promo-codes {code, percent?|fixed_etb?, expires_at?,
@@ -737,6 +795,13 @@ admin_api = None
 #   {"kind": "winback",
 #    "users": [{"telegram_id": ..., "usual_service": ...,
 #               "usual_quantity": ...}, ...]}
+# A balance-adjustment entry (current balance read at preview
+# time; the HMAC token is minted only when the Confirm runs, and
+# the server re-checks the never-below-zero guard atomically):
+#   {"kind": "balance_adjust", "telegram_id": ...,
+#    "delta_etb": <float, +add / -remove>,
+#    "current_balance": <float>, "new_balance": <float>,
+#    "user_label": "@name (id)"}
 PENDING = {}
 
 CONFIRM_KEYBOARD = InlineKeyboardMarkup([
@@ -1055,6 +1120,146 @@ def parse_refund_command(text: str):
     return {"order_id": order_id}
 
 
+def _balance_user_id(text: str):
+    """The Telegram id in a balance command: 5+ digits standing
+    on their own (\"balance of 779060335\", \"add 500 ETB to
+    779060335\"). A phone number cannot identify a user — the auth
+    table has no phone column — so only a Telegram id counts, and
+    anything shorter than 5 digits is refused as too short to be
+    one. Returns the int id, or None."""
+    m = re.search(r"(?<!\d)(\d{5,15})(?!\d)", text or "")
+    if not m:
+        return None
+    try:
+        user_id = int(m.group(1))
+    except ValueError:
+        return None
+    return user_id if user_id > 0 else None
+
+
+def parse_balance_check_command(text: str):
+    """Deterministic balance-check parser. "balance of 779060335",
+    "what is the balance of 779060335", "show balance 779060335",
+    "user balance 779060335" -> {"telegram_id": 779060335}. None
+    when there is no Telegram id, or when the message is about a
+    balance adjustment ("add ... to ...", "remove ... from ...")
+    or the provider balance ("provider balance") — those are not
+    a user lookup. A bare "what is my balance?" is a question for
+    the AI, not a command."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    if "balance" not in low:
+        return None
+    if "provider" in low:
+        return None
+    # An adjustment wording with an amount is an update, never a
+    # check ("add 500 ETB to ..." parses as an adjustment below).
+    # A bare action word without an amount ("take a look at the
+    # balance of ...") is still a check.
+    if parse_balance_adjust_command(s) is not None:
+        return None
+    if not re.search(r"\bbalance\b", low):
+        return None
+    user_id = _balance_user_id(low)
+    if user_id is None:
+        return None
+    return {"telegram_id": user_id}
+
+
+def parse_balance_adjust_command(text: str):
+    """Deterministic balance-adjustment parser. "add 500 ETB to
+    779060335", "give 250 to 779060335", "remove 200 ETB from
+    779060335", "deduct 100 birr from 779060335" ->
+    {"telegram_id": 779060335, "delta_etb": +500.0 / -200.0}.
+    The amount is the number next to the action word (with an
+    optional ETB/birr unit); the user is the Telegram id at the
+    end. None when there is no action word, no amount, or no user
+    id. A zero or negative amount is returned as-is and refused
+    by the handler with a plain message — it is never silently
+    re-read as a different command."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    m = re.search(
+        r"\b(add|give|credit|top\s*up)\b\s*(\d+(?:\.\d+)?)\s*(?:etb|birr)?\b"
+        r"|\b(remove|deduct|take|subtract|debit)\b\s*(\d+(?:\.\d+)?)\s*(?:etb|birr)?\b",
+        low,
+    )
+    if not m:
+        return None
+    if m.group(1) is not None:
+        sign = 1.0
+        amount_text = m.group(2)
+    else:
+        sign = -1.0
+        amount_text = m.group(4)
+    try:
+        amount = float(amount_text)
+    except (TypeError, ValueError):
+        return None
+    # The user id is the Telegram id AFTER the amount (the "to
+    # 779060335" / "from 779060335" at the end); never the amount
+    # itself.
+    rest = low[m.end():]
+    user_id = _balance_user_id(rest)
+    if user_id is None:
+        return None
+    return {"telegram_id": user_id, "delta_etb": sign * amount}
+
+
+def _balance_user_label(record: dict) -> str:
+    """\"@username (779060335)\" or \"user 779060335\" for a balance
+    reply, from a GET /admin/users/{id}/balance record."""
+    name = str(record.get("username") or "").strip()
+    first = str(record.get("first_name") or "").strip()
+    label = name or first
+    tg_id = record.get("telegram_id")
+    if label:
+        return f"{label} ({tg_id})"
+    return f"user {tg_id}"
+
+
+def _balance_preview(pending: dict) -> str:
+    """The Confirm preview for a balance adjustment: who, what,
+    current balance, new balance. Nothing here moves money — the
+    adjustment runs only on Confirm."""
+    action = "Add" if pending["delta_etb"] > 0 else "Remove"
+    return (
+        f"{action} {format_money(abs(pending['delta_etb']))} ETB "
+        f"{'to' if pending['delta_etb'] > 0 else 'from'} "
+        f"{pending['user_label']}?\n\n"
+        f"Current balance: {format_money(pending['current_balance'])} ETB\n"
+        f"New balance: {format_money(pending['new_balance'])} ETB\n\n"
+        "Tap Confirm to adjust the balance, or Cancel."
+    )
+
+
+def _balance_error_text(pending: dict, exc) -> str:
+    """Plain balance-adjustment failure message: the server's 409
+    / 403 / 404 text shown as-is, anything else a short generic
+    line. A 404 here means the endpoint is not live yet (the user
+    was looked up before the preview, so the user exists)."""
+    status = exc.response.status_code if exc.response is not None else None
+    msg = _error_message(exc)
+    if status == 404:
+        return (
+            "The balance endpoint is not connected yet — "
+            "nothing was changed."
+        )
+    if status == 403:
+        return msg or "You are not allowed to adjust this balance."
+    if status == 409:
+        return msg or (
+            "That adjustment was refused — nothing was changed."
+        )
+    if msg:
+        return f"Could not adjust the balance — {msg}"
+    return "Could not adjust the balance — please try again."
+
+
 def parse_promo_create_command(text: str):
     """Deterministic promo-code creation parser. "create promo code
     PAXYO20 20%", "new promo code WELCOME10 10 percent" ->
@@ -1367,6 +1572,27 @@ def mint_admin_refund_token(order_id, admin_telegram_id, secret=None):
     return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
 
 
+def mint_admin_balance_token(telegram_id, delta_etb, admin_telegram_id,
+                             secret=None):
+    """HMAC-SHA256 confirm token for POST
+    /admin/users/{id}/balance/adjust, keyed by BOT_API_SECRET over
+    "admin-user-balance:{telegram_id}:{delta:.2f}:{admin_telegram_id}"
+    (the exact string server/api-admin-user-balance.php verifies).
+    The amount is part of the token, so a token minted for +500 ETB
+    cannot adjust by any other amount. Minted ONLY after William
+    taps Confirm. Returns 64 hex chars. The secret comes from the
+    Render env, never hardcoded, never logged. The delta is
+    formatted with exactly two decimals on both sides — Python
+    f"{delta:.2f}" here, PHP number_format(..., 2) there — so the
+    two HMACs agree."""
+    key = secret if secret is not None else BOT_API_SECRET
+    msg = (
+        f"admin-user-balance:{int(telegram_id)}:{float(delta_etb):.2f}"
+        f":{int(admin_telegram_id)}"
+    )
+    return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
 def _order_record(data):
     """One order record from a GET /orders/{id} reply: flat, or
     nested under "order" (the order bot reads both shapes)."""
@@ -1492,65 +1718,140 @@ ADMIN_AI_SYSTEM = (
     "Examples of what you can do in chat: \"How much did we make "
     "today?\" (live stats), \"Show me the most profitable services\", "
     "\"Who went quiet?\", \"Morning report\", \"Refund order #1841\" "
-    "(preview, then Confirm). "
-    "Things you cannot do in chat: list orders or users, look up "
-    "one user's balance, list resellers, list loyalty bonuses, list "
-    "fraud flags, or list confused chats — those live in the admin "
-    "panel; say so honestly and never invent a figure. You can look "
-    "up ONE order by its number. You cannot cancel an order from "
-    "chat — offer the refund flow instead. Only the ticker can be "
-    "changed in chat; the price multiplier is changed in Settings "
-    "on the admin panel. You never quote service prices in chat. "
+    "(preview, then Confirm), \"What is the balance of 779060335?\" "
+    "(one user's balance), \"Add 500 ETB to 779060335\" (preview, "
+    "then Confirm). "
+    "Things you cannot do in chat: list orders or users, list "
+    "resellers, list loyalty bonuses, list fraud flags, or list "
+    "confused chats — those live in the admin panel; say so honestly "
+    "and never invent a figure. You can look up ONE order by its "
+    "number. You cannot cancel an order from chat — offer the refund "
+    "flow instead. Only the ticker can be changed in chat; the price "
+    "multiplier is changed in Settings on the admin panel. You never "
+    "quote service prices in chat. "
     "To count users who never deposited, offer a broadcast — the "
     "broadcast preview shows the count."
 )
 
 
+async def _deepseek_post(payload: dict) -> dict:
+    """One POST to the DeepSeek API, with fast failover (18 Nov 2026,
+    same shape as the order bot's _deepseek_post): an HTTP error
+    raises at once, never retried; only a transport failure gets
+    one quick retry after 0.5s. 5s per attempt, never 30s."""
+    url = DEEPSEEK_URL + "/chat/completions"
+    for attempt in (0, 1):
+        try:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.TransportError as exc:
+            if attempt == 0:
+                log.warning(
+                    "Admin AI DeepSeek transport error (%s), retrying once",
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
+                continue
+            raise
+
+
+async def _gemini_post(payload: dict) -> dict:
+    """One POST to the Gemini API, with fast failover (18 Nov 2026,
+    same shape as the order bot's _gemini_post): an HTTP error
+    raises at once, never retried; only a transport failure gets
+    one quick retry after 0.5s. 5s per attempt, never 30s. Only the
+    exception TYPE is ever logged, never its text — httpx error
+    text carries the request URL, and the Gemini URL carries the
+    API key."""
+    url = GEMINI_URL.format(model=GEMINI_MODEL)
+    for attempt in (0, 1):
+        try:
+            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
+                resp = await client.post(
+                    url, params={"key": GEMINI_API_KEY}, json=payload
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.TransportError as exc:
+            if attempt == 0:
+                log.warning(
+                    "Admin AI Gemini transport error (%s), retrying once",
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
+                continue
+            raise
+
+
+def _chat_reply_text(data: dict) -> str:
+    """Reply text from an OpenAI-compatible chat-completions body
+    (DeepSeek), or "" when the shape is wrong."""
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _gemini_reply_text(data: dict) -> str:
+    """Reply text from a Gemini generateContent body, or "" when
+    the shape is wrong."""
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 async def ai_reply(text: str):
     """One minimal AI reply for a free-form question. DeepSeek first
     (DEEPSEEK_API_KEY), then Gemini (GEMINI_API_KEY) — the same keys
-    the order bot already uses. Returns the reply text, or None when
-    no key is configured or every provider failed. The AI is NEVER
-    called for broadcasts or setting changes, and its output never
-    triggers an action."""
+    the order bot already uses, but NOT Groq (18 Nov 2026: the user
+    bot already uses Groq, and the admin bot must not share its
+    free-tier quota). Fast failover (18 Nov 2026): 5s per attempt,
+    HTTP errors never retried, one quick retry only on a transport
+    failure — so a question can no longer hang for up to 60s.
+    Returns the reply text, or None when no key is configured or
+    every provider failed. The AI is NEVER called for broadcasts
+    or setting changes, and its output never triggers an action."""
     if DEEPSEEK_API_KEY:
         try:
-            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-                resp = await client.post(
-                    DEEPSEEK_URL + "/chat/completions",
-                    headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
-                    json={
-                        "model": DEEPSEEK_MODEL,
-                        "messages": [
-                            {"role": "system", "content": ADMIN_AI_SYSTEM},
-                            {"role": "user", "content": text},
-                        ],
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            out = data["choices"][0]["message"]["content"] or ""
+            data = await _deepseek_post(
+                {
+                    "model": DEEPSEEK_MODEL,
+                    "messages": [
+                        {"role": "system", "content": ADMIN_AI_SYSTEM},
+                        {"role": "user", "content": text},
+                    ],
+                }
+            )
+            out = _chat_reply_text(data)
             if out.strip():
                 return out.strip()
         except Exception as exc:  # fall through to Gemini
-            log.warning("Admin AI DeepSeek failed: %s", exc)
+            log.warning(
+                "Admin AI DeepSeek failed (%s)", type(exc).__name__
+            )
     if GEMINI_API_KEY:
         try:
-            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-                resp = await client.post(
-                    GEMINI_URL.format(model=GEMINI_MODEL),
-                    params={"key": GEMINI_API_KEY},
-                    json={"contents": [{"parts": [{"text": ADMIN_AI_SYSTEM + "\n\n" + text}]}]},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            out = (
-                data["candidates"][0]["content"]["parts"][0]["text"] or ""
+            data = await _gemini_post(
+                {"contents": [{"parts": [{"text": ADMIN_AI_SYSTEM + "\n\n" + text}]}]}
             )
+            out = _gemini_reply_text(data)
             if out.strip():
                 return out.strip()
         except Exception as exc:
-            log.warning("Admin AI Gemini failed: %s", exc)
+            log.warning(
+                "Admin AI Gemini failed (%s)", type(exc).__name__
+            )
     return None
 
 
@@ -1561,6 +1862,8 @@ FALLBACK_REPLY = (
     "• \"Send this to users who never deposited: <message>\"\n"
     "• \"Change ticker to <new text>\"\n"
     "• \"Refund order #1841\"\n"
+    "• \"What is the balance of 779060335?\"\n"
+    "• \"Add 500 ETB to 779060335\"\n"
     "• \"Create promo code PAXYO20 20%\"\n"
     "• /winbacks — message users who went quiet\n"
     "• /morning — yesterday's money report"
@@ -2223,6 +2526,35 @@ async def _execute_pending(user_id: int, context) -> str:
                 "nothing was turned off."
             )
         return f"✅ Promo code {pending['code']} is now off."
+    if pending["kind"] == "balance_adjust":
+        # The token is minted HERE, only after Confirm — never on
+        # the preview, never on a single message. The amount is
+        # part of the token, so it cannot be swapped afterwards.
+        token = mint_admin_balance_token(
+            pending["telegram_id"], pending["delta_etb"], user_id
+        )
+        try:
+            result = await admin_api.adjust_user_balance(
+                pending["telegram_id"], pending["delta_etb"], user_id, token
+            )
+        except httpx.HTTPStatusError as exc:
+            return _balance_error_text(pending, exc)
+        except Exception as exc:
+            log.warning("adjust_user_balance failed: %s", exc)
+            return "Could not adjust the balance — please try again."
+        if not isinstance(result, dict):
+            return "Could not adjust the balance — please try again."
+        new_balance = result.get("new_balance")
+        new_text = (
+            format_money(new_balance) if new_balance is not None else "?"
+        )
+        action = "Added" if pending["delta_etb"] > 0 else "Removed"
+        direction = "to" if pending["delta_etb"] > 0 else "from"
+        return (
+            f"✅ {action} {format_money(abs(pending['delta_etb']))} ETB "
+            f"{direction} {pending['user_label']}. "
+            f"New balance: {new_text} ETB."
+        )
     # setting
     try:
         result = await admin_api.set_setting(pending["key"], pending["value"])
@@ -2495,6 +2827,11 @@ CAPABILITIES = (
     "• Refund an order — \"Refund order #1841\" (I show the order, "
     "you confirm, the full total goes back to the user's Paxyo "
     "balance, never cash)\n"
+    "• User balance — \"What is the balance of 779060335?\" (I look "
+    "it up by Telegram id)\n"
+    "• Adjust a balance — \"Add 500 ETB to 779060335\" or \"Remove "
+    "200 ETB from 779060335\" (I show the current and new balance, "
+    "you confirm first, never below zero)\n"
     "• Create a promo code — \"Create promo code PAXYO20 20%\" "
     "(you confirm first; a fixed amount works too — "
     "\"Create promo code FLAT100 100 ETB\")\n"
@@ -3104,6 +3441,114 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "help": help_cmd,
         }[report]
         await handler(update, context)
+        return
+
+    # 5e. One user's balance in plain language (18 Nov 2026) —
+    # "what is the balance of 779060335". Read-only lookup, no
+    # preview, no Confirm. Users are identified by Telegram id
+    # only: the auth table has no phone column.
+    balance_check = parse_balance_check_command(text)
+    if balance_check is not None:
+        tg_id = balance_check["telegram_id"]
+        try:
+            record = await admin_api.get_user_balance(tg_id)
+        except Exception as exc:
+            log.warning("get_user_balance failed: %s", exc)
+            await update.message.reply_text(
+                f"Could not look up user {tg_id} — please try again."
+            )
+            return
+        if record is None:
+            await update.message.reply_text(
+                "The balance lookup is not connected yet — "
+                f"I couldn't look up user {tg_id}."
+            )
+            return
+        if record.get("user_not_found"):
+            await update.message.reply_text(
+                f"There is no Paxyo user with Telegram id {tg_id}."
+            )
+            return
+        balance = record.get("balance")
+        balance_text = (
+            format_money(balance) if balance is not None else "?"
+        )
+        await update.message.reply_text(
+            f"{_balance_user_label(record)} — balance: "
+            f"{balance_text} ETB."
+        )
+        return
+
+    # 5f. Balance adjustment in plain language (18 Nov 2026) —
+    # "add 500 ETB to 779060335", "remove 200 ETB from 779060335".
+    # Confirm-gated like every other money move: the preview shows
+    # the user, the amount, the current balance and the new balance;
+    # the HMAC token is minted only when the Confirm runs. A change
+    # that would leave the balance below zero is refused here,
+    # before any Confirm. The AI is never called for this.
+    balance_adjust = parse_balance_adjust_command(text)
+    if balance_adjust is not None:
+        tg_id = balance_adjust["telegram_id"]
+        delta = balance_adjust["delta_etb"]
+        if delta == 0:
+            await update.message.reply_text(
+                "The amount has to be more than 0 ETB."
+            )
+            return
+        try:
+            record = await admin_api.get_user_balance(tg_id)
+        except Exception as exc:
+            log.warning("get_user_balance failed: %s", exc)
+            await update.message.reply_text(
+                f"Could not look up user {tg_id} — please try again."
+            )
+            return
+        if record is None:
+            await update.message.reply_text(
+                "The balance lookup is not connected yet — "
+                f"I couldn't look up user {tg_id}."
+            )
+            return
+        if record.get("user_not_found"):
+            await update.message.reply_text(
+                f"There is no Paxyo user with Telegram id {tg_id}."
+            )
+            return
+        current = record.get("balance")
+        if current is None:
+            await update.message.reply_text(
+                f"I couldn't read the balance for user {tg_id} — "
+                "please try again."
+            )
+            return
+        try:
+            current = float(current)
+        except (TypeError, ValueError):
+            await update.message.reply_text(
+                f"I couldn't read the balance for user {tg_id} — "
+                "please try again."
+            )
+            return
+        new_balance = current + float(delta)
+        if new_balance < 0:
+            await update.message.reply_text(
+                "That would leave the balance below zero — "
+                f"user {tg_id} has {format_money(current)} ETB. "
+                "Nothing was changed."
+            )
+            return
+        PENDING[user.id] = {
+            "kind": "balance_adjust",
+            "telegram_id": tg_id,
+            "delta_etb": float(delta),
+            "current_balance": current,
+            "new_balance": new_balance,
+            "user_label": _balance_user_label(record),
+        }
+        await update.message.reply_text(
+            _balance_preview(PENDING[user.id]),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
         return
 
     # 6. Free-form — AI when a key is configured, else the short reply.

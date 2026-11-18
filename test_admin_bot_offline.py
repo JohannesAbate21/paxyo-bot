@@ -29,8 +29,14 @@ password unlocks for the run, non-admins never see the prompt,
 Confirm taps are blocked before unlock, the password is never
 echoed), and the free-form AI fallback
 (no key -> short reply; the AI is never called for a broadcast, a
-setting change, a refund or a promo-code creation), plus the
-07-admin-english golden dataset (1,000 admin questions: every item
+setting change, a refund or a promo-code creation), the fast
+failover for free-form answers (18 Nov 2026: DeepSeek first, then
+Gemini, 5s per attempt, HTTP errors never retried, one quick
+retry only on a transport failure, no Groq, exception text never
+logged), and the user-balance commands (balance check by Telegram
+id; balance adjustment with a Confirm preview showing current and
+new balance, HMAC token minted only on Confirm, never below zero,
+double Confirm runs once), plus the 07-admin-english golden dataset (1,000 admin questions: every item
 routes to its parser, its report, or the honest AI fallback), the
 net-profit question and the one-order status lookup, and a
 regression test that every Telegram command name is a valid bot
@@ -251,7 +257,12 @@ class FakeAdminPaxyo:
                  weekly=None, weekly_none=False,
                  weekly_sent_map=None, weekly_sent_none=False,
                  promo_codes_list=None, promo_codes_none=False,
-                 promo_off_result=None, promo_off_none=False):
+                 promo_off_result=None, promo_off_none=False,
+                 balances=None, balance_none=False,
+                 balance_error=None, balance_error_body=None,
+                 balance_adjust_result=None,
+                 balance_adjust_error=None,
+                 balance_adjust_error_body=None):
         self._stats = stats
         self._stats_none = stats_none
         self._stats_by_days = dict(stats_by_days or {})
@@ -309,6 +320,20 @@ class FakeAdminPaxyo:
         self.promo_off_calls = []
         self._promo_off_result = promo_off_result
         self._promo_off_none = promo_off_none
+        # User balances (18 Nov 2026): seeded records by Telegram
+        # id; an id with no record is "user not found", the way the
+        # real client reports a 404 with a "User not found" body.
+        self._balances = {
+            int(k): v for k, v in dict(balances or {}).items()
+        }
+        self._balance_none = balance_none
+        self._balance_error = balance_error
+        self._balance_error_body = balance_error_body
+        self._balance_adjust_result = balance_adjust_result
+        self._balance_adjust_error = balance_adjust_error
+        self._balance_adjust_error_body = balance_adjust_error_body
+        self.balance_lookups = []
+        self.balance_adjust_calls = []
 
     async def admin_stats(self, days=1, day=None):
         self.stats_days_seen.append(days)
@@ -477,6 +502,41 @@ class FakeAdminPaxyo:
         if self._promo_codes_none:
             return None
         return {"codes": list(self._promo_codes_list)}
+
+    async def get_user_balance(self, telegram_id):
+        self.balance_lookups.append(int(telegram_id))
+        if self._balance_error is not None:
+            raise _status_error(self._balance_error, self._balance_error_body)
+        if self._balance_none:
+            return None
+        record = self._balances.get(int(telegram_id))
+        if record is None:
+            return {"user_not_found": True}
+        return dict(record)
+
+    async def adjust_user_balance(self, telegram_id, delta_etb,
+                                  admin_telegram_id, confirm_token):
+        self.balance_adjust_calls.append({
+            "telegram_id": telegram_id,
+            "delta_etb": delta_etb,
+            "admin_telegram_id": admin_telegram_id,
+            "confirm_token": confirm_token,
+        })
+        if self._balance_adjust_error is not None:
+            raise _status_error(
+                self._balance_adjust_error, self._balance_adjust_error_body
+            )
+        if self._balance_adjust_result is not None:
+            return self._balance_adjust_result
+        record = self._balances.get(int(telegram_id)) or {}
+        old = float(record.get("balance") or 0)
+        return {
+            "ok": True,
+            "telegram_id": int(telegram_id),
+            "old_balance": old,
+            "new_balance": old + float(delta_etb),
+            "delta_etb": float(delta_etb),
+        }
 
     async def promo_off(self, code):
         self.promo_off_calls.append(code)
@@ -3217,6 +3277,539 @@ class TestCommandNamesValid(unittest.TestCase):
              "weekly", "winbacks"],
         )
 
+
+
+class _FakeAIResponse:
+    """Stand-in for an httpx.Response for ai_reply tests."""
+
+    def __init__(self, status=200, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            req = httpx.Request("POST", "https://example.invalid/")
+            resp = httpx.Response(self.status_code, request=req)
+            raise httpx.HTTPStatusError(
+                f"{self.status_code}", request=req, response=resp
+            )
+
+    def json(self):
+        return self._payload
+
+
+class _FakeAIClient:
+    """Stand-in for httpx.AsyncClient for ai_reply tests: scripted
+    per-URL outcomes, recording call order and client kwargs.
+    script maps a URL substring to a list of outcomes, each
+    ("ok", payload) or ("http", status) or ("transport", message).
+    Each call pops the next outcome for its URL."""
+
+    def __init__(self, script, calls, kwargs_seen):
+        self._script = script
+        self._calls = calls
+        self._kwargs_seen = kwargs_seen
+
+    def __call__(self, *args, **kwargs):
+        self._kwargs_seen.append(kwargs)
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, **kwargs):
+        self._calls.append(str(url))
+        for key, outcomes in self._script.items():
+            if key in str(url):
+                if not outcomes:
+                    raise AssertionError(
+                        f"no scripted outcome left for {key}"
+                    )
+                kind, value = outcomes.pop(0)
+                if kind == "ok":
+                    return _FakeAIResponse(200, value)
+                if kind == "http":
+                    return _FakeAIResponse(value, {})
+                if kind == "transport":
+                    raise httpx.ConnectError(value)
+        raise AssertionError(f"unexpected AI URL {url}")
+
+
+def _ai_script(deepseek=(), gemini=()):
+    return {
+        "api.deepseek.com": list(deepseek),
+        "generativelanguage.googleapis.com": list(gemini),
+    }
+
+
+def _deepseek_ok(text):
+    return ("ok", {"choices": [{"message": {"content": text}}]})
+
+
+def _gemini_ok(text):
+    return ("ok", {"candidates": [{"content": {"parts": [{"text": text}]}}]})
+
+
+class TestAdminAiFastFailover(AdminBotBase):
+    """ai_reply (18 Nov 2026): DeepSeek first, then Gemini, with the
+    order bot's fast failover — 5s per attempt, HTTP errors never
+    retried, one quick retry only on a transport failure. No Groq:
+    the user bot already uses Groq, and the admin bot must not
+    share its free-tier quota."""
+
+    def _patch_keys(self):
+        return (
+            mock.patch.object(admin_bot, "DEEPSEEK_API_KEY", "test-deepseek-key"),
+            mock.patch.object(admin_bot, "GEMINI_API_KEY", "test-gemini-key"),
+        )
+
+    def _run_ai(self, script, text="Hello"):
+        """Run ai_reply with a scripted HTTP client; returns
+        (reply, calls, kwargs_seen)."""
+        calls = []
+        kwargs_seen = []
+        client = _FakeAIClient(script, calls, kwargs_seen)
+        deepseek_patch, gemini_patch = self._patch_keys()
+        with deepseek_patch, gemini_patch, mock.patch.object(
+            admin_bot.httpx, "AsyncClient", client
+        ):
+            return self._loop_run(text), calls, kwargs_seen
+
+    def _loop_run(self, text):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(admin_bot.ai_reply(text))
+        finally:
+            loop.close()
+
+    def test_deepseek_answers_first_gemini_never_called(self):
+        reply, calls, _ = self._run_ai(
+            _ai_script(
+                deepseek=[_deepseek_ok("DeepSeek answers.")],
+                gemini=[_gemini_ok("Gemini answers.")],
+            )
+        )
+        self.assertEqual(reply, "DeepSeek answers.")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("api.deepseek.com", calls[0])
+
+    def test_deepseek_http_error_falls_through_without_retry(self):
+        reply, calls, _ = self._run_ai(
+            _ai_script(
+                deepseek=[("http", 500)],
+                gemini=[_gemini_ok("Gemini answers.")],
+            )
+        )
+        self.assertEqual(reply, "Gemini answers.")
+        deepseek_calls = [c for c in calls if "deepseek" in c]
+        self.assertEqual(len(deepseek_calls), 1)
+
+    def test_deepseek_transport_error_retried_once_then_gemini(self):
+        reply, calls, _ = self._run_ai(
+            _ai_script(
+                deepseek=[("transport", "dropped"), ("transport", "dropped")],
+                gemini=[_gemini_ok("Gemini answers.")],
+            )
+        )
+        self.assertEqual(reply, "Gemini answers.")
+        deepseek_calls = [c for c in calls if "deepseek" in c]
+        self.assertEqual(len(deepseek_calls), 2)
+
+    def test_gemini_transport_error_retried_once_then_none(self):
+        reply, calls, _ = self._run_ai(
+            _ai_script(
+                deepseek=[("http", 503)],
+                gemini=[("transport", "dropped"), ("transport", "dropped")],
+            )
+        )
+        self.assertIsNone(reply)
+        gemini_calls = [c for c in calls if "generativelanguage" in c]
+        self.assertEqual(len(gemini_calls), 2)
+
+    def test_all_providers_fail_returns_none(self):
+        reply, _, _ = self._run_ai(
+            _ai_script(
+                deepseek=[("http", 429)],
+                gemini=[("http", 429)],
+            )
+        )
+        self.assertIsNone(reply)
+
+    def test_no_groq_in_admin_bot(self):
+        self.assertFalse(hasattr(admin_bot, "GROQ_API_KEY"))
+        self.assertFalse(hasattr(admin_bot, "GROQ_URL"))
+        source = (
+            Path(__file__).resolve().parent / "admin_bot.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("GROQ_API_KEY", source)
+        self.assertNotIn("api.groq.com", source)
+
+    def test_attempt_timeout_is_five_seconds(self):
+        _, _, kwargs_seen = self._run_ai(
+            _ai_script(deepseek=[_deepseek_ok("ok")])
+        )
+        self.assertGreater(len(kwargs_seen), 0)
+        for kwargs in kwargs_seen:
+            self.assertEqual(kwargs.get("timeout"), 5.0)
+
+    def test_exception_text_never_logged(self):
+        # The transport error's message carries a URL with the
+        # Gemini key in it (the real leak, Render logs 13 Nov
+        # 2026): the code must log only the exception type, never
+        # the text, so the key must not appear in the logs.
+        calls = []
+        kwargs_seen = []
+        client = _FakeAIClient(
+            _ai_script(
+                deepseek=[("http", 500)],
+                gemini=[
+                    ("transport", "boom https://example.invalid/?key=test-gemini-key"),
+                    ("transport", "boom https://example.invalid/?key=test-gemini-key"),
+                ],
+            ),
+            calls,
+            kwargs_seen,
+        )
+        deepseek_patch, gemini_patch = self._patch_keys()
+        with deepseek_patch, gemini_patch, mock.patch.object(
+            admin_bot.httpx, "AsyncClient", client
+        ), self.assertLogs("admin_bot", level="WARNING") as logs:
+            reply = self._loop_run("Hello")
+        self.assertIsNone(reply)
+        self.assertNotIn("test-gemini-key", "\n".join(logs.output))
+
+
+class TestBalanceParsing(unittest.TestCase):
+    def test_check_variants(self):
+        for text in (
+            "balance of 779060335",
+            "what is the balance of 779060335?",
+            "show balance 779060335",
+            "user balance 779060335",
+            "take a look at the balance of 779060335",
+        ):
+            self.assertEqual(
+                admin_bot.parse_balance_check_command(text),
+                {"telegram_id": 779060335},
+                text,
+            )
+
+    def test_check_not_a_command(self):
+        for text in (
+            "what is my balance?",
+            "what is the provider balance?",
+            "balance",
+            "Hello",
+            # An adjustment is an update, never a check.
+            "add 500 ETB to 779060335",
+            "remove 200 ETB from 779060335",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_balance_check_command(text), text
+            )
+
+    def test_adjust_variants(self):
+        cases = (
+            ("add 500 ETB to 779060335", 779060335, 500.0),
+            ("give 250 to 779060335", 779060335, 250.0),
+            ("top up 100 ETB to 779060335", 779060335, 100.0),
+            ("remove 200 ETB from 779060335", 779060335, -200.0),
+            ("deduct 100.50 birr from 779060335", 779060335, -100.50),
+            ("take 75 from 779060335", 779060335, -75.0),
+        )
+        for text, user_id, delta in cases:
+            self.assertEqual(
+                admin_bot.parse_balance_adjust_command(text),
+                {"telegram_id": user_id, "delta_etb": delta},
+                text,
+            )
+
+    def test_adjust_not_a_command(self):
+        for text in (
+            "add 500 ETB",  # no user
+            "add ETB to 779060335",  # no amount
+            "balance of 779060335",  # a check, not an adjustment
+            "Hello",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_balance_adjust_command(text), text
+            )
+
+    def test_zero_amount_parses_and_is_refused_by_handler(self):
+        self.assertEqual(
+            admin_bot.parse_balance_adjust_command("add 0 ETB to 779060335"),
+            {"telegram_id": 779060335, "delta_etb": 0.0},
+        )
+
+    def test_token_shape_and_binding(self):
+        token = admin_bot.mint_admin_balance_token(779060335, 500.0, ADMIN_ID)
+        self.assertEqual(token, _expected_balance_token(779060335, 500.0))
+        self.assertEqual(len(token), 64)
+        self.assertTrue(all(c in "0123456789abcdef" for c in token))
+        # Bound to one user + one amount + one admin: any of the
+        # three changing mints a different token.
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_balance_token(779060336, 500.0, ADMIN_ID),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_balance_token(779060335, 501.0, ADMIN_ID),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_balance_token(779060335, -500.0, ADMIN_ID),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_balance_token(779060335, 500.0, OTHER_ID),
+        )
+
+
+def _expected_balance_token(telegram_id=779060335, delta=500.0,
+                            admin_id=ADMIN_ID):
+    """The HMAC token the bot must mint, computed independently
+    here from the test secret the module was imported with."""
+    return hmac.new(
+        admin_bot.BOT_API_SECRET.encode(),
+        f"admin-user-balance:{telegram_id}:{delta:.2f}:{admin_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+USER_BALANCE = {
+    "telegram_id": 779060335,
+    "username": "william",
+    "first_name": "William",
+    "balance": 1045.05,
+}
+
+
+class TestBalanceCheckFlow(AdminBotBase):
+    def _fake(self, **kwargs):
+        return FakeAdminPaxyo(
+            stats=STATS, balances={779060335: dict(USER_BALANCE)}, **kwargs
+        )
+
+    async def test_check_replies_with_name_and_balance(self):
+        fake = self._fake()
+        message = await self._text(
+            "what is the balance of 779060335?", fake=fake
+        )
+        self.assertEqual(len(message.text_sent), 1)
+        self.assertIn("william (779060335)", message.text_sent[0])
+        self.assertIn("1,045.05 ETB", message.text_sent[0])
+        self.assertEqual(fake.balance_lookups, [779060335])
+
+    async def test_unknown_user_says_so(self):
+        message = await self._text(
+            "balance of 999999999", fake=self._fake()
+        )
+        self.assertIn(
+            "There is no Paxyo user with Telegram id 999999999.",
+            message.text_sent[0],
+        )
+
+    async def test_endpoint_not_live_says_so(self):
+        fake = self._fake(balance_none=True)
+        message = await self._text(
+            "balance of 779060335", fake=fake
+        )
+        self.assertIn("not connected yet", message.text_sent[0])
+
+    async def test_ai_never_called_for_balance_check(self):
+        fake = self._fake()
+        self._patch_api(fake)
+        with mock.patch.object(
+            admin_bot, "ai_reply",
+            mock.AsyncMock(side_effect=AssertionError("AI must not be called")),
+        ):
+            message = await self._text("balance of 779060335")
+        self.assertIn("1,045.05 ETB", message.text_sent[0])
+
+
+class TestBalanceAdjustFlow(AdminBotBase):
+    def _fake(self, **kwargs):
+        return FakeAdminPaxyo(
+            stats=STATS, balances={779060335: dict(USER_BALANCE)}, **kwargs
+        )
+
+    async def _preview(self, fake, text="add 500 ETB to 779060335"):
+        self._patch_api(fake)
+        return await self._text(text)
+
+    async def test_preview_shows_user_amount_and_new_balance(self):
+        fake = self._fake()
+        message = await self._preview(fake)
+        self.assertEqual(len(message.text_sent), 1)
+        preview = message.text_sent[0]
+        self.assertIn("Add 500.00 ETB to william (779060335)", preview)
+        self.assertIn("Current balance: 1,045.05 ETB", preview)
+        self.assertIn("New balance: 1,545.05 ETB", preview)
+        self.assertIn("Confirm", preview)
+        self.assertIsNotNone(message.markups[0])
+        self.assertEqual(
+            admin_bot.PENDING[ADMIN_ID],
+            {
+                "kind": "balance_adjust",
+                "telegram_id": 779060335,
+                "delta_etb": 500.0,
+                "current_balance": 1045.05,
+                "new_balance": 1545.05,
+                "user_label": "william (779060335)",
+            },
+        )
+
+    async def test_nothing_adjusted_before_confirm(self):
+        fake = self._fake()
+        await self._preview(fake)
+        self.assertEqual(fake.balance_adjust_calls, [])
+
+    async def test_confirm_adjusts_with_right_token_and_body(self):
+        fake = self._fake()
+        await self._preview(fake)
+        query = await self._callback("admin_confirm")
+        self.assertEqual(len(fake.balance_adjust_calls), 1)
+        call = fake.balance_adjust_calls[0]
+        self.assertEqual(call["telegram_id"], 779060335)
+        self.assertEqual(call["delta_etb"], 500.0)
+        self.assertEqual(call["admin_telegram_id"], ADMIN_ID)
+        self.assertEqual(
+            call["confirm_token"],
+            _expected_balance_token(779060335, 500.0),
+        )
+        self.assertEqual(
+            query.edited,
+            ["✅ Added 500.00 ETB to william (779060335). "
+             "New balance: 1,545.05 ETB."],
+        )
+
+    async def test_remove_shows_removed(self):
+        fake = self._fake()
+        message = await self._preview(fake, "remove 200 ETB from 779060335")
+        self.assertIn("Remove 200.00 ETB from william (779060335)", message.text_sent[0])
+        self.assertIn("New balance: 845.05 ETB", message.text_sent[0])
+        query = await self._callback("admin_confirm")
+        self.assertEqual(
+            query.edited,
+            ["✅ Removed 200.00 ETB from william (779060335). "
+             "New balance: 845.05 ETB."],
+        )
+
+    async def test_typed_yes_adjusts(self):
+        fake = self._fake()
+        await self._preview(fake)
+        message = await self._text("yes")
+        self.assertEqual(len(fake.balance_adjust_calls), 1)
+        self.assertEqual(
+            message.text_sent,
+            ["✅ Added 500.00 ETB to william (779060335). "
+             "New balance: 1,545.05 ETB."],
+        )
+
+    async def test_double_confirm_adjusts_once(self):
+        fake = self._fake()
+        await self._preview(fake)
+        first = await self._callback("admin_confirm")
+        second = await self._callback("admin_confirm")
+        self.assertEqual(
+            first.edited,
+            ["✅ Added 500.00 ETB to william (779060335). "
+             "New balance: 1,545.05 ETB."],
+        )
+        self.assertEqual(second.edited, ["Nothing to confirm."])
+        self.assertEqual(len(fake.balance_adjust_calls), 1)
+
+    async def test_cancel_drops_pending(self):
+        fake = self._fake()
+        await self._preview(fake)
+        message = await self._text("cancel")
+        self.assertEqual(message.text_sent, ["Cancelled."])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+        self.assertEqual(fake.balance_adjust_calls, [])
+
+    async def test_below_zero_refused_before_confirm(self):
+        fake = self._fake()
+        message = await self._preview(fake, "remove 2000 ETB from 779060335")
+        self.assertIn("below zero", message.text_sent[0])
+        self.assertIn("1,045.05 ETB", message.text_sent[0])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+        self.assertEqual(fake.balance_adjust_calls, [])
+
+    async def test_zero_amount_refused(self):
+        fake = self._fake()
+        message = await self._preview(fake, "add 0 ETB to 779060335")
+        self.assertIn("more than 0 ETB", message.text_sent[0])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_unknown_user_adjust_says_so(self):
+        fake = self._fake()
+        message = await self._preview(fake, "add 500 ETB to 999999999")
+        self.assertIn(
+            "There is no Paxyo user with Telegram id 999999999.",
+            message.text_sent[0],
+        )
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_endpoint_not_live_at_preview(self):
+        fake = self._fake(balance_none=True)
+        message = await self._preview(fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_server_409_shown_plainly_after_confirm(self):
+        fake = self._fake(
+            balance_adjust_error=409,
+            balance_adjust_error_body={
+                "error": "That adjustment would leave the balance below zero — nothing was changed."
+            },
+        )
+        await self._preview(fake)
+        query = await self._callback("admin_confirm")
+        self.assertEqual(len(fake.balance_adjust_calls), 1)
+        self.assertIn("below zero", query.edited[0])
+        self.assertIn("nothing was changed", query.edited[0])
+
+    async def test_ai_never_called_for_balance_adjust(self):
+        fake = self._fake()
+        self._patch_api(fake)
+        with mock.patch.object(
+            admin_bot, "ai_reply",
+            mock.AsyncMock(side_effect=AssertionError("AI must not be called")),
+        ):
+            message = await self._text("add 500 ETB to 779060335")
+        self.assertIn("New balance: 1,545.05 ETB", message.text_sent[0])
+
+    def test_capabilities_and_fallback_list_balance(self):
+        self.assertIn("What is the balance of 779060335?", admin_bot.CAPABILITIES)
+        self.assertIn("Add 500 ETB to 779060335", admin_bot.CAPABILITIES)
+        self.assertIn("What is the balance of 779060335?", admin_bot.FALLBACK_REPLY)
+        self.assertIn("Add 500 ETB to 779060335", admin_bot.FALLBACK_REPLY)
+
+
+class TestUserBalanceEndpointContract(unittest.TestCase):
+    """The new server endpoint file (server/api-admin-user-balance.php)
+    must carry the same contract the bot implements: the two dispatch
+    patterns, the HMAC message string, the guarded UPDATE and the
+    audit table. No php binary exists in this workspace, so this is
+    a static contract check — `php -l` still has to run on the
+    server at install time."""
+
+    def test_endpoint_file_matches_bot_contract(self):
+        path = Path(__file__).resolve().parent / "server" / "api-admin-user-balance.php"
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("admin/users/(\\d+)/balance$", source)
+        self.assertIn("admin/users/(\\d+)/balance/adjust$", source)
+        self.assertIn("admin-user-balance:", source)
+        self.assertIn("number_format((float)$delta_etb, 2, '.', '')", source)
+        self.assertIn("balance + ? >= 0", source)
+        self.assertIn("bot_admin_balance_adjustments", source)
+        self.assertIn("User not found.", source)
+        self.assertIn("bot_aub_user_balance", source)
+        self.assertIn("bot_aub_user_balance_adjust", source)
 
 if __name__ == "__main__":
     unittest.main()
