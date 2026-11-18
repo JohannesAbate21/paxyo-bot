@@ -7005,7 +7005,23 @@ async def gemini_transcribe(audio_bytes: bytes, language: str = None) -> str:
             "am": "Amharic", "ti": "Tigrinya",
             "om": "Oromo (Afaan Oromo)", "en": "English",
         }.get(language, language)
-        prompt = f"Transcribe this voice message exactly, in {name}. " + domain
+        if language in ("am", "ti"):
+            # Owner, 18 Nov 2026: when he speaks Amharic (or
+            # Tigrinya), the text must be in the Amharic alphabet
+            # — Ge'ez (Ethiopic) script, not a Latin
+            # transliteration. A Latin-only transcription of his
+            # Amharic is what transcriber gibberish looks like
+            # ("Asherahulet tishifu lorafel li galo.").
+            prompt = (
+                f"Transcribe this voice message exactly, in {name}, "
+                "writing the words in the Ge'ez (Ethiopic) alphabet "
+                "— not in Latin letters. " + domain
+            )
+        else:
+            prompt = (
+                f"Transcribe this voice message exactly, in {name}. "
+                + domain
+            )
     payload = {
         "contents": [
             {
@@ -8055,13 +8071,31 @@ async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
     hears Amharic correctly where Groq Whisper mis-heard it, e.g.
     "12 ሺህ ፎሎወር እፈልጋለሁ"). Groq Whisper is only an emergency
     fallback when Gemini itself raises, so a voice note never
-    goes silent because one provider is down. `language` is a
-    hint ("am", "ti", "om", "en") — None means auto-detect.
-    Returns "" when every provider fails, so the caller answers
-    honestly instead of feeding wrong text to the order flow."""
+    goes silent because one provider is down — except for
+    Amharic speech, where Groq Whisper garbles the audio into
+    confident Latin gibberish (live, 18 Nov 2026, twice:
+    "Azra Olede Shifor or Rafaell Galo.", "Asherahulet tishifu
+    lorafel li galo.") and must never be the fallback: for
+    language "am" a Gemini failure retries Gemini once more
+    with the hint instead, and returns "" when that fails too.
+    `language` is a hint ("am", "ti", "om", "en") — None means
+    auto-detect. Returns "" when every provider fails, so the
+    caller answers honestly instead of feeding wrong text to
+    the order flow."""
     try:
         return await gemini_transcribe(audio_bytes, language=language)
     except Exception as exc:
+        if language == "am":
+            _log_ai_failure(
+                "Gemini transcribe failed, retrying Gemini", exc
+            )
+            try:
+                return await gemini_transcribe(
+                    audio_bytes, language="am"
+                )
+            except Exception as exc2:
+                _log_ai_failure("Gemini transcribe retry failed", exc2)
+            return ""
         _log_ai_failure("Gemini transcribe failed, trying Groq", exc)
     try:
         return await groq_transcribe(audio_bytes, language=language)
@@ -8079,42 +8113,102 @@ def _has_arabic_script(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06ff]", text or ""))
 
 
+def _voice_language_hint(user_id: int, user_lang: str):
+    """The language to hint the transcriber with ("am", "ti",
+    "om", "en"), or None when it is genuinely unknown and the
+    transcriber must auto-detect. The user's last detected
+    language wins; else their Telegram language; else unknown —
+    never a guess. Hinting the known language on the first
+    attempt (owner, 18 Nov 2026) is what makes Gemini hear
+    Amharic from the start instead of auto-detecting."""
+    hint = LAST_LANG.get(user_id)
+    if hint in ("am", "ti", "om", "en"):
+        return hint
+    code = (user_lang or "").lower()
+    return code[:2] if code[:2] in ("am", "ti", "om", "en") else None
+
+
+def _recognisable_english(text: str) -> bool:
+    """True when a Latin-script transcription contains at least
+    one word the bot itself knows in English — built only from
+    the word sets the bot already carries (greetings, state
+    words, metrics, platforms, info phrases, formal words,
+    quantity fillers), plus the Oromo words, which are a real
+    language, not gibberish. Transcriber gibberish for Amharic
+    audio ("Asherahulet tishifu lorafel li galo.") contains
+    none of them. This is the garbage guard's English test
+    (owner, 18 Nov 2026): an Amharic user speaking English is
+    still heard — "I want one thousand followers" has
+    "followers" — while Latin gibberish is rejected. A bare
+    "yes"/"ok" has no known word and is rejected too; the user
+    retypes it, which is honest, not wrong."""
+    words = set(re.findall(r"[a-z]+", (text or "").lower()))
+    if not words:
+        return False
+    if words & _OROMO_WORDS:
+        return True
+    known = (
+        {w for g in _SIMPLE_GREETINGS for w in g.split()}
+        | set(_SIMPLE_STATE_WORDS)
+        | set(_METRICS)
+        | set(_REPORT_METRIC_WORDS)
+        | set(_PLATFORM_WORDS)
+        | set(_FORMAL_WORDS)
+        | set(_BARE_QUANTITY_FILLERS)
+        | {w for p in _PAXYO_INFO_PHRASES for w in p.split()}
+    )
+    return bool(words & known)
+
+
 async def transcribe_voice_with_retry(audio, user_id: int, user_lang: str) -> str:
     """Transcribe a voice note with Gemini (owner, 18 Nov 2026:
     all voice transcription goes to Gemini — it hears Amharic
     correctly where Groq Whisper mis-heard it, e.g. "12 ሺህ
-    ፎሎወር እፈልጋለሁ"). The first try lets Gemini auto-detect the
-    language, so an Amharic-language user speaking English is
-    still heard in English. One language-hinted retry is kept
-    for the case the first try comes back in Arabic script
-    (owner, 14 Nov 2026: a transcriber mis-detecting Amharic as
-    Arabic — both are Semitic languages — and the Arabic-script
-    text then flows into the order flow, where detect_language
-    has no Arabic branch and the AI mirrors the Arabic back).
-    The retry is kept as a guard even though Gemini has not been
-    seen to mis-detect this way: it costs one call only when
-    Arabic script actually appears. The retry hints the user's
-    last detected language (or their Telegram language, or
-    Amharic) and only then is the result trusted. Returns ""
-    when the transcription is empty or both tries fail or stay
-    Arabic, so the caller answers honestly instead of feeding
-    wrong text to the order flow."""
-    text = await ai_transcribe(audio)
-    if not _has_arabic_script(text):
-        return text
-    if (user_lang or "").lower().startswith("ar"):
-        return text
-    hint = LAST_LANG.get(user_id)
-    if hint not in ("am", "ti", "om", "en"):
-        code = (user_lang or "").lower()
-        hint = code[:2] if code[:2] in ("am", "ti", "om", "en") else "am"
-    try:
-        retry = await ai_transcribe(audio, language=hint)
-    except Exception:
+    ፎሎወር እፈልጋለሁ"). The first try hints the user's language
+    when it is known (LAST_LANG, else Telegram language), so
+    Gemini is told "in Amharic, in the Ge'ez alphabet" from the
+    start instead of auto-detecting; auto-detect is only for a
+    genuinely unknown language, so an Amharic-language user
+    speaking English is still heard in English. One
+    language-hinted retry is kept for the case the first try
+    comes back in Arabic script (owner, 14 Nov 2026: a
+    transcriber mis-detecting Amharic as Arabic — both are
+    Semitic languages — and the Arabic-script text then flows
+    into the order flow, where detect_language has no Arabic
+    branch and the AI mirrors the Arabic back). The retry is
+    kept as a guard even though Gemini has not been seen to
+    mis-detect this way: it costs one call only when Arabic
+    script actually appears. The garbage guard (owner, 18 Nov
+    2026): for an Amharic user, a transcription with no Ge'ez
+    script that is not recognisable English is transcriber
+    gibberish, not Amharic — it is rejected, so the caller
+    answers honestly instead of feeding it to the order flow.
+    Returns "" when the transcription is empty or unusable or
+    both tries fail or stay Arabic, so the caller answers
+    honestly instead of feeding wrong text to the order flow."""
+    hint = _voice_language_hint(user_id, user_lang)
+    text = await ai_transcribe(audio, language=hint)
+    if _has_arabic_script(text) and not (user_lang or "").lower().startswith("ar"):
+        try:
+            retry = await ai_transcribe(audio, language=hint or "am")
+        except Exception:
+            return ""
+        if _has_arabic_script(retry):
+            return ""
+        text = retry
+    if (
+        hint == "am"
+        and text
+        and not is_amharic(text)
+        and not _recognisable_english(text)
+    ):
+        # Latin gibberish for Amharic speech (live, 18 Nov 2026:
+        # "Asherahulet tishifu lorafel li galo."): no Ge'ez, no
+        # real English word. The first try was already hinted
+        # "am", so a repeat would be the same prompt — answer
+        # honestly instead of feeding it to the order flow.
         return ""
-    if _has_arabic_script(retry):
-        return ""
-    return retry
+    return text
 
 
 async def ai_vision(image_bytes: bytes, prompt: str = VISION_PROMPT) -> str:

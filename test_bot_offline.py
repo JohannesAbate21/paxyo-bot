@@ -11578,6 +11578,44 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
         )
         groq.assert_not_called()
 
+    async def test_ai_transcribe_amharic_retries_gemini_not_groq(self):
+        # Owner, 18 Nov 2026: Groq Whisper garbles Amharic into
+        # confident Latin gibberish, so for language "am" a
+        # Gemini failure retries Gemini once more with the hint
+        # — Groq is never called. When Gemini fails twice the
+        # result is "" so the caller answers honestly.
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=RuntimeError("gemini down")),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock(return_value="g")
+        ) as groq:
+            self.assertEqual(
+                await bot.ai_transcribe(b"x", language="am"), ""
+            )
+        self.assertEqual(gem.await_count, 2)
+        self.assertEqual(
+            gem.await_args_list[1].kwargs, {"language": "am"}
+        )
+        groq.assert_not_called()
+
+    async def test_ai_transcribe_english_still_falls_back_to_groq(self):
+        # Only Amharic skips the Groq fallback: an English user
+        # keeps Gemini -> Groq, so a voice note never goes
+        # silent because one provider is down.
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(side_effect=RuntimeError("gemini down")),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value="g"),
+        ) as groq:
+            self.assertEqual(
+                await bot.ai_transcribe(b"x", language="en"), "g"
+            )
+        gem.assert_awaited_once()
+        groq.assert_awaited_once()
+
 
 class TestGrokProvider(unittest.IsolatedAsyncioTestCase):
     """Grok (xAI) is the third AI since 17 Nov 2026 (owner: Groq
@@ -21503,10 +21541,11 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         ):
             await bot.on_voice(update, None)
         gem.assert_awaited_once()
-        # First attempt auto-detects (no forced language): an
-        # Amharic-language user speaking English must still be
-        # heard in English.
-        self.assertEqual(gem.await_args.kwargs, {"language": None})
+        # First attempt hints the user's known language (owner,
+        # 18 Nov 2026): LAST_LANG is Amharic, so Gemini is told
+        # "in Amharic, in the Ge'ez alphabet" from the start
+        # instead of auto-detecting.
+        self.assertEqual(gem.await_args.kwargs, {"language": "am"})
         groq.assert_not_called()
         self.assertIn("You said:", msg.text_sent[0])
         self.assertIn("12 ሺህ ፎሎወር እፈልጋለሁ", msg.text_sent[0])
@@ -21555,8 +21594,13 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertEqual(bot.PARTIAL[1]["service_hint"], "followers")
 
     async def test_voice_english_uses_gemini_not_groq(self):
-        # An English voice note goes to Gemini too — no language
-        # is forced, so auto-detect hears the English.
+        # An Amharic-language user speaking English: the first
+        # attempt is hinted "am" (owner, 18 Nov 2026), but the
+        # hint must not force the wrong language — Gemini returns
+        # the English, and the garbage guard accepts it because
+        # "followers" is recognisable English, so it still flows
+        # to the order flow. Groq is never called.
+        bot.LAST_LANG[1] = "am"
         msg = FakeVoiceMessage()
         update = FakeUpdate(msg)
         intent = intent_of("off_topic")
@@ -21578,7 +21622,7 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         ):
             await bot.on_voice(update, None)
         gem.assert_awaited_once()
-        self.assertEqual(gem.await_args.kwargs, {"language": None})
+        self.assertEqual(gem.await_args.kwargs, {"language": "am"})
         groq.assert_not_called()
         self.assertIn("You said:", msg.text_sent[0])
         self.assertIn(
@@ -21604,6 +21648,100 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("could not understand", msg.text_sent[0].lower())
         self.assertNotIn("You said:", msg.text_sent[0])
+
+    async def test_voice_amharic_latin_gibberish_fails_honestly(self):
+        # Owner, 18 Nov 2026, live: Gemini was down, Groq Whisper
+        # returned "Asherahulet tishifu lorafel li galo." for his
+        # Amharic, it flowed into the order flow and was classified
+        # off_topic. The garbage guard must reject Latin gibberish
+        # for an Amharic user: one honest line, no "You said:",
+        # Groq never called, nothing parked in the draft.
+        bot.LAST_LANG[1] = "am"
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(
+                return_value="Asherahulet tishifu lorafel li galo."
+            ),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ) as groq, mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.on_voice(update, None)
+        gem.assert_awaited_once()
+        self.assertEqual(gem.await_args.kwargs, {"language": "am"})
+        groq.assert_not_called()
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("could not understand", msg.text_sent[0].lower())
+        self.assertNotIn("You said:", msg.text_sent[0])
+        self.assertNotIn("Asherahulet", msg.text_sent[0])
+        self.assertEqual(bot.PARTIAL, {})
+
+    async def test_voice_amharic_you_said_shows_geez_alphabet(self):
+        # Owner, 18 Nov 2026: when he speaks Amharic, the text
+        # must be in the Amharic (Ge'ez) alphabet as well. The
+        # "You said:" line shows the exact Ge'ez phrase — no
+        # Latin letters in the quoted transcription.
+        bot.LAST_LANG[1] = "am"
+        phrase = "12 ሺህ ፎሎወር እፈልጋለሁ"
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        intent = intent_of(
+            "order", service_hint="followers", quantity=12000
+        )
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(return_value=phrase),
+        ), mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.on_voice(update, None)
+        self.assertIn("You said:", msg.text_sent[0])
+        self.assertIn(phrase, msg.text_sent[0])
+        quoted = msg.text_sent[0].split("You said:", 1)[1]
+        self.assertTrue(bot.is_amharic(quoted))
+        self.assertIsNone(re.search(r"[a-zA-Z]", quoted))
+
+    def test_voice_language_hint_prefers_last_lang_then_telegram(self):
+        # The first transcription hint: last detected language
+        # wins, else Telegram language, else None (auto-detect)
+        # — never a guess.
+        bot.LAST_LANG.clear()
+        self.assertEqual(
+            bot._voice_language_hint(1, "am-ET"), "am"
+        )
+        self.assertEqual(bot._voice_language_hint(1, "en"), "en")
+        self.assertIsNone(bot._voice_language_hint(1, "xx"))
+        self.assertIsNone(bot._voice_language_hint(1, ""))
+        bot.LAST_LANG[1] = "am"
+        self.assertEqual(bot._voice_language_hint(1, "en"), "am")
+        bot.LAST_LANG[1] = "xx"
+        self.assertEqual(bot._voice_language_hint(1, "ti"), "ti")
+        bot.LAST_LANG.clear()
+
+    def test_recognisable_english_rejects_whisper_gibberish(self):
+        # The garbage guard's English test: the two live Groq
+        # garblings of the owner's Amharic have no known English
+        # word; real English orders, greetings and questions do.
+        self.assertFalse(bot._recognisable_english(
+            "Asherahulet tishifu lorafel li galo."))
+        self.assertFalse(bot._recognisable_english(
+            "Azra Olede Shifor or Rafaell Galo."))
+        self.assertTrue(bot._recognisable_english(
+            "I want one thousand followers"))
+        self.assertTrue(bot._recognisable_english("Hello"))
+        self.assertTrue(bot._recognisable_english("How much is it"))
+        self.assertTrue(bot._recognisable_english("Thank you"))
+        self.assertTrue(bot._recognisable_english("My balance"))
+        self.assertFalse(bot._recognisable_english(""))
+        self.assertFalse(bot._recognisable_english("12"))
 
     async def test_arabic_text_gets_an_honest_reply(self):
         msg = await self._turns([
@@ -25122,6 +25260,43 @@ class TestSmartLoopRoundTwo(_LanguageRoundBase):
         text = client.posts[0]["json"]["contents"][0]["parts"][0]["text"]
         self.assertIn("Amharic", text)
         self.assertIn("Telebirr", text)
+
+    async def test_gemini_transcribe_amharic_prompt_asks_geez_script(self):
+        # Owner, 18 Nov 2026: when he speaks Amharic, the text
+        # must be in the Amharic (Ge'ez) alphabet — the Gemini
+        # prompt says so explicitly for "am" (and "ti", which
+        # also uses Ge'ez script), and says nothing about script
+        # for English.
+        for language, name in (("am", "Amharic"), ("ti", "Tigrinya")):
+            client = FlakyClient([
+                FakeCloudTTSResponse({"candidates": [{"content": {"parts": [
+                    {"text": "hi"}]}}]})
+            ])
+            with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+                 mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+                self.assertEqual(
+                    await bot.gemini_transcribe(
+                        b"fake-ogg", language=language
+                    ),
+                    "hi",
+                )
+            text = client.posts[0]["json"]["contents"][0]["parts"][0]["text"]
+            self.assertIn(name, text)
+            self.assertIn("Ge'ez", text)
+            self.assertIn("not in Latin letters", text)
+        client = FlakyClient([
+            FakeCloudTTSResponse({"candidates": [{"content": {"parts": [
+                {"text": "hi"}]}}]})
+        ])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(
+                await bot.gemini_transcribe(b"fake-ogg", language="en"),
+                "hi",
+            )
+        text = client.posts[0]["json"]["contents"][0]["parts"][0]["text"]
+        self.assertIn("English", text)
+        self.assertNotIn("Ge'ez", text)
 
     # (5) Golden-dataset rows at the handler level --------------------
 
