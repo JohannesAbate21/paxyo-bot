@@ -8420,6 +8420,83 @@ class TestGeminiRetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.posts), 1)
         sleep_mock.assert_not_awaited()
 
+    async def test_transcribe_uses_longer_media_timeout(self):
+        # Owner, 18 Nov 2026: Gemini transcription failed with a
+        # transport error on THREE consecutive voice notes while
+        # text calls on the same 5s budget succeeded — the 5s read
+        # timeout fires on an audio upload + multimodal
+        # processing. Transcription gets the 30s media budget.
+        client = FlakyClient([self._ok_response("ሰላም")])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client) as mocked, \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.gemini_transcribe(b"fake-ogg"), "ሰላም")
+        mocked.assert_called_once_with(
+            timeout=bot.GEMINI_MEDIA_TIMEOUT_SECONDS, trust_env=False
+        )
+
+    async def test_vision_uses_longer_media_timeout(self):
+        # A photo upload is the same shape as an audio upload, so
+        # vision gets the media budget too, not the 5s text budget.
+        client = FlakyClient([self._ok_response("{\"summary\": \"x\"}")])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client) as mocked, \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(
+                await bot.gemini_vision(b"fake-jpeg"), "{\"summary\": \"x\"}"
+            )
+        mocked.assert_called_once_with(
+            timeout=bot.GEMINI_MEDIA_TIMEOUT_SECONDS, trust_env=False
+        )
+
+    async def test_generate_keeps_five_second_timeout(self):
+        # Text calls keep the 5s budget: the fast-failover
+        # guarantee for chat replies depends on it.
+        client = FlakyClient([self._ok_response()])
+        with mock.patch("bot.httpx.AsyncClient", return_value=client) as mocked, \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(await bot.gemini_generate("hi"), "hello")
+        mocked.assert_called_once_with(
+            timeout=bot.AI_POST_TIMEOUT_SECONDS, trust_env=False
+        )
+
+    async def test_transcribe_slow_response_succeeds_on_media_budget(self):
+        # A response that arrives after 5s — too slow for the old
+        # budget — succeeds with the media budget. The fake client
+        # times out when its timeout is the old 5s and answers
+        # when it is the media budget; the old budget still fails
+        # outright, which is the live failure being fixed.
+        class _TimeoutAwareClient:
+            def __init__(self, timeout, trust_env=False):
+                self.timeout = timeout
+                self.posts = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def post(self, url, params=None, json=None):
+                self.posts.append({"url": url, "params": params, "json": json})
+                if self.timeout < bot.GEMINI_MEDIA_TIMEOUT_SECONDS:
+                    raise bot.httpx.TimeoutException(
+                        "timed out",
+                        request=bot.httpx.Request("POST", url),
+                    )
+                return FakeCloudTTSResponse({
+                    "candidates": [{"content": {"parts": [
+                        {"text": "ሰላም"}]}}]
+                })
+
+        with mock.patch("bot.httpx.AsyncClient", new=_TimeoutAwareClient), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            self.assertEqual(
+                await bot.gemini_transcribe(b"fake-ogg"), "ሰላም"
+            )
+        with mock.patch("bot.httpx.AsyncClient", new=_TimeoutAwareClient), \
+             mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()):
+            with self.assertRaises(bot.httpx.TimeoutException):
+                await bot._gemini_post({"contents": []})
+
 
 class TestFastFailover(unittest.IsolatedAsyncioTestCase):
     """Fast failover (owner, 17 Nov 2026): an HTTP error raises at
@@ -11578,6 +11655,38 @@ class TestGroqProvider(unittest.IsolatedAsyncioTestCase):
         )
         groq.assert_not_called()
 
+    async def test_ai_transcribe_timeout_log_names_timeout(self):
+        # Owner, 18 Nov 2026: three voice notes failed with a
+        # bare "transport error" and no way to tell a 5s timeout
+        # from a dropped connection. The failure line now names
+        # the exception type and the timeout budget — never the
+        # URL or the key.
+        req = bot.httpx.Request(
+            "POST",
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "x:generateContent?key=FAKESECRETKEY",
+        )
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(
+                side_effect=bot.httpx.TimeoutException(
+                    "timed out", request=req
+                )
+            ),
+        ), mock.patch(
+            "bot.groq_transcribe",
+            new=mock.AsyncMock(return_value="g"),
+        ), self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            self.assertEqual(await bot.ai_transcribe(b"x"), "g")
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "Gemini transcribe failed, trying Groq "
+            "(TimeoutException after 30.0s)",
+            joined,
+        )
+        self.assertNotIn("FAKESECRETKEY", joined)
+        self.assertNotIn("key=", joined)
+
     async def test_ai_transcribe_amharic_retries_gemini_not_groq(self):
         # Owner, 18 Nov 2026: Groq Whisper garbles Amharic into
         # confident Latin gibberish, so for language "am" a
@@ -12481,6 +12590,47 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
             bot._log_ai_failure("test fail", Exception("boom"))
         self.assertIn("test fail", "\n".join(logs.output))
         self.assertNotIn("boom", "\n".join(logs.output))
+
+    def test_log_ai_failure_note_keeps_status_and_hides_key(self):
+        # Owner, 18 Nov 2026: a safe note (exception type +
+        # timeout budget, never exception text) is appended after
+        # the message and before the status, so "(HTTP 429)"
+        # still appears verbatim and no key or URL can leak.
+        err = self._key_url_error(
+            429,
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-3.5-flash:generateContent?key=FAKESECRETKEY",
+        )
+        with self.assertLogs("paxorder_bot", level="WARNING") as logs:
+            bot._log_ai_failure(
+                "AI classify failed", err,
+                note="TimeoutException after 30.0s",
+            )
+        joined = "\n".join(logs.output)
+        self.assertIn(
+            "AI classify failed (TimeoutException after 30.0s) (HTTP 429)",
+            joined,
+        )
+        self.assertNotIn("key=", joined)
+        self.assertNotIn("FAKESECRETKEY", joined)
+        self.assertNotIn("Bearer ", joined)
+
+    def test_exc_note_names_type_and_timeout_only(self):
+        req = bot.httpx.Request(
+            "POST",
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "x:generateContent?key=FAKESECRETKEY",
+        )
+        timeout_err = bot.httpx.TimeoutException("timed out", request=req)
+        self.assertEqual(bot._exc_note(timeout_err, 30.0),
+                         "TimeoutException after 30.0s")
+        self.assertEqual(
+            bot._exc_note(
+                bot.httpx.ConnectError("refused", request=req)
+            ),
+            "ConnectError",
+        )
+        self.assertEqual(bot._exc_note(Exception("boom")), "Exception")
 
     async def test_extract_intent_failure_logs_no_key(self):
         err = self._key_url_error(
@@ -21679,6 +21829,83 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertNotIn("Asherahulet", msg.text_sent[0])
         self.assertEqual(bot.PARTIAL, {})
 
+    async def test_voice_gibberish_rejected_without_any_hint(self):
+        # Owner, 18 Nov 2026, live 07:10 EAT: no hint at all
+        # (fresh restart, poisoned lang), Groq returned
+        # "Yansar alutte si forora veli vello." and it sailed
+        # into the order flow. The guard is hint-independent now:
+        # gibberish is rejected for ANY hint — same for the
+        # 06:53 sample "Asherahulet tishifu lorafel li galo."
+        bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+        for gibberish in (
+            "Yansar alutte si forora veli vello.",
+            "Asherahulet tishifu lorafel li galo.",
+        ):
+            msg = FakeVoiceMessage()
+            update = FakeUpdate(msg)
+            with mock.patch(
+                "bot.gemini_transcribe",
+                new=mock.AsyncMock(return_value=gibberish),
+            ), mock.patch(
+                "bot.groq_transcribe", new=mock.AsyncMock()
+            ) as groq, mock.patch(
+                "bot.paxyo", FakePaxyo()
+            ), mock.patch("bot.speak_reply"):
+                await bot.on_voice(update, None)
+            groq.assert_not_called()
+            self.assertEqual(len(msg.text_sent), 1)
+            self.assertIn(
+                "could not understand", msg.text_sent[0].lower()
+            )
+            self.assertNotIn("You said:", msg.text_sent[0])
+            self.assertEqual(bot.PARTIAL, {})
+
+    async def test_guard_passes_real_words_and_rejects_gibberish_any_hint(self):
+        # The hint-independent guard, at the transcribe level:
+        # real English, Oromo, a bare quantity ("12 thousand",
+        # "12000") and a bare "yes" all carry something readable
+        # and pass with no hint and with an "en" hint; the three
+        # live Groq garblings are rejected under both hints.
+        bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+        real = (
+            "I want one thousand followers",
+            "akkam",
+            "12 thousand",
+            "12000",
+            "yes",
+            "Hello",
+        )
+        gibberish = (
+            "Yansar alutte si forora veli vello.",
+            "Asherahulet tishifu lorafel li galo.",
+            "Azra Olede Shifor or Rafaell Galo.",
+        )
+        for user_lang in ("xx", "en"):
+            for text in real:
+                with mock.patch(
+                    "bot.ai_transcribe",
+                    new=mock.AsyncMock(return_value=text),
+                ):
+                    self.assertEqual(
+                        await bot.transcribe_voice_with_retry(
+                            b"x", 1, user_lang
+                        ),
+                        text,
+                    )
+            for text in gibberish:
+                with mock.patch(
+                    "bot.ai_transcribe",
+                    new=mock.AsyncMock(return_value=text),
+                ):
+                    self.assertEqual(
+                        await bot.transcribe_voice_with_retry(
+                            b"x", 1, user_lang
+                        ),
+                        "",
+                    )
+
     async def test_voice_amharic_you_said_shows_geez_alphabet(self):
         # Owner, 18 Nov 2026: when he speaks Amharic, the text
         # must be in the Amharic (Ge'ez) alphabet as well. The
@@ -21712,8 +21939,10 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
     def test_voice_language_hint_prefers_last_lang_then_telegram(self):
         # The first transcription hint: last detected language
         # wins, else Telegram language, else None (auto-detect)
-        # — never a guess.
+        # — never a guess. (History is empty here: the history
+        # cases live in the next tests.)
         bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
         self.assertEqual(
             bot._voice_language_hint(1, "am-ET"), "am"
         )
@@ -21725,6 +21954,87 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         bot.LAST_LANG[1] = "xx"
         self.assertEqual(bot._voice_language_hint(1, "ti"), "ti")
         bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+
+    def test_voice_language_hint_history_overrides_poisoned_en(self):
+        # Owner, 18 Nov 2026: the server-stored session lang was
+        # poisoned to "en" by gibberish Latin transcriptions
+        # detected as English, so LAST_LANG said "en" for a user
+        # who writes Amharic — and the "am" protections never
+        # engaged. The newest Ge'ez message in the stored history
+        # overrides a poisoned "en"; the Latin gibberish in the
+        # history carries no signal and is skipped.
+        bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+        bot.CHAT_HISTORY[1] = [
+            {"user": "አሁን 2000 ፎሎወር እፈልጋለሁ።", "bot": "x"},
+            {"user": "Asherahulet tishifu lorafel li galo.", "bot": "y"},
+        ]
+        bot.LAST_LANG[1] = "en"
+        self.assertEqual(bot._voice_language_hint(1, "en"), "am")
+        bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+
+    def test_voice_language_hint_history_tigrinya_and_oromo(self):
+        # Ge'ez history in Tigrinya hints "ti"; an Oromo word
+        # hints "om"; an English-only history carries no signal,
+        # so the last language (or Telegram language) decides.
+        bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+        bot.CHAT_HISTORY[1] = [{"user": "ኣነ ኣሎ", "bot": "x"}]
+        self.assertEqual(bot._voice_language_hint(1, "en"), "ti")
+        bot.CHAT_HISTORY[1] = [{"user": "akkam", "bot": "x"}]
+        self.assertEqual(bot._voice_language_hint(1, "en"), "om")
+        bot.CHAT_HISTORY[1] = [
+            {"user": "Hello, what services do you offer?", "bot": "x"}
+        ]
+        self.assertIsNone(bot._history_language_hint(1))
+        self.assertEqual(bot._voice_language_hint(1, "en"), "en")
+        bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+
+    async def test_voice_hint_from_restored_history_after_restart(self):
+        # Owner, 18 Nov 2026: a voice note one minute after a
+        # deploy restart found LAST_LANG empty and the stored
+        # history unloaded, so it transcribed with no hint and
+        # Groq garbled it. on_voice loads the stored session
+        # first when memory is empty, and the Ge'ez history
+        # hints "am" even though the stored lang field says "en"
+        # (poisoned by the earlier gibberish).
+        bot.LAST_LANG.clear()
+        bot.CHAT_HISTORY.clear()
+        bot.PARTIAL.clear()
+        msg = FakeVoiceMessage()
+        update = FakeUpdate(msg)
+        session = {
+            "history": [
+                {"user": "አሁን 2000 ፎሎወር እፈልጋለሁ።", "bot": "x"},
+            ],
+            "draft": None,
+            "lang": "en",
+        }
+        intent = intent_of(
+            "order", service_hint="followers", quantity=12000
+        )
+        fake = FakePaxyo(session=session)
+        with mock.patch(
+            "bot.gemini_transcribe",
+            new=mock.AsyncMock(
+                return_value="12 ሺህ ፎሎወር እፈልጋለሁ"
+            ),
+        ) as gem, mock.patch(
+            "bot.groq_transcribe", new=mock.AsyncMock()
+        ) as groq, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent),
+        ), mock.patch("bot.paxyo", fake), mock.patch(
+            "bot.speak_reply"
+        ):
+            await bot.on_voice(update, None)
+        self.assertEqual(fake.session_loads, [1])
+        self.assertEqual(gem.await_args.kwargs, {"language": "am"})
+        groq.assert_not_called()
+        self.assertIn("12 ሺህ ፎሎወር እፈልጋለሁ", msg.text_sent[0])
 
     def test_recognisable_english_rejects_whisper_gibberish(self):
         # The garbage guard's English test: the two live Groq
@@ -30963,6 +31273,28 @@ class TestFridayPatterns(_SmartLoopBase):
             paxyo=FakePaxyo(recent=self._pattern_orders()),
         )
         self.assertNotIn("usually order", msg.text_sent[0])
+
+    async def test_light_gates_share_one_orders_fetch(self):
+        # Owner, 18 Nov 2026: a light turn paid for the same
+        # recent-orders list twice (Friday gate, then feedback
+        # gate) plus feedback_asked — 26.16s of light_gates live
+        # while the server was slow. Both gates now share one
+        # fetch: a greeting turn calls recent_orders once.
+        fake = FakePaxyo(recent=[])
+        calls = []
+
+        async def counting(telegram_id, limit=5):
+            calls.append(telegram_id)
+            return await FakePaxyo.recent_orders(
+                fake, telegram_id, limit=limit
+            )
+
+        fake.recent_orders = counting
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))], paxyo=fake
+        )
+        self.assertEqual(calls, [1])
+        self.assertIn("Hello", msg.text_sent[0])
 
     async def test_offer_fires_again_next_week(self):
         fake = FakePaxyo(recent=self._pattern_orders())

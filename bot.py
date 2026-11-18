@@ -6938,9 +6938,22 @@ class PaxyoClient:
 # change guarantees is: no retry penalty, and no unbounded wait.
 AI_POST_TIMEOUT_SECONDS = 5.0
 AI_TRANSIENT_RETRY_DELAY_SECONDS = 0.5
+# Media calls to Gemini get a longer budget (owner, 18 Nov 2026):
+# gemini_transcribe uploads base64 audio and waits for multimodal
+# processing, gemini_vision uploads a photo the same way — a 5s
+# read timeout is a transport error for them. Live, 18 Nov 2026,
+# Gemini transcription failed with a transport error on THREE
+# consecutive voice notes (06:53, 07:10, 07:11 EAT) while text
+# calls on the same 5s budget succeeded, and the two attempts
+# landed exactly 5.0s apart (40.8s -> 45.8s -> 51.3s UTC) — the
+# 5s timeout firing, not the provider being down. Text calls
+# (chat, translate) keep the 5.0s budget: the fast-failover
+# guarantee for chat replies depends on it.
+GEMINI_MEDIA_TIMEOUT_SECONDS = 30.0
 
 
-async def _gemini_post(payload: dict) -> dict:
+async def _gemini_post(payload: dict,
+                       timeout: float = AI_POST_TIMEOUT_SECONDS) -> dict:
     """One POST to the Gemini API, with fast failover (17 Nov 2026):
     HTTP errors are never retried.
 
@@ -6951,11 +6964,13 @@ async def _gemini_post(payload: dict) -> dict:
     client shape is kept exactly as the three callers used it
     (timeout AI_POST_TIMEOUT_SECONDS, trust_env False, params key,
     json payload), so tests that mock the client still pass.
+    Media callers (transcription, vision) pass the longer
+    GEMINI_MEDIA_TIMEOUT_SECONDS budget instead (18 Nov 2026).
     """
     url = GEMINI_URL.format(model=GEMINI_MODEL)
     for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=AI_POST_TIMEOUT_SECONDS, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                 resp = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
                 resp.raise_for_status()
                 return resp.json()
@@ -6966,12 +6981,18 @@ async def _gemini_post(payload: dict) -> dict:
             # through to the next provider instead of paying 5s +
             # 15s of retries for a limit that will not clear.
             raise
-        except httpx.TransportError:
+        except httpx.TransportError as exc:
             # Only a transport failure (dropped connection, timeout)
             # gets one quick retry after 0.5s; a second failure
-            # raises and ai_generate falls through.
+            # raises and ai_generate falls through. The exception
+            # TYPE is logged (never its text — httpx error text
+            # carries the request URL, and the Gemini URL carries
+            # the API key), so the next diagnosis is not blind.
             if attempt == 0:
-                log.warning("Gemini transport error, retrying once")
+                log.warning(
+                    "Gemini transport error (%s), retrying once",
+                    type(exc).__name__,
+                )
                 await asyncio.sleep(AI_TRANSIENT_RETRY_DELAY_SECONDS)
                 continue
             raise
@@ -7037,7 +7058,9 @@ async def gemini_transcribe(audio_bytes: bytes, language: str = None) -> str:
             }
         ]
     }
-    data = await _gemini_post(payload)
+    data = await _gemini_post(
+        payload, timeout=GEMINI_MEDIA_TIMEOUT_SECONDS
+    )
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except (KeyError, IndexError, TypeError):
@@ -7090,7 +7113,9 @@ async def gemini_vision(image_bytes: bytes, prompt: str = VISION_PROMPT,
             }
         ]
     }
-    data = await _gemini_post(payload)
+    data = await _gemini_post(
+        payload, timeout=GEMINI_MEDIA_TIMEOUT_SECONDS
+    )
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except (KeyError, IndexError, TypeError):
@@ -7786,7 +7811,23 @@ async def mistral_generate(prompt: str, system: str = None) -> str:
         return ""
 
 
-def _log_ai_failure(message: str, exc) -> None:
+def _exc_note(exc, timeout=None) -> str:
+    """Short, safe note about an exception for logs: the exception
+    TYPE only, plus the timeout budget for a TimeoutException
+    ("TimeoutException after 30.0s"). Never the exception text —
+    httpx error text carries the request URL, and the Gemini URL
+    carries the API key (?key=...), which leaked into the Render
+    logs (13 Nov 2026). The type + budget is the whole diagnosis
+    a timeout needs: live, 18 Nov 2026, three voice notes failed
+    with a bare "transport error" and no way to tell a 5s timeout
+    from a dropped connection."""
+    name = type(exc).__name__
+    if isinstance(exc, httpx.TimeoutException) and timeout is not None:
+        return f"{name} after {timeout}s"
+    return name
+
+
+def _log_ai_failure(message: str, exc, note: str = None) -> None:
     """Log an AI-provider failure: message + HTTP status only.
 
     Never log the exception object or a traceback here — an httpx
@@ -7795,14 +7836,18 @@ def _log_ai_failure(message: str, exc) -> None:
     2026). The status code is all the debugging signal there is.
     The message format is exact — existing secrecy tests assert the
     "(HTTP 429)" substring — so timing is logged on its own line
-    by _ai_attempt, never appended here.
+    by _ai_attempt, never appended here. `note` is an optional
+    caller-supplied safe note (see _exc_note: type name only, never
+    exception text); it is appended after the message and before
+    the status, so "(HTTP 429)" still appears verbatim.
     """
+    text = f"{message} ({note})" if note else message
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     if isinstance(status, int):
-        log.warning("%s (HTTP %s)", message, status)
+        log.warning("%s (HTTP %s)", text, status)
     else:
-        log.warning("%s", message)
+        log.warning("%s", text)
 
 
 async def _ai_attempt(provider: str, coro):
@@ -8087,20 +8132,30 @@ async def ai_transcribe(audio_bytes: bytes, language: str = None) -> str:
     except Exception as exc:
         if language == "am":
             _log_ai_failure(
-                "Gemini transcribe failed, retrying Gemini", exc
+                "Gemini transcribe failed, retrying Gemini", exc,
+                note=_exc_note(exc, GEMINI_MEDIA_TIMEOUT_SECONDS),
             )
             try:
                 return await gemini_transcribe(
                     audio_bytes, language="am"
                 )
             except Exception as exc2:
-                _log_ai_failure("Gemini transcribe retry failed", exc2)
+                _log_ai_failure(
+                    "Gemini transcribe retry failed", exc2,
+                    note=_exc_note(exc2, GEMINI_MEDIA_TIMEOUT_SECONDS),
+                )
             return ""
-        _log_ai_failure("Gemini transcribe failed, trying Groq", exc)
+        _log_ai_failure(
+            "Gemini transcribe failed, trying Groq", exc,
+            note=_exc_note(exc, GEMINI_MEDIA_TIMEOUT_SECONDS),
+        )
     try:
         return await groq_transcribe(audio_bytes, language=language)
     except Exception as exc:
-        _log_ai_failure("Groq transcribe failed", exc)
+        _log_ai_failure(
+            "Groq transcribe failed", exc,
+            note=_exc_note(exc, AI_POST_TIMEOUT_SECONDS),
+        )
     return ""
 
 
@@ -8113,17 +8168,55 @@ def _has_arabic_script(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06ff]", text or ""))
 
 
+def _history_language_hint(user_id: int):
+    """The language of the user's most recent stored message that
+    carries a reliable language signal, or None. Scans the chat
+    history newest-first: Ge'ez script is Amharic or Tigrinya
+    (vocabulary decides, Amharic on a tie — the same rule as
+    detect_language); a Latin-script Oromo word is Oromo. Plain
+    Latin words are NOT a signal: they are either real English
+    or transcriber gibberish for Amharic speech, and the two
+    cannot be told apart — so an English-looking history never
+    overrides anything. The stored history is the durable truth
+    about the language the user actually writes (owner, 18 Nov
+    2026: the server-stored session lang was poisoned to "en" by
+    gibberish Latin transcriptions detected as English, so the
+    lang field cannot be trusted — the Ge'ez words in the history
+    can)."""
+    for entry in reversed(CHAT_HISTORY.get(int(user_id), []) or []):
+        if not isinstance(entry, dict):
+            continue
+        text = entry.get("user") or ""
+        if is_amharic(text):
+            return detect_language(text, "")
+        words = set(re.findall(r"[a-z]+", text.lower()))
+        if words & _OROMO_WORDS:
+            return "om"
+    return None
+
+
 def _voice_language_hint(user_id: int, user_lang: str):
     """The language to hint the transcriber with ("am", "ti",
     "om", "en"), or None when it is genuinely unknown and the
-    transcriber must auto-detect. The user's last detected
-    language wins; else their Telegram language; else unknown —
-    never a guess. Hinting the known language on the first
-    attempt (owner, 18 Nov 2026) is what makes Gemini hear
-    Amharic from the start instead of auto-detecting."""
+    transcriber must auto-detect. Precedence (owner, 18 Nov
+    2026): a non-English last detected language first — it can
+    only come from Ge'ez script or an Oromo word, never from
+    Latin gibberish; then the stored history's newest reliable
+    signal — the durable truth after a restart, when LAST_LANG
+    is empty, and the override when LAST_LANG was poisoned to
+    "en" by a gibberish transcription detected as English;
+    then an English last language; then the Telegram language;
+    else unknown — never a guess. Hinting the known language on
+    the first attempt is what makes Gemini hear Amharic from the
+    start instead of auto-detecting."""
     hint = LAST_LANG.get(user_id)
-    if hint in ("am", "ti", "om", "en"):
+    if hint in ("am", "ti", "om"):
         return hint
+    history_hint = _history_language_hint(user_id)
+    if history_hint in ("am", "ti", "om"):
+        return history_hint
+    if hint == "en":
+        return "en"
     code = (user_lang or "").lower()
     return code[:2] if code[:2] in ("am", "ti", "om", "en") else None
 
@@ -8179,10 +8272,18 @@ async def transcribe_voice_with_retry(audio, user_id: int, user_lang: str) -> st
     kept as a guard even though Gemini has not been seen to
     mis-detect this way: it costs one call only when Arabic
     script actually appears. The garbage guard (owner, 18 Nov
-    2026): for an Amharic user, a transcription with no Ge'ez
-    script that is not recognisable English is transcriber
-    gibberish, not Amharic — it is rejected, so the caller
-    answers honestly instead of feeding it to the order flow.
+    2026): a transcription that carries nothing readable — no
+    Ge'ez script, no Arabic script, no digit, no link, and no
+    word the bot knows in English or Oromo — is transcriber
+    gibberish, not speech in any language the bot understands,
+    and it is rejected for ANY hint, so the caller answers
+    honestly instead of feeding it to the order flow. The guard
+    used to fire only when the hint was "am", which never
+    happened live (the hint was poisoned to "en"), so Groq's
+    "Yansar alutte si forora veli vello." sailed through on
+    18 Nov 2026. Real words still pass: a bare "yes" or "ok", a
+    quantity ("12 thousand", "12000"), Oromo, and English all
+    carry something readable.
     Returns "" when the transcription is empty or unusable or
     both tries fail or stay Arabic, so the caller answers
     honestly instead of feeding wrong text to the order flow."""
@@ -8197,16 +8298,22 @@ async def transcribe_voice_with_retry(audio, user_id: int, user_lang: str) -> st
             return ""
         text = retry
     if (
-        hint == "am"
-        and text
-        and not is_amharic(text)
+        text
+        and not _has_arabic_script(text)
+        and _looks_garbled(text)
         and not _recognisable_english(text)
     ):
-        # Latin gibberish for Amharic speech (live, 18 Nov 2026:
-        # "Asherahulet tishifu lorafel li galo."): no Ge'ez, no
-        # real English word. The first try was already hinted
-        # "am", so a repeat would be the same prompt — answer
-        # honestly instead of feeding it to the order flow.
+        # Transcriber gibberish for ANY hint (live, 18 Nov 2026:
+        # "Yansar alutte si forora veli vello." with no hint at
+        # all, "Asherahulet tishifu lorafel li galo." hinted
+        # "am"): nothing readable — no Ge'ez, no digit, no link,
+        # no known English or Oromo word. Answer honestly instead
+        # of feeding it to the order flow, where the classifier
+        # would call it off_topic and ask for English. Arabic
+        # script is exempted above (the Arabic retry already
+        # handled it), and Oromo is exempted by
+        # _recognisable_english; "yes"/"ok" and quantities pass
+        # because _looks_garbled counts them as readable.
         return ""
     return text
 
@@ -19713,7 +19820,7 @@ def friday_offer_keyboard(pattern) -> InlineKeyboardMarkup:
 
 
 async def maybe_friday_pattern_offer(update, user_id: int, lang: str,
-                                     now=None) -> bool:
+                                     now=None, orders=None) -> bool:
     """The Friday-pattern offer (feature 5, 15 Nov 2026): when the
     user messages on the weekday they usually order on, offer that
     order once — "You usually order 1000 TikTok views on Fridays —
@@ -19745,7 +19852,15 @@ async def maybe_friday_pattern_offer(update, user_id: int, lang: str,
     if _friday_has_open_state(user_id):
         return False
     try:
-        orders = await paxyo.recent_orders(user_id, limit=20)
+        # `orders` is the caller's shared recent-orders list when
+        # given (owner, 18 Nov 2026: the Friday and feedback gates
+        # fetched the same list twice on one light turn); else
+        # fetch it here, as before.
+        orders = (
+            orders
+            if orders is not None
+            else await paxyo.recent_orders(user_id, limit=20)
+        )
         patterns = [
             p for p in detect_weekly_patterns(orders)
             if p["weekday"] == weekday
@@ -19797,7 +19912,7 @@ def feedback_keyboard(order_id) -> InlineKeyboardMarkup:
     ]])
 
 
-async def _first_completed_order(user_id: int):
+async def _first_completed_order(user_id: int, orders=None):
     """The user's OLDEST visible completed order (order_id, created
     datetime), or None. The orders endpoint returns at most 20,
     newest first, so the oldest visible completed order is the
@@ -19807,7 +19922,14 @@ async def _first_completed_order(user_id: int):
     An order with no parseable date cannot prove the first order
     is old enough, so it is skipped. Never raises."""
     try:
-        orders = await paxyo.recent_orders(user_id, limit=20) or []
+        # `orders` is the caller's shared recent-orders list when
+        # given (owner, 18 Nov 2026 — same list the Friday gate
+        # just used); else fetch it here, as before.
+        orders = (
+            orders
+            if orders is not None
+            else await paxyo.recent_orders(user_id, limit=20)
+        ) or []
     except Exception as exc:
         log.warning("feedback recent orders failed: %s", exc)
         return None
@@ -19830,7 +19952,7 @@ async def _first_completed_order(user_id: int):
 
 
 async def maybe_feedback_ask(update, user_id: int, lang: str,
-                             now=None) -> bool:
+                             now=None, orders=None) -> bool:
     """The feedback check (feature 10, 15 Nov 2026): 7 days after
     the user's first completed order, the next time they message
     the bot, ask once "How was your first order with Paxyo?" with
@@ -19858,7 +19980,7 @@ async def maybe_feedback_ask(update, user_id: int, lang: str,
         return False
     if _friday_has_open_state(user_id):
         return False
-    first = await _first_completed_order(user_id)
+    first = await _first_completed_order(user_id, orders=orders)
     if first is None:
         return False
     order_id, created = first
@@ -27497,7 +27619,25 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # 60-second scheduler: no wake-up spam, no message to a user
     # who is not chatting.
     if intent_type in ("greeting", "off_topic", "unclear"):
-        if await maybe_friday_pattern_offer(update, user.id, lang):
+        # One recent-orders list for both gates (owner, 18 Nov
+        # 2026): the Friday gate and the feedback gate each
+        # fetched the same list, so a light turn paid for it twice
+        # (plus feedback_asked) — 26.16s of light_gates live on
+        # 18 Nov 2026 while the server was slow. A failed shared
+        # fetch passes None and each gate fetches on its own,
+        # exactly as before.
+        _orders = None
+        try:
+            _orders = (
+                await paxyo.recent_orders(user.id, limit=20)
+                if paxyo is not None
+                else None
+            )
+        except Exception as exc:
+            log.warning("light gates orders failed: %s", exc)
+        if await maybe_friday_pattern_offer(
+            update, user.id, lang, orders=_orders
+        ):
             return
         # Feedback check (feature 10, 15 Nov 2026): the same
         # light-intent gate, after the Friday offer — a user due
@@ -27505,7 +27645,9 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # it instead of the stock greeting. Never hijacks an order
         # message, never runs while a draft or Confirm is open
         # (checked inside), never via the scheduler.
-        if await maybe_feedback_ask(update, user.id, lang):
+        if await maybe_feedback_ask(
+            update, user.id, lang, orders=_orders
+        ):
             return
 
     # The Friday / feedback gates above each call the server
@@ -29041,6 +29183,17 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _log_ai_failure("voice download failed", exc)
         await update.message.reply_text(t("voice_download_failed", lang))
         return
+    # After a restart the in-memory language and history are empty
+    # and the background restore has not run yet — a voice note
+    # would transcribe with no hint at all. Load the stored
+    # session first (one best-effort API call, only when memory
+    # is empty) so the hint can come from the user's own written
+    # Amharic in the stored history (owner, 18 Nov 2026: the
+    # server-stored lang was poisoned to "en", only the history
+    # holds the truth). Never raises; never blocks a voice note
+    # whose history is already in memory.
+    if not CHAT_HISTORY.get(user.id):
+        await _fetch_session(user.id)
     try:
         text = await transcribe_voice_with_retry(
             audio, user.id, user.language_code
