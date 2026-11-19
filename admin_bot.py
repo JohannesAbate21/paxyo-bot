@@ -1954,10 +1954,13 @@ def _promo_code_after_stop_word(after: str):
 def _promo_duration_expiry(s: str, now=None):
     """An expiry from a duration in the message (19 Nov 2026):
     "for 12 hrs" / "for 1 day" -> now + that long; "tomorrow" ->
-    tomorrow 23:59:59; "today" -> today 23:59:59. Returns a
-    "YYYY-MM-DD HH:MM:SS" string, or None. Times are EAT: the
-    server compares expires_at against NOW() in the server's time
-    zone (server/api-promo-codes.php A4), and the codebase
+    tomorrow 23:59:59; "today" -> today 23:59:59. The verb
+    before the number may also be last / lasts / lasting /
+    valid for: "it should last 12hrs", "last 24 hours",
+    "valid for 12 hrs". Returns a "YYYY-MM-DD HH:MM:SS" string,
+    or None. Times are EAT: the server compares expires_at
+    against NOW() in the server's time zone
+    (server/api-promo-codes.php A4), and the codebase
     convention is EAT everywhere — the admin bot schedules in
     EAT (EAT_TZ above), and
     server/admin-targeted-broadcasts.php sets
@@ -1966,7 +1969,14 @@ def _promo_duration_expiry(s: str, now=None):
     difference, so this uses the same EAT clock the rest of the
     bot uses."""
     now_eat = (now or datetime.now(EAT_TZ)).astimezone(EAT_TZ)
-    dm = re.search(r"for\s+(\d+)\s*(?:hours?|hrs?|h)\b", s)
+    # The verb before the number (19 Nov 2026): "for 12 hrs",
+    # "it should last 12hrs", "last 24 hours", "valid for
+    # 12 hrs". The unit is still required: a bare number
+    # ("last 3 deposits") never matches.
+    verb = r"(?:for|lasting|lasts?|valid\s+for)"
+    dm = re.search(
+        verb + r"\s+(\d+)\s*(?:hours?|hrs?|h)\b", s, re.IGNORECASE
+    )
     if dm:
         try:
             hours = int(dm.group(1))
@@ -1975,7 +1985,9 @@ def _promo_duration_expiry(s: str, now=None):
         return (now_eat + timedelta(hours=hours)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
-    dm = re.search(r"for\s+(\d+)\s*(?:days?|d)\b", s)
+    dm = re.search(
+        verb + r"\s+(\d+)\s*(?:days?|d)\b", s, re.IGNORECASE
+    )
     if dm:
         try:
             days = int(dm.group(1))
@@ -1992,6 +2004,35 @@ def _promo_duration_expiry(s: str, now=None):
     if re.search(r"\btoday\b", s):
         return now_eat.strftime("%Y-%m-%d") + " 23:59:59"
     return None
+
+
+def _promo_pending_expiry_update(pending: dict, text: str) -> bool:
+    """Set a pending promo preview's expiry from a follow-up
+    message (19 Nov 2026): after the preview was shown, "it
+    should last 12 hrs" (or "expires 2026-12-31") sets
+    pending["expires_at"], and the caller re-shows the preview.
+    Returns True when it updated, else False. Expiry only: the
+    code, bonus and max uses are untouched, and nothing is
+    created here; Confirm is still required."""
+    if not isinstance(pending, dict) or pending.get("kind") != "promo":
+        return False
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip()).lower()
+    )
+    if not s:
+        return False
+    expires_at = None
+    em = re.search(
+        r"expir(?:y|es)?\s+(\d{4}-\d{2}-\d{2})", s, re.IGNORECASE
+    )
+    if em:
+        expires_at = em.group(1) + " 23:59:59"
+    if expires_at is None:
+        expires_at = _promo_duration_expiry(s)
+    if expires_at is None:
+        return False
+    pending["expires_at"] = expires_at
+    return True
 
 
 def parse_promo_create_command(text: str):
@@ -4315,6 +4356,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if keyboard is None:
                 PENDING.pop(user.id, None)
             await update.message.reply_text(preview, reply_markup=keyboard)
+            return
+        # A promo preview gains its expiry from a follow-up
+        # (19 Nov 2026): "it should last 12 hrs" after the
+        # preview was shown sets the preview's expires_at and
+        # the preview is re-shown instead of the "change
+        # waiting" reply. Nothing is created. Confirm is
+        # still required.
+        if _promo_pending_expiry_update(pending, text):
+            await update.message.reply_text(
+                _promo_preview(pending),
+                reply_markup=CONFIRM_KEYBOARD,
+            )
             return
         # A preview is waiting for Confirm / Cancel.
         if _is_confirm(text):

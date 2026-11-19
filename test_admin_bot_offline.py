@@ -1746,6 +1746,97 @@ class TestPromoParsing(unittest.TestCase):
         today = datetime.now(admin_bot.EAT_TZ).strftime("%Y-%m-%d")
         self.assertEqual(parsed["expires_at"], today + " 23:59:59")
 
+    def test_duration_last_phrasing(self):
+        # "it should last 12hrs" (19 Nov 2026): the verb before
+        # the number may be last / lasts / lasting / valid for.
+        cases = (
+            ("it should last 12hrs", timedelta(hours=12)),
+            ("last 24 hours", timedelta(hours=24)),
+            ("should last 1 day", timedelta(days=1)),
+            ("valid for 12 hrs", timedelta(hours=12)),
+            ("make it last 12 hrs", timedelta(hours=12)),
+        )
+        for text, delta in cases:
+            expiry = admin_bot._promo_duration_expiry(text)
+            self.assertIsNotNone(expiry, text)
+            expected = datetime.now(admin_bot.EAT_TZ) + delta
+            actual = datetime.strptime(
+                expiry, "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=admin_bot.EAT_TZ)
+            self.assertLess(
+                abs((actual - expected).total_seconds()), 120, text
+            )
+        # "for 12 hrs" still works.
+        self.assertIsNotNone(
+            admin_bot._promo_duration_expiry("for 12 hrs")
+        )
+        # A bare number with no unit is not a duration.
+        self.assertIsNone(
+            admin_bot._promo_duration_expiry("last 3 deposits")
+        )
+        # "today" / "tomorrow" still work.
+        self.assertIsNotNone(
+            admin_bot._promo_duration_expiry("tomorrow")
+        )
+        self.assertIsNotNone(admin_bot._promo_duration_expiry("today"))
+        # The "last" phrasing also parses inside a create command.
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code GENA20 20% should last 12 hrs"
+        )
+        self.assertEqual(parsed["code"], "GENA20")
+        self.assertEqual(parsed["percent"], 20)
+        expected = datetime.now(admin_bot.EAT_TZ) + timedelta(hours=12)
+        actual = datetime.strptime(
+            parsed["expires_at"], "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=admin_bot.EAT_TZ)
+        self.assertLess(abs((actual - expected).total_seconds()), 120)
+
+    def test_pending_expiry_update_helper(self):
+        # A pending GENA20 preview with no expiry gains one from
+        # "it should last 12 hrs" (19 Nov 2026); other fields
+        # are untouched and nothing is created here.
+        pending = {"kind": "promo", "code": "GENA20", "percent": 20,
+                   "fixed_etb": None, "expires_at": None,
+                   "max_uses": None}
+        self.assertTrue(
+            admin_bot._promo_pending_expiry_update(
+                pending, "it should last 12 hrs"
+            )
+        )
+        expected = datetime.now(admin_bot.EAT_TZ) + timedelta(hours=12)
+        actual = datetime.strptime(
+            pending["expires_at"], "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=admin_bot.EAT_TZ)
+        self.assertLess(abs((actual - expected).total_seconds()), 120)
+        self.assertEqual(pending["code"], "GENA20")
+        self.assertEqual(pending["percent"], 20)
+        self.assertIsNone(pending["max_uses"])
+        # No duration -> False, expiry unchanged.
+        self.assertFalse(
+            admin_bot._promo_pending_expiry_update(
+                pending, "last 3 deposits"
+            )
+        )
+        self.assertEqual(pending["expires_at"], actual.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ))
+        # An explicit date works too.
+        self.assertTrue(
+            admin_bot._promo_pending_expiry_update(
+                pending, "expires 2026-12-31"
+            )
+        )
+        self.assertEqual(pending["expires_at"], "2026-12-31 23:59:59")
+        # Not a promo pending -> False.
+        self.assertFalse(
+            admin_bot._promo_pending_expiry_update(
+                {"kind": "refund"}, "last 12 hrs"
+            )
+        )
+        self.assertFalse(
+            admin_bot._promo_pending_expiry_update(None, "last 12 hrs")
+        )
+
     def test_use_this_code_form(self):
         parsed = admin_bot.parse_promo_create_command(
             "use this code GENA20 for it give 20% bonus when users "
@@ -2014,6 +2105,32 @@ class TestPromoFlow(AdminBotBase):
              "fixed_etb": None,
              "expires_at": "2026-12-31 23:59:59", "max_uses": 100},
         )
+
+    async def test_pending_preview_gains_expiry_from_followup(self):
+        # GENA20 preview with no expiry, then "it should last
+        # 12 hrs" (19 Nov 2026) — the preview is re-shown with
+        # the expiry, and nothing is created.
+        fake = FakeAdminPaxyo(stats=STATS)
+        first = await self._create(
+            fake,
+            "use this code GENA20 for it give 20% bonus when users "
+            "deposit with this code",
+        )
+        self.assertNotIn("Expires:", first.text_sent[0])
+        message = await self._text("it should last 12 hrs")
+        self.assertEqual(len(message.text_sent), 1)
+        expected_date = (
+            datetime.now(admin_bot.EAT_TZ) + timedelta(hours=12)
+        ).strftime("%Y-%m-%d")
+        self.assertIn(f"Expires: {expected_date}", message.text_sent[0])
+        self.assertIn("GENA20", message.text_sent[0])
+        self.assertIn("20%", message.text_sent[0])
+        self.assertIsNotNone(message.markups[0])
+        self.assertEqual(
+            admin_bot.PENDING[ADMIN_ID]["expires_at"][:10],
+            expected_date,
+        )
+        self.assertEqual(fake.promo_calls, [])
 
     async def test_nothing_created_before_confirm(self):
         fake = FakeAdminPaxyo(stats=STATS)
