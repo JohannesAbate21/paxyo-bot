@@ -865,6 +865,7 @@ class FakePaxyo:
                  deposits=None, deposits_none=False, status="pending",
                  session=None, delayed=None, delayed_due=None,
                  delayed_none=False, claim_ok=True,
+                 refills=None, refills_none=False, refills_live=False,
                  services=None, status_by_order=None, admin_stats=None,
                  my_referral=None, referral_error=None,
                  referral_error_status=400, referral_none=False,
@@ -1083,6 +1084,19 @@ class FakePaxyo:
         self.delayed_cancelled = []
         self.delayed_claims = []
         self.delayed_finished = []
+        # Auto-refill records (19 Nov 2026): a seeded list for
+        # list_refills, and a record of every create / stop.
+        # refills_none=True returns None from create_refill (the
+        # real client does that on a 404: endpoint not live yet).
+        # refills_live=False by default (like dripfeed_live):
+        # the endpoint is not live in the fake's world unless a
+        # test opts in.
+        self._refills = list(refills) if refills is not None else []
+        self._refills_none = refills_none
+        self._refills_live = refills_live
+        self._refill_next_id = 201
+        self.refills_created = []
+        self.refills_stopped = []
         # Promo codes (ideas batch 2, feature 1, 15 Nov 2026):
         # promo_codes maps an uppercased code to its validate
         # record; an unmapped code gets the "does not exist"
@@ -2097,6 +2111,45 @@ class FakePaxyo:
             r for r in self._delayed_due
             if str(r.get("id")) != str(delayed_id)
         ]
+        return {"ok": True}
+
+    async def refills_live(self):
+        return bool(self._refills_live)
+
+    async def create_refill(self, telegram_id, service_id, provider, link,
+                            platform, metric, target, service,
+                            idempotency_key):
+        """refills_none=True returns None (the real client does that
+        on a 404: endpoint not live yet). Otherwise mirror the
+        server: store the row and return it with its server id."""
+        if self._refills_none:
+            return None
+        record = {
+            "id": self._refill_next_id, "telegram_id": telegram_id,
+            "service_id": service_id, "provider": provider,
+            "link": link, "platform": platform, "metric": metric,
+            "target": target, "service": service,
+            "spent_today": 0, "spent_date": None,
+            "last_count": None, "last_check": None,
+            "count_usage": {}, "status": "active",
+            "idempotency_key": idempotency_key,
+            "created_at": "2026-11-19T20:00:00Z",
+        }
+        self._refill_next_id += 1
+        self.refills_created.append(record)
+        self._refills.append(record)
+        return {"ok": True, "id": record["id"], "refill": dict(record)}
+
+    async def list_refills(self, telegram_id, status="active"):
+        return [dict(r) for r in self._refills
+                if r.get("telegram_id") == telegram_id
+                and r.get("status") == status]
+
+    async def stop_refill(self, refill_id, telegram_id):
+        self.refills_stopped.append(refill_id)
+        for r in self._refills:
+            if str(r.get("id")) == str(refill_id):
+                r["status"] = "stopped"
         return {"ok": True}
 
 
@@ -40659,6 +40712,54 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.AUTO_REFILL_ACTIVE[1][0]["target"], 10000)
         self.assertEqual(bot.PENDING_AUTO_REFILL, {})
         self.assertEqual(paxyo.orders_created, [])
+
+    async def test_confirm_saves_refill_on_server(self):
+        # Server live: the Confirm posts the refill, and the
+        # in-memory record takes the server id so the worker and
+        # the stop handler key on it from here on.
+        paxyo = FakePaxyo(services=self.SERVICES)
+        await self._build_preview(paxyo=paxyo)
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(len(paxyo.refills_created), 1)
+        created = paxyo.refills_created[0]
+        self.assertEqual(created["telegram_id"], 1)
+        self.assertEqual(created["target"], 10000)
+        self.assertEqual(created["link"], self.LINK)
+        self.assertEqual(created["platform"], "tiktok")
+        self.assertEqual(created["metric"], "views")
+        record = bot.AUTO_REFILL_ACTIVE[1][0]
+        self.assertEqual(record["id"], created["id"])
+        self.assertTrue(record["_server"])
+
+    async def test_confirm_server_absent_keeps_memory_refill(self):
+        # Server not live yet (404): the refill still switches on
+        # in memory, flagged as not saved, instead of losing the
+        # user's setup over a missing endpoint.
+        paxyo = FakePaxyo(services=self.SERVICES, refills_none=True)
+        await self._build_preview(paxyo=paxyo)
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(paxyo.refills_created, [])
+        record = bot.AUTO_REFILL_ACTIVE[1][0]
+        self.assertTrue(str(record["id"]).startswith("mem-"))
+        self.assertFalse(record.get("_server"))
+
+    async def test_stop_tells_server_and_status_hides_warning_when_live(self):
+        paxyo = FakePaxyo(services=self.SERVICES, refills_live=True)
+        await self._build_preview(paxyo=paxyo)
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        server_id = paxyo.refills_created[0]["id"]
+        msg = await self._send(
+            "my auto refills", intent_of("auto_refill_status"), paxyo=paxyo)
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertNotIn("not installed yet", msg.text_sent[0])
+        msg = await self._send(
+            "stop auto refill", intent_of("auto_refill_stop"), paxyo=paxyo)
+        self.assertIn("Stopped the auto-refill", msg.text_sent[0])
+        self.assertEqual(paxyo.refills_stopped, [server_id])
+        self.assertEqual(bot.AUTO_REFILL_ACTIVE[1], [])
 
     async def test_cancel_button_switches_nothing_on(self):
         await self._build_preview()
