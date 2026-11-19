@@ -145,7 +145,7 @@ function arf_ensure_tables() {
       `spent_date` date DEFAULT NULL,
       `last_count` int DEFAULT NULL,
       `last_check` bigint DEFAULT NULL,
-      `count_usage` text NOT NULL DEFAULT '{}',
+      `count_usage` text NULL,
       `status` enum('active','checking','stopped') NOT NULL DEFAULT 'active',
       `idempotency_key` varchar(64) DEFAULT NULL,
       `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
