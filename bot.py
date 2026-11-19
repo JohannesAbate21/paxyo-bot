@@ -1759,6 +1759,32 @@ TEXT = {
         "am": "በየ ስንት ሰዓት ነው? (ለምሳሌ: በየ 3 ሰዓቱ)",
         "en": "How often? (for example: every 3 hours)",
     },
+    # Bounded drip-feed plans (19 Nov 2026): runs are always asked
+    # or derived, never left open-ended.
+    "ask_runs": {
+        "am": "ስንት ጊዜ መድገም አለበት? (ለምሳሌ: 10 ጊዜ)",
+        "en": "How many times should it repeat? (for example: 10 times)",
+    },
+    "drip_not_live": {
+        "am": "Repeating order ገና ማድረግ አልችልም, drip-feed በserver ላይ አልተዘጋጀም። አንድ ጊዜ መዘዝ ይችላሉ, \"place it once\" ይበሉ።",
+        "en": "I can't repeat orders yet, drip-feed isn't set up on the server. I can place this order once instead, just say \"place it once\".",
+    },
+    "drip_service_no_dripfeed": {
+        "am": "ይህ service drip-feed አያቀርብም, መድገም አልችልም። በአንድ ጊዜ ለመዘዝ \"place it once\" ይበሉ, ወይም ሌላ service ይምረጡ።",
+        "en": "This service doesn't offer drip-feed, so I can't repeat it. Say \"place it once\" to order it all at once, or pick another service.",
+    },
+    "drip_low_balance": {
+        "am": "ጠቅላላ {total} ETB ያስፈልጋል ({runs} ጊዜ {per_run} በየ {interval}), ግን balanceዎ {balance} ETB ነው, {shortfall} ETB ይጎድላል። Top up ያድርጉ እና እንደገና ይንገሩኝ, ወይም \"cancel\" ይበሉ።",
+        "en": "This would cost {total} ETB in total ({runs} runs of {per_run} every {interval}), but your balance is {balance} ETB, you're {shortfall} ETB short. Top up and tell me again, or say \"cancel\".",
+    },
+    "drip_weekly_limit": {
+        "am": "በዚህ ሳምንት {spent} ETB አውጥተዋል እና ገደብዎ {limit} ETB ነው። ይህ order ({total} ETB) ከገደቡ ያልፋል። Orderዎን ጠብቄአለሁ, ገደቡን ለማጥፋት \"turn off the weekly limit\" ይበሉ።",
+        "en": "You've spent {spent} ETB this week and your limit is {limit} ETB. This order ({total} ETB) would take you over it. I kept your order, say \"turn off the weekly limit\" to change it.",
+    },
+    "order_drip_placed": {
+        "am": "Drip-feed: በየ {interval} {per_run}, {runs} ጊዜ። መጨረሻ {end}።",
+        "en": "Drip-feed: {runs} runs of {per_run} every {interval}. Last drop {end}.",
+    },
     "interval_too_short": {
         "am": "በጣም አጭር ነው — በትንሹ በየ 30 ደቂቃ ነው።",
         "en": "That's too often — the shortest repeat is every 30 minutes.",
@@ -3378,8 +3404,9 @@ def parse_interval_minutes(text):
 
     Fallback for when Gemini did not return interval_minutes:
     "every 3 hours" -> 180, "every 2 days" -> 2880, "every 30
-    minutes" -> 30, "hourly" -> 60, "daily" -> 1440. Returns the first
-    number+unit pair found; a bare "every 3" with no unit is ignored.
+    minutes" -> 30, "hourly" -> 60, "daily" -> 1440, "every week" ->
+    10080. Returns the first number+unit pair found; a bare "every 3"
+    with no unit is ignored.
     """
     if not text:
         return None
@@ -3388,12 +3415,15 @@ def parse_interval_minutes(text):
         return 60
     if "daily" in s or "every day" in s or "each day" in s:
         return 1440
+    if "weekly" in s or "every week" in s or "each week" in s:
+        return 10080
     units = {
         "day": 1440, "days": 1440,
+        "week": 10080, "weeks": 10080,
         "hour": 60, "hours": 60, "hr": 60, "hrs": 60,
         "minute": 1, "minutes": 1, "min": 1, "mins": 1,
     }
-    match = re.search(r"(\d+)\s*(days?|hours?|hrs?|minutes?|mins?)", s)
+    match = re.search(r"(\d+)\s*(days?|weeks?|hours?|hrs?|minutes?|mins?)", s)
     if not match:
         return None
     return int(match.group(1)) * units[match.group(2)]
@@ -3463,6 +3493,62 @@ def format_interval(minutes):
         n = minutes // 60
         return f"{n} hour" if n == 1 else f"{n} hours"
     return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+
+
+def parse_runs(text):
+    """A repeat count in plain words, or None. "10 times" -> 10,
+    "repeat it 5 times" -> 5, "for 3 runs" -> 3. A bare number is
+    NOT a count here — the caller only treats a lone number as
+    runs when a plan is already waiting for it."""
+    if not text:
+        return None
+    s = " ".join(str(text).strip().lower().split())
+    match = re.search(r"(\d+)\s*(?:times|runs)\b", s)
+    if not match:
+        return None
+    try:
+        runs = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return runs if runs > 0 else None
+
+
+def _drip_end_text(runs, interval_minutes, now=None):
+    """When the last drop of a drip lands, in the user's words:
+    "22:30 EAT tomorrow". The first drop is now; the last is
+    (runs - 1) gaps later."""
+    try:
+        runs = int(runs)
+        interval = int(interval_minutes)
+    except (TypeError, ValueError):
+        return "?"
+    if runs < 1 or interval <= 0:
+        return "?"
+    end = (now or datetime.now(timezone.utc)) + timedelta(
+        minutes=(runs - 1) * interval
+    )
+    return format_eat_run_at(end.strftime("%Y-%m-%d %H:%M:%S"))
+
+
+def _drip_summary_line(lang, drip):
+    """One line for a placed drip order: runs, per-run quantity,
+    interval and the last drop. None when the dict is not a drip
+    (so normal orders are untouched)."""
+    try:
+        runs = int((drip or {}).get("runs"))
+        per_run = int((drip or {}).get("per_run_qty") or 0)
+        interval = int((drip or {}).get("interval"))
+    except (TypeError, ValueError):
+        return None
+    if runs < 2 or per_run <= 0 or interval <= 0:
+        return None
+    return t(
+        "order_drip_placed", lang,
+        runs=runs,
+        per_run=f"{per_run:,}",
+        interval=format_interval(interval),
+        end=_drip_end_text(runs, interval),
+    )
 
 
 EAT_TZ = timezone(timedelta(hours=3))  # Ethiopia time, UTC+3.
@@ -21363,6 +21449,11 @@ async def send_order_result(message, lang: str, pending, user_id: int):
             test_quantity=result["test_quantity"],
             quantity=result["quantity"],
         )
+    # Drip-feed (19 Nov 2026): the summary names the plan, so a
+    # drip never reads like one order of the whole quantity.
+    _drip_line = _drip_summary_line(lang, result.get("drip") or {})
+    if _drip_line:
+        summary += "\n" + _drip_line
     # No-confirm (#18) and auto-repeat (#16): a small order placed
     # without asking says so in one line, and a standing repeat
     # for this order type starts now (once — see
@@ -23361,16 +23452,144 @@ async def handle_stop_schedule(update, lang, voice=False):
     await stop_schedules_flow(update, schedules, lang, voice=voice)
 
 
-async def handle_recurring_text(update, text, intent, lang, voice=False):
-    """Build a repeating-order plan over several turns, then show the
-    plan summary with a Confirm card. Nothing is created on the server
-    until the user taps Confirm (or says yes): a plan that runs by
-    itself must never start on a misunderstood message.
+_THAT_LINK_ONLY = (
+    "that link", "same link", "the same link", "that one",
+    "the link from before", "last link", "that post", "that video",
+)
 
-    Missing pieces are asked in order: platform -> link -> quantity ->
-    interval. The link is resolved from the user's most recent order
-    when they say "that link" or give no link at all — the summary
-    shows the link, and Confirm is the safety net.
+
+def _is_recurring_followup(text, user_id):
+    """True when a message only answers the open repeating-order
+    plan's question: a bare link, "that link", or a runs answer
+    ("10 times", a bare number while the plan waits for runs). A
+    fuller message (a fresh order, a balance question, a deposit)
+    is not a follow-up and goes through the normal dispatch."""
+    draft = RECURRING_DRAFT.get(user_id) or {}
+    if not draft:
+        return False
+    links = extract_links(text or "")
+    rest = text or ""
+    for link in links:
+        rest = rest.replace(link, " ")
+    rest = " ".join(rest.strip().lower().split())
+    if links and not rest:
+        # A bare link answers the plan's link question, unless a
+        # normal order is being built at the same time, in which
+        # case the link belongs to that order.
+        return not PARTIAL.get(user_id)
+    if not draft.get("link"):
+        if (
+            any(p in rest for p in _THAT_LINK_ONLY)
+            and not re.search(r"\d", rest)
+        ):
+            return True
+    if draft.get("runs") is None:
+        if parse_runs(text) is not None:
+            # A runs answer carries no link, platform, metric or
+            # interval words: "repeat it 10 times" counts,
+            # "10k views every hour" does not.
+            if links:
+                return False
+            words = rest.split()
+            if any(w in _PLATFORMS or w in _METRICS for w in words):
+                return False
+            if re.search(
+                r"\b(every|hour|hours|hr|hrs|day|days|minute|minutes|min|mins|week|weeks)\b",
+                rest,
+            ):
+                return False
+            return True
+        if rest.isdigit() and not DEPOSIT_DRAFT.get(user_id):
+            # A bare number is the runs answer, unless a normal
+            # order is waiting for its quantity.
+            partial = PARTIAL.get(user_id) or {}
+            return not (partial.get("link") and not partial.get("quantity"))
+    return False
+
+
+def _runs_from_total(user_id, merged):
+    """Runs from a total the user already gave: a parked or
+    in-progress draft for the SAME platform whose quantity is a
+    whole multiple of this plan's per-drop quantity. 100k total
+    at 10k a drop is 10 runs. None when there is no such total,
+    or it does not split evenly: the bot then asks how many
+    times instead of guessing."""
+    try:
+        per_drop = int(merged.get("quantity") or 0)
+    except (TypeError, ValueError):
+        return None
+    if per_drop <= 0:
+        return None
+    platform = (merged.get("platform") or "").strip().lower()
+    if not platform:
+        return None
+    for draft in (PARTIAL.get(user_id) or {}, PARKED_DRAFT.get(user_id) or {}):
+        try:
+            total = int(draft.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if total <= per_drop or total % per_drop != 0:
+            continue
+        draft_platform = (draft.get("platform") or "").strip().lower()
+        if draft_platform != platform:
+            continue
+        return total // per_drop
+    return None
+
+
+async def _refuse_mismatched_link(update, draft_store, user_id, merged,
+                                  service, lang, voice=False):
+    """A link from ANOTHER platform never reaches Confirm: drop it
+    from the draft and ask for the right link. Returns True when
+    the link was refused (the caller returns), False when the
+    caller continues. Only the platform (domain) is refused here:
+    a wrong link TYPE (a post link for a followers service) is
+    left to place_pending_order, the same backstop the normal
+    order flow uses — it refuses at placement and asks for the
+    right link instead of placing."""
+    error = validate_order_link(merged.get("link"), service)
+    if error != "platform":
+        return False
+    dropped = {k: v for k, v in merged.items() if v is not None}
+    dropped.pop("link", None)
+    draft_store[user_id] = dropped
+    platform, _hint = _platform_hint_of_service(service)
+    await reply_message(
+        update.message,
+        t(
+            "platform_mismatch", lang,
+            link_platform=platform_from_link(merged.get("link")),
+            platform=(
+                (merged.get("platform") or "").strip().lower()
+                or platform or ""
+            ),
+        ),
+        lang, voice=voice,
+    )
+    return True
+
+
+async def handle_recurring_text(update, text, intent, lang, voice=False):
+    """Build a BOUNDED repeating-order plan (drip-feed) over several
+    turns, then show the plan summary with a Confirm card. Nothing
+    is created on the server until the user taps Confirm (or says
+    yes): a plan that repeats by itself must never start on a
+    misunderstood message.
+
+    Missing pieces are asked in order: platform -> link -> quantity
+    -> interval -> runs. The link is NEVER taken from the user's
+    last order unless they explicitly say so ("that link"): a
+    stale link for another platform must never land on a Confirm
+    card, and a link from another platform is refused before the
+    card (a wrong link type is caught at placement, the same
+    backstop the normal order flow uses). The plan is always bounded: the number of runs
+    comes from the user ("10 times"), from a total they already
+    gave (100k total at 10k a drop is 10 runs), or the bot asks
+    "how many times?". The card shows per-drop quantity, interval,
+    runs, total quantity, total cost and the last drop. On Confirm
+    the plan is placed as ONE provider drip-feed order
+    (runs/interval), charged up front: never as an open-ended
+    schedule, and never faked with separate orders.
     """
     user = update.effective_user
     stored = RECURRING_DRAFT.get(user.id) or {}
@@ -23379,7 +23598,8 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
     if new_platform and stored_platform and new_platform != stored_platform:
         stored = {}
     merged = {}
-    for key in ("platform", "service_hint", "link", "quantity", "interval_minutes"):
+    for key in ("platform", "service_hint", "link", "quantity",
+                "interval_minutes", "runs"):
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
     if merged.get("interval_minutes") is None:
@@ -23397,8 +23617,38 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         RECURRING_DRAFT.pop(user.id, None)
         await reply_message(update.message, t("interval_too_short", lang), lang, voice=voice)
         return
+    # Runs: from the message ("10 times"), from a bare number when
+    # the plan is only waiting for runs, or from a total the user
+    # already gave for the same platform (see _runs_from_total).
+    # A count under 2 is not a repeat.
+    if merged.get("runs") is None:
+        merged["runs"] = parse_runs(text)
+    if (
+        merged.get("runs") is None
+        and merged.get("quantity") is not None
+        and merged.get("interval_minutes") is not None
+        and (text or "").strip().isdigit()
+    ):
+        merged["runs"] = int((text or "").strip())
+    if merged.get("runs") is None:
+        merged["runs"] = _runs_from_total(user.id, merged)
+    try:
+        runs = int(merged["runs"]) if merged.get("runs") is not None else None
+    except (TypeError, ValueError):
+        runs = None
+    if runs is not None and runs < 2:
+        runs = None
+    merged["runs"] = runs
+    # The link is resolved from the user's most recent order ONLY
+    # when they explicitly say so ("that link"): never silently.
+    # A link pasted in this message (or carried by the intent)
+    # always wins; otherwise the bot asks for it.
     last_service_id = None
     if not merged.get("link"):
+        _raw_links = extract_links(text)
+        if _raw_links:
+            merged["link"] = _raw_links[0]
+    if not merged.get("link") and mentions_that_link(text):
         last = await resolve_last_order(user.id)
         if last and last.get("link"):
             merged["link"] = last.get("link")
@@ -23423,9 +23673,20 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_interval", lang), lang, voice=voice)
         return
+    if not merged.get("runs"):
+        RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(update.message, t("ask_runs", lang), lang, voice=voice)
+        return
 
     # Complete plan: pick the service and show the summary with Confirm.
     RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+    # Drip-feed must be live on the server before the card is
+    # shown: a repeat is a provider drip-feed order, and without
+    # the endpoint the bot would promise what it cannot place.
+    # The service's own drip-feed flag is checked after the pick.
+    if not await paxyo.dripfeed_live():
+        await reply_message(update.message, t("drip_not_live", lang), lang, voice=voice)
+        return
     try:
         services = await paxyo.services()
     except Exception as exc:
@@ -23477,50 +23738,100 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
             voice=voice,
         )
         return
-    # Complete plan: pick the service and show the summary with Confirm.
-    RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
-    if error:
+    # The link must fit the service: a Telegram link on a TikTok
+    # order never reaches the Confirm card.
+    if await _refuse_mismatched_link(
+        update, RECURRING_DRAFT, user.id, merged, service, lang, voice=voice
+    ):
+        return
+    if service.get("dripfeed") is False:
+        RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(
+            update.message, t("drip_service_no_dripfeed", lang), lang, voice=voice
+        )
+        return
+    per_drop = int(merged["quantity"])
+    rate = float(service.get("rate_etb_per_1000", 0))
+    total_qty = per_drop * runs
+    total_cost = estimated_total_etb(rate, total_qty)
+    # Affordability is judged on the TOTAL of all runs, never on
+    # one drop: the provider charges the whole drip up front.
+    _shortfall = await _low_balance_shortfall(user.id, service, total_cost)
+    if _shortfall is not None:
+        _short_amount, _balance = _shortfall
+        RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(
             update.message,
             t(
-                "bad_quantity",
-                lang,
-                service=short_service_name(service.get("name")),
-                min=service.get("min"),
-                max=service.get("max"),
+                "drip_low_balance", lang,
+                total=format_money(total_cost),
+                runs=runs,
+                per_run=f"{per_drop:,}",
+                interval=format_interval(interval),
+                balance=format_money(_balance),
+                shortfall=format_money(_short_amount),
             ),
-            lang,
-            voice=voice,
+            lang, voice=voice,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    t("deposit_webapp_button", lang,
+                      amount=format_money(_short_amount)),
+                    callback_data=f"depshort:{_short_amount:.2f}",
+                )
+            ]]),
         )
         return
-    quantity = int(merged["quantity"])
-    rate = float(service.get("rate_etb_per_1000", 0))
-    total = estimated_total_etb(rate, quantity)
+    # Weekly spending limit (#25): the same refusal as a normal
+    # order, judged on the total.
+    _weekly_limit = get_pref(user.id, "pref_weekly_spend_limit_etb")
+    if _weekly_limit is not None:
+        _spent = await _weekly_spent_etb(user.id)
+        if _spent + total_cost > _weekly_limit:
+            RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+            await reply_message(
+                update.message,
+                t(
+                    "drip_weekly_limit", lang,
+                    spent=format_money(_spent),
+                    limit=format_money(_weekly_limit),
+                    total=format_money(total_cost),
+                ),
+                lang, voice=voice,
+            )
+            return
     confirm_id = uuid.uuid4().hex[:12]
     RECURRING_DRAFT.pop(user.id, None)
-    PENDING_RECURRING[confirm_id] = {
+    PENDING[confirm_id] = {
         "user_id": user.id,
         "service": service,
         "link": merged["link"],
-        "quantity": quantity,
-        "interval_minutes": merged["interval_minutes"],
-        "total": total,
+        "quantity": total_qty,
+        "total": total_cost,
+        "full_name": False,
+        "platform": merged.get("platform"),
+        "service_hint": merged.get("service_hint"),
+        "reaction_emoji": reaction_emoji(text),
+        "drip": {
+            "runs": runs,
+            "interval": interval,
+            "per_run_qty": per_drop,
+        },
     }
-    lines = [
-        t("confirm_title", lang),
-        "",
-        f"{short_service_name(service.get('name'))}",
-        f"🔢 {quantity}",
-        f"🔁 every {format_interval(merged['interval_minutes'])}",
-        f"🧾 {format_money(total)} ETB per order",
-        f"🔗 {merged['link']}",
-    ]
-    # Plan summary: always text — it carries the Confirm buttons.
-    await reply_message(
-        update.message, "\n".join(lines), lang,
+    _note = (
+        f"Drip-feed: {runs} runs of {per_drop:,} every "
+        f"{format_interval(interval)}. "
+        f"Last drop {_drip_end_text(runs, interval)}."
+    )
+    _sent = await reply_message(
+        update.message,
+        confirm_card_text(
+            lang, service, total_qty, total_cost, merged["link"],
+            note=_note, full_name=False,
+        ),
+        lang,
         reply_markup=confirm_keyboard(confirm_id),
     )
-
+    _remember_card_message(PENDING[confirm_id], update.message, _sent)
 
 async def handle_delayed_order_text(update, text, intent, lang, voice=False):
     """Build a one-time delayed order over several turns, then show
@@ -23558,6 +23869,10 @@ async def handle_delayed_order_text(update, text, intent, lang, voice=False):
     merged["delay_minutes"] = delay
     last_service_id = None
     if not merged.get("link"):
+        _raw_links = extract_links(text)
+        if _raw_links:
+            merged["link"] = _raw_links[0]
+    if not merged.get("link") and mentions_that_link(text):
         last = await resolve_last_order(user.id)
         if last and last.get("link"):
             merged["link"] = last.get("link")
@@ -23636,6 +23951,10 @@ async def handle_delayed_order_text(update, text, intent, lang, voice=False):
             lang,
             voice=voice,
         )
+        return
+    if await _refuse_mismatched_link(
+        update, DELAYED_DRAFT, user.id, merged, service, lang, voice=voice
+    ):
         return
     quantity = int(merged["quantity"])
     rate = float(service.get("rate_etb_per_1000", 0))
@@ -28850,6 +29169,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # through to the normal order flow.
         DELAYED_DRAFT.pop(user.id, None)
 
+    # A repeating-order plan being built keeps routing here on
+    # follow-up turns (a bare link, "that link", or how many
+    # times), unless the message names a different platform:
+    # that starts a new order and drops the plan, the same rule
+    # the delayed flow uses.
+    if user.id in RECURRING_DRAFT and intent_type in ("order", "unclear"):
+        _stored_rec = RECURRING_DRAFT[user.id]
+        _new_platform = (intent.get("platform") or "").strip().lower()
+        _stored_platform = (_stored_rec.get("platform") or "").strip().lower()
+        if _is_recurring_followup(text, user.id) and not (
+            _new_platform and _stored_platform and _new_platform != _stored_platform
+        ):
+            await handle_recurring_text(update, text, intent, lang, voice=voice)
+            return
+        if _new_platform and _stored_platform and _new_platform != _stored_platform:
+            RECURRING_DRAFT.pop(user.id, None)
+
     # --- order flow: multi-turn state ---
     # A bundle draft is dropped here (ideas batch 1 #3): reaching
     # the normal order flow means the user is ordering something
@@ -31340,6 +31676,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 test_quantity=result["test_quantity"],
                 quantity=result["quantity"],
             )
+        # Drip-feed (19 Nov 2026): same note as the
+        # text-acceptance summary above.
+        _drip_line = _drip_summary_line(lang, result.get("drip") or {})
+        if _drip_line:
+            summary += "\n" + _drip_line
         # Auto-repeat (#16, customizations, 15 Nov 2026): same
         # hook as the text-acceptance summary — a standing repeat
         # for this order type starts now, once.

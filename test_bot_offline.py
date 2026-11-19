@@ -2933,6 +2933,7 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
         bot.PENDING_RECURRING.clear()
         bot.RECURRING_DRAFT.clear()
         bot.DEPOSIT_DRAFT.clear()
@@ -2950,6 +2951,7 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
         bot.PENDING_RECURRING.clear()
         bot.RECURRING_DRAFT.clear()
         bot.DEPOSIT_DRAFT.clear()
@@ -2974,69 +2976,86 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
     def _plan_intent(self):
         return recurring_intent(
             platform="instagram", service_hint="followers",
-            link="https://instagram.com/p/x", quantity=1000,
+            link="https://instagram.com/paxyo", quantity=1000,
             interval_minutes=180,
         )
 
     async def test_plan_summary_shown_and_nothing_created(self):
-        paxyo = FakePaxyo()
+        paxyo = FakePaxyo(dripfeed_live=True)
         msg = await self._send(
-            "order 1000 followers on that link every 3 hours",
+            "order 1000 followers on that link every 3 hours, 10 times",
             self._plan_intent(), paxyo=paxyo,
         )
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("Instagram Followers", msg.text_sent[0])
         self.assertNotIn("Instagram Followers | Fast", msg.text_sent[0])
         self.assertIn("every 3 hours", msg.text_sent[0])
-        self.assertIn("42.00", msg.text_sent[0])  # 42 ETB/1000 x 1000
-        self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        self.assertIn("420.00", msg.text_sent[0])  # 42 ETB/1000 x 10,000 total
+        self.assertIn("10 runs", msg.text_sent[0])
+        self.assertIn("10000", msg.text_sent[0])  # total quantity
+        self.assertIn("Last drop", msg.text_sent[0])
+        self.assertNotIn("per order", msg.text_sent[0])
+        self.assertIn("https://instagram.com/paxyo", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])  # Confirm/Cancel buttons
         self.assertEqual(paxyo.recurring_created, [])  # nothing yet
-        self.assertEqual(len(bot.PENDING_RECURRING), 1)
-
-    async def test_confirm_button_creates_the_schedule(self):
-        paxyo = FakePaxyo()
-        await self._send(
-            "order 1000 followers every 3 hours", self._plan_intent(),
-            paxyo=paxyo,
-        )
-        confirm_id = next(iter(bot.PENDING_RECURRING))
-        query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
-        self.assertEqual(len(paxyo.recurring_created), 1)
-        created = paxyo.recurring_created[0]
-        self.assertEqual(created["service_id"], 1001)
-        self.assertEqual(created["quantity"], 1000)
-        self.assertEqual(created["interval_minutes"], 180)
+        self.assertEqual(len(bot.PENDING), 1)
         self.assertEqual(bot.PENDING_RECURRING, {})
-        self.assertIn("Started!", query.edited[0])
-        self.assertIn("every 3 hours", query.edited[0])
+
+    async def test_confirm_button_places_the_drip_order(self):
+        paxyo = FakePaxyo(dripfeed_live=True)
+        await self._send(
+            "order 1000 followers every 3 hours, 10 times",
+            self._plan_intent(), paxyo=paxyo,
+        )
+        confirm_id = next(iter(bot.PENDING))
+        query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(paxyo.recurring_created, [])
+        self.assertEqual(
+            paxyo.orders_created,
+            [(1001, "https://instagram.com/paxyo", 1000)],
+        )
+        self.assertEqual(
+            paxyo.order_split_kwargs, [{"runs": 10, "interval": 180}])
+        self.assertEqual(bot.PENDING, {})
+        self.assertIn("Order placed!", query.edited[0])
+        self.assertIn("Drip-feed: 10 runs", query.edited[0])
+        self.assertIn("10000", query.edited[0])
 
     async def test_cancel_button_creates_nothing(self):
-        paxyo = FakePaxyo()
+        paxyo = FakePaxyo(dripfeed_live=True)
         await self._send(
-            "order 1000 followers every 3 hours", self._plan_intent(),
-            paxyo=paxyo,
+            "order 1000 followers every 3 hours, 10 times",
+            self._plan_intent(), paxyo=paxyo,
         )
-        confirm_id = next(iter(bot.PENDING_RECURRING))
+        confirm_id = next(iter(bot.PENDING))
         query = await self._callback(f"cancel:{confirm_id}", paxyo=paxyo)
         self.assertEqual(paxyo.recurring_created, [])
+        self.assertEqual(paxyo.orders_created, [])
         self.assertEqual(query.edited, ["Order cancelled."])
-        self.assertEqual(bot.PENDING_RECURRING, {})
+        self.assertEqual(bot.PENDING, {})
 
-    async def test_yes_acceptance_creates_the_schedule(self):
-        paxyo = FakePaxyo()
+    async def test_yes_acceptance_places_the_drip_order(self):
+        paxyo = FakePaxyo(dripfeed_live=True)
         await self._send(
-            "order 1000 followers every 3 hours", self._plan_intent(),
-            paxyo=paxyo,
+            "order 1000 followers every 3 hours, 10 times",
+            self._plan_intent(), paxyo=paxyo,
         )
         msg = await self._send("yes", intent_of("unclear"), paxyo=paxyo)
-        self.assertEqual(len(paxyo.recurring_created), 1)
-        self.assertIn("Started!", msg.text_sent[0])
+        self.assertEqual(paxyo.recurring_created, [])
+        self.assertEqual(
+            paxyo.orders_created,
+            [(1001, "https://instagram.com/paxyo", 1000)],
+        )
+        self.assertEqual(
+            paxyo.order_split_kwargs, [{"runs": 10, "interval": 180}])
+        self.assertIn("Order placed!", msg.text_sent[0])
+        self.assertIn("Drip-feed: 10 runs", msg.text_sent[0])
 
     async def test_that_link_resolves_in_recurring_plan(self):
-        paxyo = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        paxyo = FakePaxyo(
+            recent=[FakePaxyo.RECENT_ORDER], dripfeed_live=True)
         msg = await self._send(
-            "order 1000 followers on that link every 3 hours",
+            "order 1000 followers on that link every 3 hours, 10 times",
             recurring_intent(
                 service_hint="followers", quantity=1000,
                 interval_minutes=180,
@@ -3044,6 +3063,7 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
             paxyo=paxyo,
         )
         self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        self.assertIn("10 runs", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
 
     async def test_missing_interval_asks_how_often(self):
@@ -3061,9 +3081,9 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.RECURRING_DRAFT[1]["quantity"], 1000)
 
     async def test_interval_from_plain_words_when_gemini_gives_none(self):
-        paxyo = FakePaxyo()
+        paxyo = FakePaxyo(dripfeed_live=True)
         msg = await self._send(
-            "order 1000 followers every 3 hours",
+            "order 1000 followers every 3 hours, 10 times",
             recurring_intent(
                 platform="instagram", service_hint="followers",
                 link="https://instagram.com/p/x", quantity=1000,
@@ -3071,6 +3091,7 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
             paxyo=paxyo,
         )
         self.assertIn("every 3 hours", msg.text_sent[0])
+        self.assertIn("10 runs", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
 
     async def test_too_short_interval_is_refused(self):
@@ -3089,6 +3110,340 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
             ["That's too often, the shortest repeat is every 30 minutes."],
         )
         self.assertEqual(paxyo.recurring_created, [])
+
+
+class TestBoundedDripPlans(unittest.IsolatedAsyncioTestCase):
+    """Bounded drip-feed plans (19 Nov 2026): a repeat is always a
+    drip with runs, total and an end. The screenshot bug: a TikTok
+    confirm carried a stale Telegram link the user never sent, and
+    "every 1 hour, 189 ETB per order" had no count or total."""
+
+    TIKTOK_VIEWS = {
+        "service": 2001, "name": "TikTok Video Views | Fast",
+        "category": "TikTok Video Views", "type": "Default",
+        "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
+        "average_time": "5 minutes", "active": True,
+        "provider_service_id": 2001,
+    }
+
+    TELEGRAM_RECENT = {
+        "id": 999, "service_id": 3001,
+        "service_name": "Telegram Members | Fast",
+        "link": "https://t.me/Getmodpcs/17396", "quantity": 1000,
+        "charge": 10.0, "status": "pending",
+        "created_at": "2026-11-19T03:20:00Z",
+    }
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    async def _send(self, text, intent, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _callback(self, data, paxyo=None):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    def _live(self, **kw):
+        kw.setdefault("dripfeed_live", True)
+        return FakePaxyo(**kw)
+
+    async def test_stale_last_order_link_never_reused(self):
+        # Bug 1: the user never sent a link, yet the old confirm
+        # carried the last order's Telegram link. Now the bot asks.
+        paxyo = self._live(recent=[self.TELEGRAM_RECENT])
+        msg = await self._send(
+            "Can you place the order 10k views for every 1 hr next",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("Please send the link", msg.text_sent[0])
+        self.assertNotIn("t.me", msg.text_sent[0])
+        self.assertNotIn("Getmodpcs", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+        self.assertNotIn("link", bot.RECURRING_DRAFT.get(1, {}))
+
+    async def test_platform_mismatched_link_is_refused(self):
+        # Bug 1: a Telegram link on a TikTok order never reaches
+        # Confirm; the bot asks for the right link instead.
+        paxyo = self._live(services=[dict(self.TIKTOK_VIEWS)])
+        msg = await self._send(
+            "place 10k views every 1 hour, 10 times",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                link="https://t.me/Getmodpcs/17396",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("That link is telegram", msg.text_sent[0])
+        self.assertIn("tiktok", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+        self.assertNotIn("link", bot.RECURRING_DRAFT.get(1, {}))
+
+    async def test_that_link_wrong_platform_is_refused(self):
+        # "That link" is honoured, but only when its platform
+        # fits the order being built.
+        paxyo = self._live(recent=[self.TELEGRAM_RECENT])
+        msg = await self._send(
+            "order 1000 followers on that link every 3 hours, 10 times",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                quantity=1000, interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("That link is telegram", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_screenshot_flow_10k_every_hour(self):
+        # The exact screenshot flow: 100k total said earlier, then
+        # "10k views for every 1 hr" with no link, then the TikTok
+        # link. The card shows 10 runs, total 100,000, total
+        # 1,890.00 ETB and the last drop, never the stale link.
+        paxyo = self._live(
+            services=[dict(self.TIKTOK_VIEWS)],
+            recent=[self.TELEGRAM_RECENT], balance=10000.0)
+        bot.PARKED_DRAFT[1] = {
+            "platform": "tiktok", "service_hint": "views",
+            "quantity": 100000,
+        }
+        msg = await self._send(
+            "Can you place the order 10k views for every 1 hr next",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("Please send the link", msg.text_sent[0])
+        self.assertNotIn("t.me", msg.text_sent[0])
+        self.assertEqual(bot.RECURRING_DRAFT[1]["runs"], 10)
+        msg = await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertIn(
+            "Drip-feed: 10 runs of 10,000 every 1 hour", msg.text_sent[0])
+        self.assertIn("100000", msg.text_sent[0])
+        self.assertIn("1,890.00", msg.text_sent[0])
+        self.assertIn("Last drop", msg.text_sent[0])
+        self.assertNotIn("per order", msg.text_sent[0])
+        self.assertIn(
+            "https://www.tiktok.com/@user/video/123", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["quantity"], 100000)
+        self.assertEqual(pending["total"], 1890.0)
+        self.assertEqual(
+            pending["drip"],
+            {"runs": 10, "interval": 60, "per_run_qty": 10000},
+        )
+
+    async def test_asks_how_many_times_then_accepts_10_times(self):
+        paxyo = self._live()
+        msg = await self._send(
+            "order 1000 followers every 3 hours",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["How many times should it repeat? (for example: 10 times)"],
+        )
+        self.assertEqual(bot.PENDING, {})
+        msg = await self._send(
+            "repeat it 10 times", intent_of("unclear"), paxyo=paxyo)
+        self.assertIn("10 runs", msg.text_sent[0])
+        self.assertIn("420.00", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_bare_number_answers_how_many_times(self):
+        paxyo = self._live()
+        await self._send(
+            "order 1000 followers every 3 hours",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        msg = await self._send("10", intent_of("unclear"), paxyo=paxyo)
+        self.assertIn("10 runs", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+
+    async def test_unbounded_recurring_never_confirms(self):
+        paxyo = self._live()
+        msg = await self._send(
+            "order 1000 followers every 3 hours",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["How many times should it repeat? (for example: 10 times)"],
+        )
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.PENDING_RECURRING, {})
+
+    async def test_affordability_uses_total_cost(self):
+        # One drop (42 ETB) is affordable, but all 10 runs
+        # (420 ETB) are not: the check must use the total.
+        paxyo = self._live(balance=100.0)
+        msg = await self._send(
+            "order 1000 followers every 3 hours, 10 times",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("420.00", msg.text_sent[0])
+        self.assertIn("100.00", msg.text_sent[0])
+        self.assertIn("320.00", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.RECURRING_DRAFT[1]["runs"], 10)
+
+    async def test_drip_refused_when_server_not_live(self):
+        paxyo = FakePaxyo(dripfeed_live=False)
+        msg = await self._send(
+            "order 1000 followers every 3 hours, 10 times",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("isn't set up on the server", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_drip_refused_on_non_dripfeed_service(self):
+        svc = dict(self.TIKTOK_VIEWS, dripfeed=False)
+        paxyo = self._live(services=[svc])
+        msg = await self._send(
+            "order 10k views every 1 hour, 10 times",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                link="https://www.tiktok.com/@user/video/123",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("doesn't offer drip-feed", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_runs_derived_from_parked_total(self):
+        bot.PARKED_DRAFT[1] = {
+            "platform": "instagram", "service_hint": "followers",
+            "quantity": 10000,
+        }
+        paxyo = self._live()
+        msg = await self._send(
+            "order 1000 followers every 3 hours",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("10 runs", msg.text_sent[0])
+        self.assertIn("10000", msg.text_sent[0])
+
+    async def test_runs_not_derived_when_total_does_not_split_evenly(self):
+        bot.PARKED_DRAFT[1] = {
+            "platform": "instagram", "service_hint": "followers",
+            "quantity": 9500,
+        }
+        paxyo = self._live()
+        msg = await self._send(
+            "order 1000 followers every 3 hours",
+            recurring_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                interval_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["How many times should it repeat? (for example: 10 times)"],
+        )
+
+    def test_parse_runs_and_intervals(self):
+        self.assertEqual(bot.parse_runs("10 times"), 10)
+        self.assertEqual(bot.parse_runs("repeat it 5 times"), 5)
+        self.assertEqual(bot.parse_runs("for 3 runs"), 3)
+        self.assertIsNone(bot.parse_runs("10k views"))
+        self.assertIsNone(bot.parse_runs("every 1 hour"))
+        self.assertEqual(bot.parse_interval_minutes("every 30 minutes"), 30)
+        self.assertEqual(bot.parse_interval_minutes("every 1 hour"), 60)
+        self.assertEqual(bot.parse_interval_minutes("every 2 hours"), 120)
+        self.assertEqual(bot.parse_interval_minutes("every day"), 1440)
+        self.assertEqual(
+            bot.parse_interval_minutes("10k views for every 1 hr"), 60)
+        self.assertEqual(bot.parse_interval_minutes("every week"), 10080)
+        self.assertEqual(bot.parse_interval_minutes("every 2 weeks"), 20160)
+        self.assertEqual(bot.parse_interval_minutes("every 3 days"), 4320)
 
 
 class TestSchedules(unittest.IsolatedAsyncioTestCase):
@@ -3702,6 +4057,37 @@ class TestDelayedOrders(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Will be placed at about", msg.text_sent[0])
         self.assertIn("EAT", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
+
+    async def test_stale_last_order_link_never_reused(self):
+        # Bug 1 on the delayed path too: no link given, so the bot
+        # asks for one instead of reusing the last order's link.
+        paxyo = FakePaxyo(recent=[FakePaxyo.RECENT_ORDER])
+        msg = await self._send(
+            "order 1000 followers after 3 hours",
+            delayed_intent(
+                platform="instagram", service_hint="followers",
+                quantity=1000, delay_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(
+            msg.text_sent, ["Please send your Instagram profile link."]
+        )
+        self.assertEqual(bot.PENDING_DELAYED, {})
+
+    async def test_mismatched_link_is_refused(self):
+        paxyo = FakePaxyo()
+        msg = await self._send(
+            "order 1000 followers to this link after 3 hours",
+            delayed_intent(
+                platform="instagram", service_hint="followers",
+                link="https://t.me/Getmodpcs/17396",
+                quantity=1000, delay_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("That link is telegram", msg.text_sent[0])
+        self.assertEqual(bot.PENDING_DELAYED, {})
 
     async def test_normal_order_without_delay_is_not_delayed(self):
         paxyo = FakePaxyo()
@@ -10279,17 +10665,23 @@ class TestBatchOrders(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.text_sent, ["Order cancelled."])
         self.assertEqual(bot.SPLIT_DRAFT, {})
 
-    async def test_drip_feed_becomes_a_recurring_plan(self):
+    async def test_drip_feed_becomes_a_bounded_drip_plan(self):
         msg = await self._send(
-            "Order views, but drip-feed 1,000 every hour.",
+            "Order views, but drip-feed 1,000 every hour, 10 times.",
             intent_of("recurring", platform="instagram",
                       service_hint="followers",
                       link="https://instagram.com/p/x", quantity=1000,
                       interval_minutes=60),
+            paxyo=FakePaxyo(dripfeed_live=True),
         )
         self.assertIn("every 1 hour", msg.text_sent[0])
-        self.assertIn("1000", msg.text_sent[0])
+        self.assertIn("10 runs", msg.text_sent[0])
+        self.assertIn("10000", msg.text_sent[0])
+        self.assertIn("420.00", msg.text_sent[0])
+        self.assertIn("Last drop", msg.text_sent[0])
+        self.assertNotIn("per order", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
+        self.assertEqual(len(bot.PENDING), 1)
 
     async def test_drip_feed_under_30_minutes_is_refused(self):
         msg = await self._send(
