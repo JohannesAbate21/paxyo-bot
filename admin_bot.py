@@ -2019,6 +2019,214 @@ def parse_promo_off_command(text: str):
     return {"code": m.group(1).strip().upper()}
 
 
+# ------------------------------------------------- capability questions ---
+# 19 Nov 2026 — William asked "Can we add promo code" and the AI
+# answered that promo codes "can't be created from chat" and live in
+# a "Promotions section" of the admin panel. Both were wrong: promo
+# codes ARE created in chat ("create promo code PAXYO20 20%"), and
+# there is no Promotions section. The exact commands already match
+# above; a bare question about a capability fell through to the AI,
+# which guessed. So questions are answered deterministically here,
+# before the AI fallback, for every command family: the answer says
+# plainly whether it can be done in chat and gives the exact wording
+# to send. Nothing here runs a change — it is guidance only.
+_CAPABILITY_ANSWERS = (
+    # Promo codes — created in chat, never in a panel.
+    (
+        r"\bpromo\b",
+        "Yes — you can create promo codes right here in chat. Send "
+        "\"create promo code PAXYO20 20% expires 2026-12-31\" (or a "
+        "fixed amount, like \"100 ETB\", and optional \"max 100 uses\"). "
+        "I will show a preview and the code is created only after you "
+        "tap Confirm. \"list promo codes\" shows every code, and "
+        "\"turn off promo code PAXYO20\" switches one off.",
+    ),
+    # One user's balance, and changing it.
+    (
+        r"\bbalance\b",
+        "Yes — ask me for one user's balance, like \"What is the "
+        "balance of 779060335?\" or \"What is the balance of "
+        "@username?\" To change a balance, send \"Add 500 ETB to "
+        "779060335\" — I will show a preview first and it only happens "
+        "after you tap Confirm.",
+    ),
+    # Deposit history.
+    (
+        r"\bdeposit history\b|\bdeposits\b",
+        "Yes — send \"Deposit history of 779060335\" (or @username) and "
+        "I will show the last 3 deposits.",
+    ),
+    # Looking a user up by @username.
+    (
+        r"\blook\s*up\b|\blookup\b|\bfind (?:a |the )?user\b",
+        "Yes — I can look a user up by @username when you ask for "
+        "their balance, deposit history or ban, for example \"What is "
+        "the balance of @username?\"",
+    ),
+    # Ban / unban.
+    (
+        r"\bban\b|\bunban\b|\bblock (?:a |the )?user\b",
+        "Yes — send \"Ban @username\" or \"Ban 779060335\" (\"Unban "
+        "779060335\" to lift it). I will show a preview and it only "
+        "happens after you tap Confirm.",
+    ),
+    # The price multiplier lives in Settings on the admin panel —
+    # checked before the service-price entry below, so "change the
+    # price multiplier" is never read as a service price.
+    (
+        r"\bmultiplier\b",
+        "The price multiplier is changed in Settings on the admin "
+        "panel — I can't change it here. I can change one service's "
+        "price in chat, though: \"Set price of service 6139 to 50 "
+        "ETB\".",
+    ),
+    # Service prices.
+    (
+        r"\bprice\b",
+        "Yes — send \"Set price of service 6139 to 50 ETB\" to change "
+        "one (preview, then Confirm), \"Show price of service 6139\" to "
+        "see it, or \"Clear price of service 6139\" to remove an "
+        "override.",
+    ),
+    # Refunds.
+    (
+        r"\brefund\b",
+        "Yes — send \"Refund order #1841\" and I will show the order "
+        "first; the refund only happens after you tap Confirm.",
+    ),
+    # One order's status.
+    (
+        r"\border\b.*\bstatus\b|\bstatus\b.*\border\b",
+        "Yes — send \"What is the status of order #1841?\"",
+    ),
+    # Broadcasts.
+    (
+        r"\bbroadcast\b|\bmessage (?:the )?users\b|\bsend\b.*\busers\b",
+        "Yes — send \"Send this to users who never deposited: <your "
+        "message>\" and I will show how many users it would reach "
+        "before you Confirm.",
+    ),
+    # Ticker.
+    (
+        r"\bticker\b",
+        "Yes — send \"Change ticker to <new text>\" and I will show a "
+        "preview first.",
+    ),
+    # Disputes.
+    (
+        r"\bdispute\b",
+        "Yes — \"/disputes\" lists the open ones, and \"Close dispute "
+        "#3\" closes one (preview, then Confirm).",
+    ),
+    # Win-backs.
+    (
+        r"\bwin-?back\b|\bwent quiet\b|\bquiet users\b",
+        "Yes — send /winbacks and I will show how many users went "
+        "quiet, then message each one after you Confirm.",
+    ),
+    # Reports.
+    (
+        r"\bmorning report\b|\bmorning\b",
+        "Yes — send /morning for yesterday's money report.",
+    ),
+    (
+        r"\bweekly report\b|\bweekly\b",
+        "Yes — send /weekly for this week's report.",
+    ),
+    (
+        r"\bmost profitable\b|\bprofitable services\b",
+        "Yes — send /profitable or \"Show me the most profitable "
+        "services\".",
+    ),
+    (
+        r"\bsatisfaction\b",
+        "Yes — send /satisfaction for the satisfaction report.",
+    ),
+    (
+        r"\bdeposits by method\b",
+        "Yes — send /deposits_by_method for deposits by method.",
+    ),
+    # Money / stats.
+    (
+        r"\bprofit\b|\brevenue\b|\bearn\b|"
+        r"\bhow much\b.*\b(made|money)\b",
+        "Yes — ask me straight, like \"How much did we make today?\" "
+        "or \"How many users in the last 7 days?\"",
+    ),
+    # Things that live in the admin panel — an honest no.
+    (
+        r"\bloyalty\b",
+        "That one lives in the admin panel — I can't list loyalty "
+        "bonuses here.",
+    ),
+    (
+        r"\bfraud\b",
+        "That one lives in the admin panel — I can't list fraud flags "
+        "here.",
+    ),
+    (
+        r"\bresellers?\b",
+        "That one lives in the admin panel — I can't list resellers "
+        "here.",
+    ),
+    (
+        r"\bconfused\b",
+        "That one lives in the admin panel — I can't list confused "
+        "chats here.",
+    ),
+    (
+        r"\blist (?:the )?orders\b|\blist (?:the )?users\b",
+        "That lives in the admin panel — I can't list orders or users "
+        "here. I can look up one order (\"What is the status of order "
+        "#1841?\") or one user's balance.",
+    ),
+    (
+        r"\bcancel\b.*\border\b",
+        "I can't cancel an order from chat — send \"Refund order "
+        "#1841\" instead and I will show the order first.",
+    ),
+)
+
+
+def parse_capability_question(text: str):
+    """A natural question about what the bot can do — "can we add a
+    promo code", "how do I check a balance", "can I ban a user" —
+    -> the guidance answer, or None. Only question/ask forms match
+    (can/could we|I|you, how do/can I|we, is it possible to, I want
+    to, I'd like to): an actual command ("create promo code PAXYO20
+    20%", "ban @william") is handled by its own parser above and
+    never reaches here, and a general "what can you do" goes to the
+    help/AI route, not here. (19 Nov 2026.)"""
+    s = _normalize_admin_text(
+        re.sub(r"\s+", " ", (text or "").strip().lower())
+    )
+    if not s:
+        return None
+    # A general "what can you do" is not a question about one
+    # capability — it goes to the help/AI route, as before.
+    if re.search(
+        r"what can (you|this bot) do|what are your commands|"
+        r"list your commands|show commands|show me what you can do",
+        s,
+    ):
+        return None
+    if not re.search(
+        r"\b(?:can|could)\s+(?:we|i|you)\b"
+        r"|\bhow\s+do\s+(?:i|we)\b"
+        r"|\bhow\s+can\s+(?:i|we|you)\b"
+        r"|\bis\s+it\s+possible\s+to\b"
+        r"|\bi\s+want\s+to\b"
+        r"|\bi'?d\s+like\s+to\b"
+        r"|\bi\s+would\s+like\s+to\b",
+        s,
+    ):
+        return None
+    for pattern, answer in _CAPABILITY_ANSWERS:
+        if re.search(pattern, s):
+            return answer
+    return None
+
+
 def parse_dispute_close_command(text: str):
     """"/disputes close 3" / "close dispute #3" / "close dispute 3"
     / "resolve dispute #3" -> {"dispute_id": 3}, else None.
@@ -2429,6 +2637,12 @@ ADMIN_AI_SYSTEM = (
     "then Confirm), \"Deposit history of 779060335\" (the last 3 "
     "deposits), \"Ban @william\" (preview, then Confirm), \"Set "
     "price of service 6139 to 50 ETB\" (preview, then Confirm). "
+    "You can also create promo codes in chat: 'Create promo code "
+    "PAXYO20 20% expires 2026-12-31' (preview, then Confirm), "
+    "'list promo codes', 'turn off promo code PAXYO20', 'What is "
+    "the balance of @username?' (a username is looked up first), "
+    "'Unban 779060335', 'Show price of service 6139', 'Clear "
+    "price of service 6139'. "
     "Things you cannot do in chat: list orders or users, list "
     "resellers, list loyalty bonuses, list fraud flags, or list "
     "confused chats — those live in the admin panel; say so honestly "
@@ -2440,7 +2654,11 @@ ADMIN_AI_SYSTEM = (
     "can quote a service's current price when asked (\"Show price "
     "of service 6139\"). "
     "To count users who never deposited, offer a broadcast — the "
-    "broadcast preview shows the count."
+    "broadcast preview shows the count. If William asks whether "
+    "something can be done in chat, answer only from this list, "
+    "never invent an admin-panel section or a feature that is not "
+    "listed here. Promo codes are created in chat, never in the "
+    "admin panel, there is no Promotions section."
 )
 
 
@@ -4513,6 +4731,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "see its normal price from here (the live list is GOP "
             "only). Set a price to fix it."
         )
+        return
+
+    # 5l. Natural questions about what the bot can do (19 Nov 2026) —
+    # "can we add a promo code", "how do I check a balance". The exact
+    # commands already matched above; this only answers the bare
+    # question with the exact wording to use, so a natural question
+    # never reaches the AI, which once invented a "Promotions
+    # section" in the admin panel. Guidance only — no preview, no
+    # Confirm, no API call, no AI call.
+    capability = parse_capability_question(text)
+    if capability is not None:
+        await update.message.reply_text(capability)
         return
 
     # 6. Free-form — AI when a key is configured, else the short reply.

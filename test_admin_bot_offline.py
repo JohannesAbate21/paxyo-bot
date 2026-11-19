@@ -1764,6 +1764,117 @@ class TestPromoValidation(unittest.TestCase):
         )
 
 
+class TestCapabilityQuestions(unittest.TestCase):
+    """Natural questions about what the bot can do (19 Nov 2026):
+    "can we add promo code" must get the exact wording to send,
+    never an AI guess about a panel section. Only question/ask
+    forms match — an actual command, a greeting, or a general
+    "what can you do" returns None."""
+
+    def test_promo_question(self):
+        for text in (
+            "can we add promo code",
+            "can I create a promo code",
+            "can you make a promo code",
+            "how do I add a promo code",
+            "I want to create a promo code",
+        ):
+            answer = admin_bot.parse_capability_question(text)
+            self.assertIsNotNone(answer, text)
+            self.assertIn("create promo code PAXYO20", answer, text)
+            self.assertIn("Confirm", answer, text)
+
+    def test_every_command_family(self):
+        cases = (
+            ("how do I check a balance", "balance of"),
+            ("can I see the deposit history", "Deposit history of"),
+            ("can I look up a user", "balance of @username"),
+            ("can I ban a user", "Ban @username"),
+            ("how do I change a service price", "Set price of service"),
+            ("can I refund an order", "Refund order #1841"),
+            ("can we send a broadcast", "Send this to users"),
+            ("how do I change the ticker", "Change ticker to"),
+            ("can I see the morning report", "/morning"),
+            ("can I close a dispute", "Close dispute #3"),
+            ("can I see who went quiet", "/winbacks"),
+            ("can I see how much profit we made", "How much did we make"),
+        )
+        for text, needle in cases:
+            answer = admin_bot.parse_capability_question(text)
+            self.assertIsNotNone(answer, text)
+            if needle is not None:
+                self.assertIn(needle, answer, text)
+
+    def test_panel_only_things_get_an_honest_no(self):
+        for text in (
+            "can I see the loyalty bonuses",
+            "can you list the resellers",
+            "can I see the fraud flags",
+            "can I list the confused chats",
+            "how do I change the price multiplier",
+        ):
+            answer = admin_bot.parse_capability_question(text)
+            self.assertIsNotNone(answer, text)
+            self.assertIn("admin panel", answer, text)
+
+    def test_cancel_an_order_points_to_the_refund_flow(self):
+        answer = admin_bot.parse_capability_question("can I cancel an order")
+        self.assertIsNotNone(answer)
+        self.assertIn("Refund order #1841", answer)
+
+    def test_commands_do_not_match(self):
+        for text in (
+            "create promo code PAXYO20 20%",
+            "ban @william",
+            "what is the balance of 779060335",
+            "list promo codes",
+            "refund order #1841",
+            "set price of service 6139 to 50 ETB",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_capability_question(text), text
+            )
+
+    def test_general_questions_do_not_match(self):
+        for text in (
+            "what can you do",
+            "what can you do for me",
+            "what can this bot do",
+            "what are your commands",
+            "list your commands",
+            "hi",
+            "hello",
+            "thanks",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_capability_question(text), text
+            )
+
+    def test_ai_system_prompt_knows_promo_codes_are_made_in_chat(self):
+        self.assertIn("Create promo code", admin_bot.ADMIN_AI_SYSTEM)
+        self.assertIn("no Promotions section", admin_bot.ADMIN_AI_SYSTEM)
+        self.assertIn("never invent", admin_bot.ADMIN_AI_SYSTEM)
+
+
+class TestCapabilityQuestionFlow(AdminBotBase):
+    """The question is answered by the deterministic step, before
+    the AI fallback — no API call, no pending change, no Confirm."""
+
+    async def test_promo_question_answered_in_chat(self):
+        message = await self._text("can we add promo code")
+        self.assertEqual(len(message.text_sent), 1)
+        self.assertIn("create promo code PAXYO20", message.text_sent[0])
+        self.assertIn("Confirm", message.text_sent[0])
+        self.assertNotEqual(message.text_sent[0], admin_bot.FALLBACK_REPLY)
+        self.assertEqual(admin_bot.PENDING, {})
+
+    async def test_panel_only_question_answered_honestly(self):
+        message = await self._text("can I see the loyalty bonuses")
+        self.assertEqual(len(message.text_sent), 1)
+        self.assertIn("admin panel", message.text_sent[0])
+        self.assertEqual(admin_bot.PENDING, {})
+
+
 class TestPromoFlow(AdminBotBase):
     async def _create(self, fake, text):
         self._patch_api(fake)
@@ -2943,6 +3054,7 @@ def _no_admin_parser_matches(text):
         and admin_bot.parse_dispute_close_command(text) is None
         and admin_bot.parse_order_status_command(text) is None
         and admin_bot.parse_admin_report_command(text) is None
+        and admin_bot.parse_capability_question(text) is None
     )
 
 
