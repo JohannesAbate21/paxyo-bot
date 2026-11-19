@@ -6938,6 +6938,59 @@ class TestProbeEndpoints(unittest.IsolatedAsyncioTestCase):
         finally:
             await client._client.aclose()
 
+    async def test_dripfeed_live_false_expires_then_install_is_picked_up(self):
+        # 19 Nov 2026: a False answer was cached forever per
+        # process, so installing api-order-dripfeed.php on the
+        # server changed nothing until the next deploy. A False
+        # answer must expire after DRIPFEED_LIVE_CACHE_SECONDS
+        # and the probe must run again.
+        client = bot.PaxyoClient()
+        try:
+            req = self._probe_request()
+            err = bot.httpx.HTTPStatusError(
+                "not found", request=req,
+                response=bot.httpx.Response(404, request=req))
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(side_effect=err),
+            ) as send:
+                self.assertIs(await client.dripfeed_live(), False)
+                self.assertIs(await client.dripfeed_live(), False)
+                self.assertEqual(send.call_count, 1)
+            client._dripfeed_live_at = -1e9  # expire the cache
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"ok": True, "dripfeed_live": True}),
+            ) as send:
+                self.assertIs(await client.dripfeed_live(), True)
+                self.assertEqual(send.call_count, 1)
+        finally:
+            await client._client.aclose()
+
+    async def test_dripfeed_live_true_expires_then_reprobes(self):
+        # A True answer also expires, so a server that goes
+        # down again is not promised forever.
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"ok": True, "dripfeed_live": True}),
+            ):
+                self.assertIs(await client.dripfeed_live(), True)
+            client._dripfeed_live_at = -1e9  # expire the cache
+            req = self._probe_request()
+            err = bot.httpx.HTTPStatusError(
+                "not found", request=req,
+                response=bot.httpx.Response(404, request=req))
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err),
+            ):
+                self.assertIs(await client.dripfeed_live(), False)
+        finally:
+            await client._client.aclose()
+
     async def test_split_cover_live_http_500_returns_false(self):
         client = bot.PaxyoClient()
         try:

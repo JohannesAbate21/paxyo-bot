@@ -321,6 +321,12 @@ def build_webhook_url() -> str:
 
 BLACKLISTED_SERVICES = {5379, 5834}
 SERVICES_CACHE_SECONDS = 600  # 10 minutes
+DRIPFEED_LIVE_CACHE_SECONDS = 300  # 5 minutes: the drip-feed probe
+# is re-run after this long, so a server install that lands while
+# the bot is running is picked up without a redeploy (19 Nov 2026:
+# the probe cached False forever per process, so installing
+# api-order-dripfeed.php on paxyo.et changed nothing until the
+# next Fly deploy).
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
 
 # ------------------------------------------------------- Gemini prompt ----
@@ -5528,8 +5534,12 @@ class PaxyoClient:
         self._split_cover_live = None
         # Drip-feed (customizations, 15 Nov 2026): whether the
         # server honours runs/interval on order placement (GET
-        # /orders/dripfeed-status). Same caching shape.
+        # /orders/dripfeed-status). Cached for
+        # DRIPFEED_LIVE_CACHE_SECONDS, then re-probed — a False
+        # must expire, or a server install would never take
+        # effect until a redeploy (19 Nov 2026).
         self._dripfeed_live = None
+        self._dripfeed_live_at = 0.0
         # Price-change watch (feature 6, 15 Nov 2026): incremented
         # on each REAL catalogue fetch (never on a cache hit), so
         # the scheduler can tell a fresh catalogue from a cached
@@ -5799,13 +5809,21 @@ class PaxyoClient:
         honours runs/interval on order placement (server /
         api-order-dripfeed.php installed, 15 Nov 2026).
         404-tolerant like split_cover_live: unknown means not
-        live. Cached per process. Any failure (a non-404 status,
-        a non-JSON body, a connection error, a timeout) means
-        not live too: the probe must never raise into a chat
-        (19 Nov 2026: the first live drip request after a
-        deploy went silent because this probe raised and
-        on_text had no safety net)."""
-        if self._dripfeed_live is not None:
+        live. Cached for DRIPFEED_LIVE_CACHE_SECONDS, then
+        re-probed: a False answer must expire, or a server
+        install that lands while the bot is running would
+        never take effect until the next deploy (19 Nov 2026).
+        Any failure (a non-404 status, a non-JSON body, a
+        connection error, a timeout) means not live too: the
+        probe must never raise into a chat (19 Nov 2026: the
+        first live drip request after a deploy went silent
+        because this probe raised and on_text had no safety
+        net)."""
+        if (
+            self._dripfeed_live is not None
+            and time.monotonic() - self._dripfeed_live_at
+            < DRIPFEED_LIVE_CACHE_SECONDS
+        ):
             return self._dripfeed_live
         try:
             data = await self._send(
@@ -5822,15 +5840,18 @@ class PaxyoClient:
                     "GET /orders/dripfeed-status failed: %s", exc
                 )
             self._dripfeed_live = False
+            self._dripfeed_live_at = time.monotonic()
             return False
         except Exception as exc:
             log.warning(
                 "GET /orders/dripfeed-status failed: %s", exc
             )
             self._dripfeed_live = False
+            self._dripfeed_live_at = time.monotonic()
             return False
         live = bool((data or {}).get("dripfeed_live"))
         self._dripfeed_live = live
+        self._dripfeed_live_at = time.monotonic()
         return live
 
     # --------------------------------------------- second provider ------
