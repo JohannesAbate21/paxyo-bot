@@ -2154,19 +2154,32 @@ class FakePaxyo:
 
 
 class FakeQuery:
-    def __init__(self, data, message_text=""):
+    def __init__(self, data, message_text="", photo=False):
         self.data = data
         self.message = FakeMessage(message_text)
+        if photo:
+            # A photo message (the deposit guide): Telegram refuses
+            # edit_message_text on it, so the fake refuses too and
+            # the caption edit is the only way the tap can land.
+            self.message.photo = [object()]
         self.edited = []
         self.edited_markups = []
+        self.caption_edited = []
+        self.caption_markups = []
         self.answered = False
 
     async def answer(self):
         self.answered = True
 
     async def edit_message_text(self, text, reply_markup=None):
+        if getattr(self.message, "photo", None):
+            raise Exception("there is no text in the message to edit")
         self.edited.append(text)
         self.edited_markups.append(reply_markup)
+
+    async def edit_message_caption(self, caption, reply_markup=None):
+        self.caption_edited.append(caption)
+        self.caption_markups.append(reply_markup)
 
 
 class FakeCallbackUpdate:
@@ -5855,6 +5868,35 @@ class TestDepositBundle(unittest.IsolatedAsyncioTestCase):
             next(iter(bot.PENDING_DEPOSIT.values())),
             {"user_id": 1, "amount": 10.0},
         )
+
+    async def test_guide_button_on_photo_edits_caption(self):
+        # Live bug 19 Nov 2026: the guide is a photo, and a plain
+        # edit_message_text is refused on a photo, so tapping
+        # Deposit now did nothing. The tap must land as a caption
+        # edit carrying the Confirm card.
+        fake = FakePaxyo(deposits=[])
+        await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        query = FakeQuery("depguide", photo=True)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update, None)
+        self.assertEqual(query.edited, [])  # no text edit possible
+        self.assertEqual(len(query.caption_edited), 1)
+        self.assertIn("10.00 ETB", query.caption_edited[0])
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+
+    async def test_guide_button_missing_draft_on_photo_asks_amount(self):
+        # A restart dropped the draft: the tap must still answer
+        # with the amount question, as a caption edit, not crash.
+        query = FakeQuery("depguide", photo=True)
+        update = FakeCallbackUpdate(query)
+        await bot.on_callback(update, None)
+        self.assertEqual(query.edited, [])
+        self.assertEqual(len(query.caption_edited), 1)
+        self.assertIn("how much", query.caption_edited[0].lower())
 
     async def test_three_deposits_bring_back_old_card(self):
         fake = FakePaxyo(deposits=self._completed(3))

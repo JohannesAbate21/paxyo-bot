@@ -33939,6 +33939,28 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await route_photo_result(update, result, lang)
 
 
+async def _edit_callback_message(query, text, reply_markup=None):
+    """Edit the message behind a tapped button, whether it is text
+    or a photo (19 Nov 2026): the deposit guide is a photo with a
+    caption, and Telegram refuses editMessageText on a photo
+    ("there is no text in the message to edit"), so tapping
+    Deposit now did nothing live. Try the text edit first, then
+    the caption edit; a message that accepts neither keeps its
+    old content, and the failure is logged instead of crashing
+    the callback."""
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+        return
+    except Exception as exc:
+        log.warning("callback text edit failed, trying caption: %s", exc)
+    try:
+        await query.edit_message_caption(
+            caption=text, reply_markup=reply_markup
+        )
+    except Exception as exc:
+        log.warning("callback caption edit failed: %s", exc)
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _update_seen(update):
         return
@@ -34033,17 +34055,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # was shown; a missing draft (a restart dropped it) asks
         # for the amount instead. The guide itself never created
         # anything, so this is the first Confirm card for the
-        # deposit. The message edited here is the guide photo, so
-        # the edit replaces its caption with the card.
+        # deposit. The guide is a photo with a caption, so the edit
+        # must go through _edit_callback_message, which falls back
+        # to the caption edit — a plain edit_message_text is
+        # refused by Telegram on a photo and the tap does nothing.
         draft = DEPOSIT_DRAFT.pop(user.id, None) or {}
         amount = draft.get("amount")
         if amount is None:
-            await query.edit_message_text(t("ask_deposit_amount", lang))
+            await _edit_callback_message(
+                query, t("ask_deposit_amount", lang)
+            )
             return
         card_text, card_markup = deposit_confirm_card(
             user.id, amount, lang
         )
-        await query.edit_message_text(card_text, reply_markup=card_markup)
+        await _edit_callback_message(
+            query, card_text, reply_markup=card_markup
+        )
         return
 
     if action == "depagain":
