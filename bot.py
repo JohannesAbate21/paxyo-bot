@@ -1528,6 +1528,12 @@ TEXT = {
         "am": "Order #{order_id} refill ይደረግ?\n{service} ×{quantity}\n{link}\nይህ orderውን ወደ ሙሉ ቁጥሩ ይመልሳል።",
         "en": "Refill order #{order_id}?\n{service} ×{quantity}\n{link}\nThis tops the order back up to the full quantity.",
     },
+    # Ban (19 Nov 2026): the short refusal a banned user gets for
+    # orders, refills and deposits. Short and plain, no long dash.
+    "banned": {
+        "am": "ይቅርታ፣ መለያዎ ታግዷል። እባክዎ support ያነጋግሩ።",
+        "en": "Sorry, your account is blocked. Please contact support.",
+    },
     "refill_done": {
         "am": "ለorder #{order_id} refill ተጀምሯል (refill #{refill_id})። የጎደለው ቁጥር ይሞላል።",
         "en": "Refill started for order #{order_id} (refill #{refill_id}). The missing amount will be topped up.",
@@ -5366,6 +5372,47 @@ def merge_service_catalogues(api_services, combined_entries):
     return merged
 
 
+def apply_price_overrides(services, overrides):
+    """Apply admin price overrides to a merged catalogue (pure --
+    no network, no files). `overrides` is the list from GET
+    /admin/service-price-overrides: {"provider", "service_id",
+    "price_etb"} rows. A row whose (provider,
+    provider_service_id) matches an override gets
+    rate_etb_per_1000 = the override price and
+    "price_overridden": True, so quotes and order totals use the
+    edited price. Rows with no override are unchanged; overrides
+    for services not in the list are ignored; an override that is
+    not a positive number is ignored too (the server refuses
+    those, this is a backstop). The input rows are copied, never
+    mutated, and the result is a new list."""
+    by_combined = {}
+    for row in overrides or []:
+        if not isinstance(row, dict):
+            continue
+        provider = str(row.get("provider") or "").strip()
+        try:
+            service_id = int(row.get("service_id"))
+            price = float(row.get("price_etb"))
+        except (TypeError, ValueError):
+            continue
+        if not provider or price <= 0:
+            continue
+        by_combined[f"{provider}:{service_id}"] = price
+    if not by_combined:
+        return list(services or [])
+    out = []
+    for s in services or []:
+        if not isinstance(s, dict):
+            continue
+        row = dict(s)
+        price = by_combined.get(str(row.get("combined_id") or ""))
+        if price is not None:
+            row["rate_etb_per_1000"] = price
+            row["price_overridden"] = True
+        out.append(row)
+    return out
+
+
 # ------------------------------------------------------- API clients ------
 
 def build_api_request(method: str, path: str, json_body=None) -> httpx.Request:
@@ -5459,6 +5506,22 @@ class PaxyoClient:
         services = merge_service_catalogues(
             services, load_combined_catalogue()
         )
+        # Price overrides (19 Nov 2026): the admin bot's edited
+        # prices, applied in-memory before the catalogue is cached
+        # — so quotes, order totals and the picker all see the
+        # edited price, and a price change reaches the bot within
+        # the 10-minute cache. Fail-open: a missing endpoint (404)
+        # or any fetch failure just means no overrides, never a
+        # broken catalogue.
+        try:
+            override_data = await self.list_price_overrides()
+        except Exception as exc:
+            log.warning("list_price_overrides failed: %s", exc)
+            override_data = None
+        if isinstance(override_data, dict):
+            services = apply_price_overrides(
+                services, override_data.get("overrides") or []
+            )
         self._services_cache = services
         self._services_cached_at = now
         self._services_refresh_count += 1
@@ -5873,6 +5936,55 @@ class PaxyoClient:
                     "error": body.get("error") or body.get("message") or "",
                 }
             raise
+
+    # Ban (19 Nov 2026) + price overrides (19 Nov 2026): the
+    # customer bot's side of the admin features. Both are
+    # 404-tolerant like save_session/load_session — until the
+    # endpoint is installed live they return None and the bot
+    # behaves as before (not banned, no overrides).
+
+    async def get_user_ban(self, telegram_id: int):
+        """GET /admin/users/{telegram_id}/ban -> {"ok": true,
+        "banned": bool, "telegram_id", "username"}. Returns None
+        on 404 (endpoint not live yet); any other failure raises,
+        so the caller (user_is_banned) can fail open."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "GET", f"/admin/users/{telegram_id}/ban"
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /admin/users/%s/ban returned 404 "
+                    "(endpoint not live yet)", telegram_id
+                )
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def list_price_overrides(self):
+        """GET /admin/service-price-overrides -> {"ok": true,
+        "overrides": [{"provider", "service_id", "price_etb",
+        "updated_at"}]}. Returns None on 404 (endpoint not live
+        yet); any other failure raises, so the caller (services)
+        can fail open. The path is the one
+        server/api-admin-service-price.php serves — the admin bot
+        reads the same endpoint."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/admin/service-price-overrides")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /admin/service-price-overrides returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        return data if isinstance(data, dict) else None
 
     async def cancel_order(self, order_id, telegram_id: int):
         """POST /orders/{id}/cancel {telegram_id} -> the cancel +
@@ -20955,6 +21067,25 @@ async def _place_split_test(pending, user_id: int, split_qtys):
     }, None
 
 
+async def user_is_banned(user_id: int) -> bool:
+    """True when the server says the user is banned (GET
+    /admin/users/{id}/ban). Fail-open by design: a missing
+    endpoint (404), a transport failure, or any other error
+    means NOT banned — the bot must never block a good user
+    because a lookup failed. A ban only ever blocks when the
+    server positively says so."""
+    if paxyo is None:
+        return False
+    try:
+        data = await paxyo.get_user_ban(user_id)
+    except Exception as exc:
+        log.warning("get_user_ban failed: %s", exc)
+        return False
+    if not isinstance(data, dict):
+        return False
+    return bool(data.get("banned"))
+
+
 async def place_pending_order(pending, user_id: int):
     """Balance check + create order for a pending order.
 
@@ -20962,8 +21093,13 @@ async def place_pending_order(pending, user_id: int):
     id, status, service name, quantity, link and total, and error is
     None. On failure result is None and error is ("insufficient",
     balance, total), ("order_failed",), ("not_understood",),
-    ("bad_link", reason) or ("bad_quantity",).
+    ("bad_link", reason), ("bad_quantity",) or ("banned",).
     """
+    # Ban (19 Nov 2026): a banned user places nothing — checked
+    # first, before any money moves. The callers answer ("banned",)
+    # with the short "banned" reply.
+    if await user_is_banned(user_id):
+        return None, ("banned",)
     service = pending["service"]
     quantity = pending["quantity"]
     total = pending["total"]
@@ -21578,8 +21714,14 @@ async def start_deposit(draft, user_id: int):
     is not live yet (404), "deposit_unavailable" when the payment
     service itself failed (5xx, e.g. Chapa refusing Direct Charge),
     a server message string when the API rejected it (e.g. amount
-    below the minimum), or "deposit_failed".
+    below the minimum), "banned" when the user is banned, or
+    "deposit_failed".
     """
+    # Ban (19 Nov 2026): a banned user deposits nothing — checked
+    # first, before any money moves. The callers answer "banned"
+    # with the short "banned" reply.
+    if await user_is_banned(user_id):
+        return None, "banned"
     try:
         # A validated promo code rides on the create call only
         # (ideas batch 2, feature 1, 15 Nov 2026): the server stores
@@ -25426,7 +25568,11 @@ async def place_batch(batch, user_id):
     results is [(draft, order_id or None, error or None)]. The balance
     is checked once against the batch total first; a failure on one
     order never stops the others, and each order gets its own
-    idempotency key so a retry cannot double-charge it."""
+    idempotency key so a retry cannot double-charge it. A banned
+    user places nothing: error is ("banned",)."""
+    # Ban (19 Nov 2026): checked first, before any money moves.
+    if await user_is_banned(user_id):
+        return None, ("banned",)
     orders = batch["orders"]
     total = sum(o["total"] for o in orders)
     try:
@@ -25560,7 +25706,11 @@ async def place_bundle(bundle, user_id):
     cross-provider) apply per leg and a leg that fails later is
     rescued or refunded by the watcher. A leg that fails at
     placement was never charged, so there is nothing to refund
-    for it — the result line says plainly it could not be placed."""
+    for it — the result line says plainly it could not be placed.
+    A banned user places nothing: error is ("banned",)."""
+    # Ban (19 Nov 2026): checked first, before any money moves.
+    if await user_is_banned(user_id):
+        return None, ("banned",)
     orders = bundle["orders"]
     total = sum(o["total"] for o in orders)
     try:
@@ -26673,6 +26823,10 @@ async def _run_refill_confirm(user_id: int, refill, lang: str,
     message goes out first and a SECOND Confirm card for a
     brand-new order of the same service follows — the new order is
     never called a refill."""
+    # Ban (19 Nov 2026): a banned user refills nothing.
+    if await user_is_banned(user_id):
+        await respond(t("banned", lang))
+        return
     order_id = refill["order_id"]
     try:
         result = await paxyo.refill_order(order_id, user_id)
@@ -27576,6 +27730,10 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if dep_draft is not None:
             PENDING_DEPOSIT.pop(dep_id, None)
             result, error = await start_deposit(dep_draft, user.id)
+            # Ban (19 Nov 2026): a banned user deposits nothing.
+            if error == "banned":
+                await update.message.reply_text(t("banned", lang))
+                return
             if error:
                 if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
                     # The push could not be sent: offer the deposit
@@ -30575,6 +30733,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(t("cancelled", lang))
             return
         result, error = await start_deposit(draft, user.id)
+        # Ban (19 Nov 2026): a banned user deposits nothing.
+        if error == "banned":
+            await query.edit_message_text(t("banned", lang))
+            return
         if error:
             if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
                 FAILED_DEPOSIT[user.id] = dict(draft)
@@ -31262,6 +31424,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # the payment instructions (text — they carry a link/code the
         # user must read).
         result, error = await start_deposit(dep_draft, user.id)
+        # Ban (19 Nov 2026): a banned user deposits nothing.
+        if error == "banned":
+            await query.edit_message_text(t("banned", lang))
+            return
         if error:
             if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
                 # The push could not be sent: offer the deposit page
@@ -31524,6 +31690,15 @@ async def run_one_schedule(app, sched, services_by_id):
     if quantity <= 0:
         log.warning("recurring %s: bad quantity, skipping", schedule_id)
         return
+    # Ban (19 Nov 2026): a banned user's repeat never places —
+    # pause the schedule on the server and tell the user plainly.
+    if await user_is_banned(user_id):
+        try:
+            await paxyo.pause_recurring(schedule_id, user_id)
+        except Exception as exc:
+            log.warning("recurring %s: pause failed: %s", schedule_id, exc)
+        await notify_user(app, user_id, t("banned", "en"))
+        return
     total = estimated_total_etb(float(service.get("rate_etb_per_1000", 0)), quantity)
     try:
         bal = await paxyo.balance(user_id)
@@ -31662,6 +31837,14 @@ async def run_one_delayed(app, item, services_by_id):
                     reason="the quantity is not valid anymore",
                 ),
             )
+        return
+    # Ban (19 Nov 2026): a banned user's scheduled order never
+    # places — mark it failed once and tell the user plainly.
+    if user_id is not None and await user_is_banned(user_id):
+        await delayed_store_finish(
+            item, "failed", reason="account is blocked"
+        )
+        await notify_user(app, user_id, t("banned", "en"))
         return
     total = estimated_total_etb(float(service.get("rate_etb_per_1000", 0)), quantity)
     try:

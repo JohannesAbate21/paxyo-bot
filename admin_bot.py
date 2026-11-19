@@ -562,6 +562,148 @@ class AdminPaxyoClient:
             )
         )
 
+    async def lookup_user_by_username(self, username):
+        """GET /admin/users/lookup?username={name} -> {telegram_id,
+        username, first_name, balance}. A 404 with a "User not
+        found" body means no Paxyo user has that username ->
+        {"user_not_found": True}. Any other 404 means the endpoint
+        is not live yet -> None (same 404-tolerance as the other
+        admin reads). Other errors raise. (The contract is
+        server/api-admin-user-lookup.php.) The username is matched
+        exactly against auth.username, a leading @ stripped first."""
+        path = f"/admin/users/lookup?username={username}"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                if "user not found" in _error_message(exc).lower():
+                    return {"user_not_found": True}
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def get_user_deposits(self, telegram_id):
+        """GET /admin/users/{id}/deposits -> {telegram_id,
+        deposits: [{id, amount, method, status, created_at}]}, at
+        most 3, newest first. A 404 with a "User not found" body
+        means the user does not exist -> {"user_not_found": True}.
+        Any other 404 means the endpoint is not live yet -> None.
+        Other errors raise. (The contract is
+        server/api-admin-user-deposits.php.) The method comes from
+        the deposit's chapa_response record, so it can be null
+        when it was never recorded — never a guessed method."""
+        path = f"/admin/users/{int(telegram_id)}/deposits"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                if "user not found" in _error_message(exc).lower():
+                    return {"user_not_found": True}
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def get_user_ban(self, telegram_id):
+        """GET /admin/users/{id}/ban -> {telegram_id, username,
+        banned}. A 404 with a "User not found" body means the user
+        does not exist -> {"user_not_found": True}. Any other 404
+        means the endpoint is not live yet -> None. Other errors
+        raise. (The contract is server/api-admin-user-ban.php.)"""
+        path = f"/admin/users/{int(telegram_id)}/ban"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                if "user not found" in _error_message(exc).lower():
+                    return {"user_not_found": True}
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def set_user_ban(self, telegram_id, action,
+                           admin_telegram_id, confirm_token):
+        """POST /admin/users/{id}/ban {action ("ban"|"unban"),
+        admin_telegram_id, confirm_token} -> {ok, telegram_id,
+        banned}. Errors raise — the caller maps 404/403 to the
+        plain messages in server/api-admin-user-ban.php. (The
+        contract is that file; the HMAC token is minted by
+        mint_admin_ban_token, only after William taps Confirm.)"""
+        return await self._send(
+            build_api_request(
+                "POST",
+                f"/admin/users/{int(telegram_id)}/ban",
+                {
+                    "action": action,
+                    "admin_telegram_id": int(admin_telegram_id),
+                    "confirm_token": confirm_token,
+                },
+            )
+        )
+
+    async def list_price_overrides(self):
+        """GET /admin/service-price-overrides -> {overrides:
+        [{provider, service_id, combined_id, price_etb,
+        updated_at}]}. 404 -> None (endpoint not live yet). Other
+        errors raise. (The contract is
+        server/api-admin-service-price.php.)"""
+        path = "/admin/service-price-overrides"
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def set_price_override(self, provider, service_id, price_etb,
+                                 admin_telegram_id, confirm_token):
+        """POST /admin/service-price/set {provider, service_id,
+        price_etb, admin_telegram_id, confirm_token} -> {ok,
+        provider, service_id, combined_id, price_etb}. Errors
+        raise — the caller maps 404/403/400 to the plain messages
+        in server/api-admin-service-price.php. (The contract is
+        that file; the HMAC token is minted by
+        mint_admin_price_token, only after William taps Confirm.)"""
+        return await self._send(
+            build_api_request(
+                "POST",
+                "/admin/service-price/set",
+                {
+                    "provider": provider,
+                    "service_id": int(service_id),
+                    "price_etb": float(price_etb),
+                    "admin_telegram_id": int(admin_telegram_id),
+                    "confirm_token": confirm_token,
+                },
+            )
+        )
+
+    async def clear_price_override(self, provider, service_id,
+                                   admin_telegram_id, confirm_token):
+        """POST /admin/service-price/clear {provider, service_id,
+        admin_telegram_id, confirm_token} -> {ok, provider,
+        service_id, combined_id, cleared}. Errors raise — the
+        caller maps 404/403 to the plain messages in
+        server/api-admin-service-price.php. (The contract is that
+        file; the HMAC token is minted by mint_admin_price_token
+        with no price, only after William taps Confirm.)"""
+        return await self._send(
+            build_api_request(
+                "POST",
+                "/admin/service-price/clear",
+                {
+                    "provider": provider,
+                    "service_id": int(service_id),
+                    "admin_telegram_id": int(admin_telegram_id),
+                    "confirm_token": confirm_token,
+                },
+            )
+        )
+
     async def create_promo_code(self, code, percent=None, expires_at=None,
                                 max_uses=None, fixed_etb=None):
         """POST /promo-codes {code, percent?|fixed_etb?, expires_at?,
@@ -1137,15 +1279,115 @@ def _balance_user_id(text: str):
     return user_id if user_id > 0 else None
 
 
+def _user_target_from_text(text: str):
+    """The user named in an admin command: a Telegram id (5-15
+    digits standing on their own) or a @username, as {"telegram_id":
+    N} or {"username": "name"} — or None when the text names no
+    user at all. A bare username without the @ is only read after
+    "of" / "for" / "to" / "from" / "user" ("balance of william",
+    "add 500 ETB to william"), never as a bare word elsewhere, so
+    a command word can never be mistaken for a name. Reserved
+    words (balance, deposit, order, service, price, history, ban,
+    unban, user) never count as a username. The username keeps
+    its typed spelling; the server matches it exactly against
+    auth.username (a leading @ is stripped there)."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    # @username first: the @ is unambiguous.
+    m = re.search(r"@([A-Za-z][A-Za-z0-9_]{4,31})\b", s)
+    if m:
+        return {"username": m.group(1)}
+    # A Telegram id: 5+ digits standing on their own.
+    user_id = _balance_user_id(s)
+    if user_id is not None:
+        return {"telegram_id": user_id}
+    # A bare username after of / for / to / from / user / ban /
+    # unban / deposit / deposits / history ("balance of william",
+    # "add 500 ETB to william", "ban william", "show deposits
+    # william"). A word scan, not a regex finditer: in "deposit
+    # history william" the word "history" is both the word after
+    # "deposit" (reserved, skipped) and the keyword before
+    # "william" — a finditer would consume it once and miss the
+    # second reading.
+    keywords = {
+        "of", "for", "to", "from", "user", "ban", "unban",
+        "deposit", "deposits", "history",
+    }
+    reserved = {
+        "balance", "deposit", "deposits", "order", "service",
+        "price", "history", "ban", "unban", "user",
+    }
+    tokens = s.split()
+    for i, tok in enumerate(tokens):
+        if tok.lower().strip(".,?!") not in keywords:
+            continue
+        if i + 1 >= len(tokens):
+            continue
+        name = tokens[i + 1].strip(".,?!@")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", name):
+            continue
+        if name.lower() not in reserved:
+            return {"username": name}
+    return None
+
+
+async def _resolve_user_target(target):
+    """Resolve a parsed user target ({"telegram_id": N} or
+    {"username": "name"}) to a user record {telegram_id, username,
+    first_name, balance}. Returns (record, None) on success, or
+    (None, error_text) when the user does not exist or the lookup
+    endpoint is not live yet. The error text names the target the
+    way William typed it (id or @username). A Telegram id is
+    looked up by the balance endpoint; a username by the lookup
+    endpoint — both return the same record shape, so every caller
+    below works the same for either target."""
+    if "telegram_id" in target:
+        tg_id = target["telegram_id"]
+        try:
+            record = await admin_api.get_user_balance(tg_id)
+        except Exception as exc:
+            log.warning("get_user_balance failed: %s", exc)
+            return None, (
+                f"Could not look up user {tg_id}. Please try again."
+            )
+        if record is None:
+            return None, (
+                "The balance lookup is not connected yet. "
+                f"I couldn't look up user {tg_id}."
+            )
+        if record.get("user_not_found"):
+            return None, f"There is no Paxyo user with Telegram id {tg_id}."
+        return record, None
+    name = target["username"]
+    try:
+        record = await admin_api.lookup_user_by_username(name)
+    except Exception as exc:
+        log.warning("lookup_user_by_username failed: %s", exc)
+        return None, (
+            f"Could not look up user @{name}. Please try again."
+        )
+    if record is None:
+        return None, (
+            "The user lookup is not connected yet. "
+            f"I couldn't look up user @{name}."
+        )
+    if record.get("user_not_found"):
+        return None, f"There is no Paxyo user with username @{name}."
+    return record, None
+
+
 def parse_balance_check_command(text: str):
     """Deterministic balance-check parser. "balance of 779060335",
     "what is the balance of 779060335", "show balance 779060335",
-    "user balance 779060335" -> {"telegram_id": 779060335}. None
-    when there is no Telegram id, or when the message is about a
-    balance adjustment ("add ... to ...", "remove ... from ...")
-    or the provider balance ("provider balance") — those are not
-    a user lookup. A bare "what is my balance?" is a question for
-    the AI, not a command."""
+    "user balance 779060335" -> {"telegram_id": 779060335}. A
+    @username works the same way ("balance of @william" ->
+    {"username": "william"}); a bare username after "of" does too
+    ("balance of william"). None when there is no user target, or
+    when the message is about a balance adjustment ("add ... to
+    ...", "remove ... from ...") or the provider balance
+    ("provider balance") — those are not a user lookup. A bare
+    "what is my balance?" is a question for the AI, not a command."""
     s = re.sub(r"\s+", " ", (text or "").strip())
     if not s:
         return None
@@ -1162,10 +1404,7 @@ def parse_balance_check_command(text: str):
         return None
     if not re.search(r"\bbalance\b", low):
         return None
-    user_id = _balance_user_id(low)
-    if user_id is None:
-        return None
-    return {"telegram_id": user_id}
+    return _user_target_from_text(low)
 
 
 def parse_balance_adjust_command(text: str):
@@ -1200,14 +1439,203 @@ def parse_balance_adjust_command(text: str):
         amount = float(amount_text)
     except (TypeError, ValueError):
         return None
-    # The user id is the Telegram id AFTER the amount (the "to
-    # 779060335" / "from 779060335" at the end); never the amount
-    # itself.
+    # The user is the Telegram id or @username AFTER the amount
+    # (the "to 779060335" / "from @william" at the end); never the
+    # amount itself.
     rest = low[m.end():]
-    user_id = _balance_user_id(rest)
-    if user_id is None:
+    target = _user_target_from_text(rest)
+    if target is None:
         return None
-    return {"telegram_id": user_id, "delta_etb": sign * amount}
+    return {**target, "delta_etb": sign * amount}
+
+
+def parse_deposit_history_command(text: str):
+    """Deterministic deposit-history parser. "deposit history of
+    779060335", "last deposits @william", "show deposits william",
+    "deposits of 779060335" -> {"telegram_id": ...} or
+    {"username": ...}. None when there is no user target, or when
+    the message is the deposits-by-method report ("deposits by
+    method") or a deposit itself (no "history"/"last"/"show"/"of"
+    wording). A bare "show me the deposits" is a question for the
+    AI, not a command."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    if "deposit" not in low:
+        return None
+    if "by method" in low:
+        return None
+    if not re.search(
+        r"\b(?:history|last)\b.*\bdeposits?\b|\bdeposits?\s+of\b"
+        r"|\bshow\b.*\bdeposits?\b|\bdeposit\s+history\b",
+        low,
+    ):
+        return None
+    return _user_target_from_text(low)
+
+
+def parse_ban_command(text: str):
+    """Deterministic ban parser. "ban 779060335", "ban user
+    @william", "ban william" -> {"telegram_id": ...} or
+    {"username": ...} with "action": "ban". None when there is no
+    user target, or when the message is an unban ("unban ..." is
+    the unban command, parsed separately). A bare "ban him" with
+    no user is a question for the AI, not a command."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    if not re.search(r"(?<!un)\bban\b", low):
+        return None
+    if re.search(r"\bunban\b", low):
+        return None
+    target = _user_target_from_text(low)
+    if target is None:
+        return None
+    return {**target, "action": "ban"}
+
+
+def parse_unban_command(text: str):
+    """Deterministic unban parser. "unban 779060335", "unban user
+    @william", "unban william" -> {"telegram_id": ...} or
+    {"username": ...} with "action": "unban". None when there is
+    no user target."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    if not re.search(r"\bunban\b", low):
+        return None
+    target = _user_target_from_text(low)
+    if target is None:
+        return None
+    return {**target, "action": "unban"}
+
+
+def _price_service_target(text: str):
+    """The (provider, service_id) named in a price command:
+    "gop service 6139" / "smm service 6139" -> ("gop"/"smm",
+    6139); "service 6139" / a bare "6139" after "price" ->
+    (None, 6139) — the provider is resolved from the catalogue by
+    the handler. None when there is no service id at all."""
+    low = _normalize_admin_text((text or "").lower())
+    m = re.search(
+        r"\b(gop|smm)\s+service\s+(\d+)\b|\bservice\s+(\d+)\b",
+        low,
+    )
+    if m:
+        if m.group(1) is not None:
+            return (m.group(1), int(m.group(2)))
+        return (None, int(m.group(3)))
+    m = re.search(r"\bprice\b.*?(\d+)\b", low)
+    if m:
+        return (None, int(m.group(1)))
+    return None
+
+
+def parse_price_set_command(text: str):
+    """Deterministic price-set parser. "set price of service 6139
+    to 50 ETB", "edit price 6139 50", "change price of gop service
+    6139 to 50 ETB" -> {"provider": "gop"|"smm"|None,
+    "service_id": 6139, "price_etb": 50.0}. The provider word is
+    optional — without it the handler resolves it from the
+    catalogue. None when there is no service id or no amount. A
+    zero or negative amount is returned as-is and refused by the
+    handler with a plain message — it is never silently re-read
+    as a different command."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    if not re.search(r"\b(?:set|edit|change|update)\b.*\bprice\b", low):
+        return None
+    target = _price_service_target(low)
+    if target is None:
+        return None
+    provider, service_id = target
+    # The amount is the number next to "to" / after the service id
+    # ("to 50 ETB", "6139 50"), with an optional ETB/birr unit.
+    # The minus is part of the number: "to -10 ETB" parses as -10
+    # and is refused by the handler, never silently read as +10.
+    m = re.search(
+        r"\bto\s+(-?\d+(?:\.\d+)?)\s*(?:etb|birr)?\b", low
+    )
+    if m is None:
+        m = re.search(
+            r"\bservice\s+\d+\s+(-?\d+(?:\.\d+)?)\s*(?:etb|birr)?\b",
+            low,
+        )
+    if m is None:
+        m = re.search(
+            r"\bprice\b.*?(-?\d+(?:\.\d+)?)\s*(?:etb|birr)\b", low
+        )
+    if m is None:
+        # A bare trailing number ("edit price 6139 50"): the last
+        # number is the amount, unless it is the service id itself
+        # ("set price 6139" names no amount at all).
+        m = re.search(r"(-?\d+(?:\.\d+)?)\s*$", low)
+        if m is not None and float(m.group(1)) == service_id:
+            m = None
+    if m is None:
+        return None
+    try:
+        price = float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    return {
+        "provider": provider,
+        "service_id": service_id,
+        "price_etb": price,
+    }
+
+
+def parse_price_clear_command(text: str):
+    """Deterministic price-clear parser. "clear price of service
+    6139", "remove price override 6139", "reset price of smm
+    service 6139" -> {"provider": "gop"|"smm"|None,
+    "service_id": 6139}. None when there is no service id, or
+    when the message is a price SET ("set ... to 50 ETB" parses
+    as a set, never as a clear)."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    if not re.search(
+        r"\b(?:clear|remove|reset|delete)\b.*\bprice\b", low
+    ):
+        return None
+    if parse_price_set_command(s) is not None:
+        return None
+    target = _price_service_target(low)
+    if target is None:
+        return None
+    provider, service_id = target
+    return {"provider": provider, "service_id": service_id}
+
+
+def parse_price_show_command(text: str):
+    """Deterministic price-show parser. "show price of service
+    6139", "price of service 6139", "what is the price of service
+    6139" -> {"provider": "gop"|"smm"|None, "service_id": 6139}.
+    None when there is no service id, or when the message is a
+    price SET or CLEAR — those parse as a set or a clear, never
+    as a show."""
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return None
+    low = _normalize_admin_text(s.lower())
+    if "price" not in low or "service" not in low:
+        return None
+    if parse_price_set_command(s) is not None:
+        return None
+    if parse_price_clear_command(s) is not None:
+        return None
+    target = _price_service_target(low)
+    if target is None:
+        return None
+    provider, service_id = target
+    return {"provider": provider, "service_id": service_id}
 
 
 def _balance_user_label(record: dict) -> str:
@@ -1258,6 +1686,236 @@ def _balance_error_text(pending: dict, exc) -> str:
     if msg:
         return f"Could not adjust the balance — {msg}"
     return "Could not adjust the balance — please try again."
+
+
+def format_deposit_history(record: dict, deposits) -> str:
+    """The last-3 deposit list for a user: one line per deposit —
+    amount, method, date, status. A deposit with no recorded
+    method says so plainly, never a guessed method. No deposits
+    at all says so plainly too."""
+    label = _balance_user_label(record)
+    deposits = list(deposits or [])
+    if not deposits:
+        return f"No deposits yet for {label}."
+    lines = [f"Last {len(deposits)} deposit{'s' if len(deposits) != 1 else ''} for {label}:"]
+    for d in deposits:
+        amount = d.get("amount")
+        amount_text = format_money(amount) if amount is not None else "?"
+        method = str(d.get("method") or "").strip() or "method not recorded"
+        created = str(d.get("created_at") or "")[:16]
+        status = str(d.get("status") or "").strip() or "?"
+        lines.append(f"{amount_text} ETB, {method}, {created}, {status}")
+    return "\n".join(lines)
+
+
+def _ban_preview(pending: dict) -> str:
+    """The Confirm preview for a ban / unban: who, what, current
+    state. Nothing here bans anyone — the ban runs only on
+    Confirm."""
+    action = "Ban" if pending["action"] == "ban" else "Unban"
+    state = "banned" if pending["currently_banned"] else "not banned"
+    return (
+        f"{action} {pending['user_label']}?\n\n"
+        f"Currently: {state}.\n\n"
+        "Tap Confirm to go ahead, or Cancel."
+    )
+
+
+def _ban_error_text(pending: dict, exc) -> str:
+    """Plain ban/unban failure message: the server's 403 / 404
+    text shown as-is, anything else a short generic line. A 404
+    here means the endpoint is not live yet (the user was looked
+    up before the preview, so the user exists)."""
+    status = exc.response.status_code if exc.response is not None else None
+    msg = _error_message(exc)
+    if status == 404:
+        return (
+            "The ban endpoint is not connected yet. "
+            "Nothing was changed."
+        )
+    if status == 403:
+        return msg or "You are not allowed to ban this user."
+    if msg:
+        verb = "ban" if pending["action"] == "ban" else "unban"
+        return f"Could not {verb} the user. {msg}"
+    verb = "ban" if pending["action"] == "ban" else "unban"
+    return f"Could not {verb} the user. Please try again."
+
+
+def _price_label(provider: str, service_id: int) -> str:
+    """\"gop:6139\" — the combined id, the only id that never
+    collides between the two providers."""
+    return f"{provider}:{int(service_id)}"
+
+
+def _price_set_preview(pending: dict) -> str:
+    """The Confirm preview for a price set: which service, current
+    price, new price. Nothing here changes a price — the override
+    is written only on Confirm."""
+    current = pending.get("current_price")
+    current_text = (
+        f"{format_money(current)} ETB per 1000"
+        if current is not None
+        else "not in the live list"
+    )
+    if pending.get("current_override") is not None:
+        current_text += " (override)"
+    return (
+        f"Set the price of service {pending['combined_id']} to "
+        f"{format_money(pending['price_etb'])} ETB per 1000?\n\n"
+        f"Current price: {current_text}\n\n"
+        "Tap Confirm to set the price, or Cancel."
+    )
+
+
+def _price_clear_preview(pending: dict) -> str:
+    """The Confirm preview for clearing a price override: which
+    service, the override being cleared, the price it falls back
+    to. Nothing here changes a price — the override is cleared
+    only on Confirm."""
+    current = pending.get("current_price")
+    current_text = (
+        f"{format_money(current)} ETB per 1000"
+        if current is not None
+        else "not in the live list"
+    )
+    return (
+        f"Clear the price override for service "
+        f"{pending['combined_id']}?\n\n"
+        f"Override now: {format_money(pending['current_override'])} ETB per 1000\n"
+        f"Normal price: {current_text}\n\n"
+        "Tap Confirm to clear it, or Cancel."
+    )
+
+
+def _price_error_text(pending: dict, exc) -> str:
+    """Plain price-set/clear failure message: the server's 400 /
+    403 / 404 text shown as-is, anything else a short generic
+    line. A 404 here means the endpoint is not live yet."""
+    status = exc.response.status_code if exc.response is not None else None
+    msg = _error_message(exc)
+    if status == 404:
+        return (
+            "The price endpoint is not connected yet. "
+            "Nothing was changed."
+        )
+    if status == 403:
+        return msg or "You are not allowed to change this price."
+    if status == 400:
+        return msg or "That price was refused. Nothing was changed."
+    if msg:
+        return f"Could not change the price. {msg}"
+    return "Could not change the price. Please try again."
+
+
+async def _resolve_price_provider(parsed: dict):
+    """Resolve the provider for a price command: the parsed
+    provider word wins; otherwise an override for exactly one
+    provider settles it, otherwise the live catalogue (GOP only)
+    — an id in it is GOP. Anything else is unresolved and the
+    handler asks William to say "gop" or "smm".
+    Returns (provider-or-None, catalogue_price-or-None,
+    override_price-or-None, error_text-or-None). The catalogue
+    price is the live list's price for a GOP service, None
+    otherwise (the admin bot cannot see SMM catalogue prices —
+    the live list is GOP only — so an SMM service with no
+    override has no known current price)."""
+    provider = parsed.get("provider")
+    service_id = parsed["service_id"]
+    # Overrides for this service id, by provider: at most one row
+    # per provider, so this also settles an ambiguous id when only
+    # one side has an override.
+    overrides = {}
+    try:
+        data = await admin_api.list_price_overrides()
+    except Exception as exc:
+        log.warning("list_price_overrides failed: %s", exc)
+        data = None
+    if isinstance(data, dict):
+        for row in data.get("overrides") or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                if int(row.get("service_id")) != service_id:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            overrides[str(row.get("provider") or "")] = row
+    if provider is None:
+        if len(overrides) == 1:
+            provider = next(iter(overrides))
+        else:
+            try:
+                services = await admin_api.services()
+            except Exception as exc:
+                log.warning("services lookup failed: %s", exc)
+                services = []
+            found = False
+            catalogue_price = None
+            for svc in services or []:
+                if not isinstance(svc, dict):
+                    continue
+                try:
+                    sid = int(svc.get("service", svc.get("id")))
+                except (TypeError, ValueError):
+                    continue
+                if sid == service_id:
+                    found = True
+                    try:
+                        catalogue_price = float(
+                            svc.get("rate_etb_per_1000", svc.get("price", 0))
+                        )
+                    except (TypeError, ValueError):
+                        catalogue_price = None
+                    break
+            if not found:
+                return (
+                    None, None, None,
+                    f"I don't see service {service_id} in the live list. "
+                    "If it is an SMM service, say \"smm service "
+                    f"{service_id}\". Or give me the right service id.",
+                )
+            provider = "gop"
+            override_price = None
+            row = overrides.get("gop")
+            if row is not None:
+                try:
+                    override_price = float(row.get("price_etb"))
+                except (TypeError, ValueError):
+                    override_price = None
+            return provider, catalogue_price, override_price, None
+    # A provider is settled: the override for it (if any) and,
+    # for GOP, the catalogue price.
+    override_price = None
+    row = overrides.get(provider)
+    if row is not None:
+        try:
+            override_price = float(row.get("price_etb"))
+        except (TypeError, ValueError):
+            override_price = None
+    catalogue_price = None
+    if provider == "gop":
+        try:
+            services = await admin_api.services()
+        except Exception as exc:
+            log.warning("services lookup failed: %s", exc)
+            services = []
+        for svc in services or []:
+            if not isinstance(svc, dict):
+                continue
+            try:
+                sid = int(svc.get("service", svc.get("id")))
+            except (TypeError, ValueError):
+                continue
+            if sid == service_id:
+                try:
+                    catalogue_price = float(
+                        svc.get("rate_etb_per_1000", svc.get("price", 0))
+                    )
+                except (TypeError, ValueError):
+                    catalogue_price = None
+                break
+    return provider, catalogue_price, override_price, None
 
 
 def parse_promo_create_command(text: str):
@@ -1593,6 +2251,54 @@ def mint_admin_balance_token(telegram_id, delta_etb, admin_telegram_id,
     return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
 
 
+def mint_admin_ban_token(telegram_id, action, admin_telegram_id,
+                         secret=None):
+    """HMAC-SHA256 confirm token for POST
+    /admin/users/{id}/ban, keyed by BOT_API_SECRET over
+    "admin-user-ban:{telegram_id}:{action}:{admin_telegram_id}"
+    (the exact string server/api-admin-user-ban.php verifies).
+    The action ("ban" / "unban") is part of the token, so a token
+    minted for a ban cannot unban. Minted ONLY after William taps
+    Confirm. Returns 64 hex chars. The secret comes from the
+    Render env, never hardcoded, never logged."""
+    key = secret if secret is not None else BOT_API_SECRET
+    msg = (
+        f"admin-user-ban:{int(telegram_id)}:{action}"
+        f":{int(admin_telegram_id)}"
+    )
+    return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def mint_admin_price_token(provider, service_id, admin_telegram_id,
+                           price_etb=None, secret=None):
+    """HMAC-SHA256 confirm token for POST /admin/service-price/set
+    (price given) or /admin/service-price/clear (price None),
+    keyed by BOT_API_SECRET over
+    "admin-service-price:set:{provider}:{service_id}:{price:.2f}:{admin_telegram_id}"
+    or
+    "admin-service-price:clear:{provider}:{service_id}:{admin_telegram_id}"
+    (the exact strings server/api-admin-service-price.php
+    verifies). The provider, id and price are part of the token,
+    so a token minted for one service or price cannot change
+    another. Minted ONLY after William taps Confirm. Returns 64
+    hex chars. The secret comes from the Render env, never
+    hardcoded, never logged. The price is formatted with exactly
+    two decimals on both sides — Python f"{price:.2f}" here, PHP
+    number_format(..., 2) there — so the two HMACs agree."""
+    key = secret if secret is not None else BOT_API_SECRET
+    if price_etb is None:
+        msg = (
+            f"admin-service-price:clear:{provider}:{int(service_id)}"
+            f":{int(admin_telegram_id)}"
+        )
+    else:
+        msg = (
+            f"admin-service-price:set:{provider}:{int(service_id)}"
+            f":{float(price_etb):.2f}:{int(admin_telegram_id)}"
+        )
+    return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
 def _order_record(data):
     """One order record from a GET /orders/{id} reply: flat, or
     nested under "order" (the order bot reads both shapes)."""
@@ -1720,15 +2426,19 @@ ADMIN_AI_SYSTEM = (
     "\"Who went quiet?\", \"Morning report\", \"Refund order #1841\" "
     "(preview, then Confirm), \"What is the balance of 779060335?\" "
     "(one user's balance), \"Add 500 ETB to 779060335\" (preview, "
-    "then Confirm). "
+    "then Confirm), \"Deposit history of 779060335\" (the last 3 "
+    "deposits), \"Ban @william\" (preview, then Confirm), \"Set "
+    "price of service 6139 to 50 ETB\" (preview, then Confirm). "
     "Things you cannot do in chat: list orders or users, list "
     "resellers, list loyalty bonuses, list fraud flags, or list "
     "confused chats — those live in the admin panel; say so honestly "
     "and never invent a figure. You can look up ONE order by its "
     "number. You cannot cancel an order from chat — offer the refund "
-    "flow instead. Only the ticker can be changed in chat; the price "
-    "multiplier is changed in Settings on the admin panel. You never "
-    "quote service prices in chat. "
+    "flow instead. The ticker and service prices can be changed in "
+    "chat (service prices are overrides, preview then Confirm); the "
+    "price multiplier is changed in Settings on the admin panel. You "
+    "can quote a service's current price when asked (\"Show price "
+    "of service 6139\"). "
     "To count users who never deposited, offer a broadcast — the "
     "broadcast preview shows the count."
 )
@@ -1864,6 +2574,9 @@ FALLBACK_REPLY = (
     "• \"Refund order #1841\"\n"
     "• \"What is the balance of 779060335?\"\n"
     "• \"Add 500 ETB to 779060335\"\n"
+    "• \"Deposit history of 779060335\"\n"
+    "• \"Ban @william\" / \"Unban 779060335\"\n"
+    "• \"Set price of service 6139 to 50 ETB\"\n"
     "• \"Create promo code PAXYO20 20%\"\n"
     "• /winbacks — message users who went quiet\n"
     "• /morning — yesterday's money report"
@@ -2555,6 +3268,75 @@ async def _execute_pending(user_id: int, context) -> str:
             f"{direction} {pending['user_label']}. "
             f"New balance: {new_text} ETB."
         )
+    if pending["kind"] in ("ban", "unban"):
+        # The token is minted HERE, only after Confirm — never on
+        # the preview, never on a single message. The action is
+        # part of the token, so it cannot be swapped afterwards.
+        token = mint_admin_ban_token(
+            pending["telegram_id"], pending["action"], user_id
+        )
+        try:
+            result = await admin_api.set_user_ban(
+                pending["telegram_id"], pending["action"], user_id, token
+            )
+        except httpx.HTTPStatusError as exc:
+            return _ban_error_text(pending, exc)
+        except Exception as exc:
+            log.warning("set_user_ban failed: %s", exc)
+            verb = "ban" if pending["action"] == "ban" else "unban"
+            return f"Could not {verb} the user. Please try again."
+        if not isinstance(result, dict):
+            verb = "ban" if pending["action"] == "ban" else "unban"
+            return f"Could not {verb} the user. Please try again."
+        verb = "banned" if pending["action"] == "ban" else "unbanned"
+        return f"✅ {pending['user_label']} is now {verb}."
+    if pending["kind"] == "price_set":
+        # The token is minted HERE, only after Confirm — never on
+        # the preview, never on a single message. The provider, id
+        # and price are part of the token, so none of them can be
+        # swapped afterwards.
+        token = mint_admin_price_token(
+            pending["provider"], pending["service_id"], user_id,
+            pending["price_etb"],
+        )
+        try:
+            result = await admin_api.set_price_override(
+                pending["provider"], pending["service_id"],
+                pending["price_etb"], user_id, token,
+            )
+        except httpx.HTTPStatusError as exc:
+            return _price_error_text(pending, exc)
+        except Exception as exc:
+            log.warning("set_price_override failed: %s", exc)
+            return "Could not change the price. Please try again."
+        if not isinstance(result, dict):
+            return "Could not change the price. Please try again."
+        return (
+            f"✅ Price of service {pending['combined_id']} set to "
+            f"{format_money(pending['price_etb'])} ETB per 1000. "
+            "The customer bot picks it up within 10 minutes."
+        )
+    if pending["kind"] == "price_clear":
+        # The token is minted HERE, only after Confirm — never on
+        # the preview, never on a single message.
+        token = mint_admin_price_token(
+            pending["provider"], pending["service_id"], user_id,
+        )
+        try:
+            result = await admin_api.clear_price_override(
+                pending["provider"], pending["service_id"], user_id, token,
+            )
+        except httpx.HTTPStatusError as exc:
+            return _price_error_text(pending, exc)
+        except Exception as exc:
+            log.warning("clear_price_override failed: %s", exc)
+            return "Could not change the price. Please try again."
+        if not isinstance(result, dict):
+            return "Could not change the price. Please try again."
+        return (
+            f"✅ Price override cleared for service "
+            f"{pending['combined_id']}. It now uses the normal price."
+        )
     # setting
     try:
         result = await admin_api.set_setting(pending["key"], pending["value"])
@@ -2828,10 +3610,17 @@ CAPABILITIES = (
     "you confirm, the full total goes back to the user's Paxyo "
     "balance, never cash)\n"
     "• User balance — \"What is the balance of 779060335?\" (I look "
-    "it up by Telegram id)\n"
+    "it up by Telegram id or @username)\n"
     "• Adjust a balance — \"Add 500 ETB to 779060335\" or \"Remove "
     "200 ETB from 779060335\" (I show the current and new balance, "
     "you confirm first, never below zero)\n"
+    "• Deposit history: \"Deposit history of 779060335\" (the last "
+    "3 deposits: amount, method, date, status)\n"
+    "• Ban a user: \"Ban @william\" or \"Unban 779060335\" (you "
+    "confirm first; a banned user cannot order or deposit)\n"
+    "• Service price: \"Set price of service 6139 to 50 ETB\" or "
+    "\"Show price of service 6139\" (you confirm first for a set; "
+    "\"Clear price of service 6139\" removes an override)\n"
     "• Create a promo code — \"Create promo code PAXYO20 20%\" "
     "(you confirm first; a fixed amount works too — "
     "\"Create promo code FLAT100 100 ETB\")\n"
@@ -3184,6 +3973,41 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 1a. One user's last deposits in plain language (19 Nov 2026)
+    # — "deposit history of 779060335", "last deposits @william".
+    # Read-only lookup, last 3 only, no preview, no Confirm. The
+    # AI is never called for this.
+    deposit_history = parse_deposit_history_command(text)
+    if deposit_history is not None:
+        record, error_text = await _resolve_user_target(deposit_history)
+        if record is None:
+            await update.message.reply_text(error_text)
+            return
+        try:
+            data = await admin_api.get_user_deposits(record["telegram_id"])
+        except Exception as exc:
+            log.warning("get_user_deposits failed: %s", exc)
+            await update.message.reply_text(
+                "Could not load the deposits. Please try again."
+            )
+            return
+        if data is None:
+            await update.message.reply_text(
+                "The deposit history is not connected yet. "
+                "I couldn't look up the deposits."
+            )
+            return
+        if data.get("user_not_found"):
+            await update.message.reply_text(
+                f"There is no Paxyo user with Telegram id "
+                f"{record['telegram_id']}."
+            )
+            return
+        await update.message.reply_text(
+            format_deposit_history(record, data.get("deposits") or [])
+        )
+        return
+
     # 1. Live questions — deterministic, numbers from /admin/stats.
     question = parse_stats_question(text)
     if question is not None:
@@ -3445,29 +4269,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 5e. One user's balance in plain language (18 Nov 2026) —
     # "what is the balance of 779060335". Read-only lookup, no
-    # preview, no Confirm. Users are identified by Telegram id
-    # only: the auth table has no phone column.
+    # preview, no Confirm. Users are named by Telegram id or
+    # @username (19 Nov 2026): the name is resolved first, then
+    # the lookup runs against the Telegram id.
     balance_check = parse_balance_check_command(text)
     if balance_check is not None:
-        tg_id = balance_check["telegram_id"]
-        try:
-            record = await admin_api.get_user_balance(tg_id)
-        except Exception as exc:
-            log.warning("get_user_balance failed: %s", exc)
-            await update.message.reply_text(
-                f"Could not look up user {tg_id} — please try again."
-            )
-            return
+        record, error_text = await _resolve_user_target(balance_check)
         if record is None:
-            await update.message.reply_text(
-                "The balance lookup is not connected yet — "
-                f"I couldn't look up user {tg_id}."
-            )
-            return
-        if record.get("user_not_found"):
-            await update.message.reply_text(
-                f"There is no Paxyo user with Telegram id {tg_id}."
-            )
+            await update.message.reply_text(error_text)
             return
         balance = record.get("balance")
         balance_text = (
@@ -3488,32 +4297,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # before any Confirm. The AI is never called for this.
     balance_adjust = parse_balance_adjust_command(text)
     if balance_adjust is not None:
-        tg_id = balance_adjust["telegram_id"]
         delta = balance_adjust["delta_etb"]
         if delta == 0:
             await update.message.reply_text(
                 "The amount has to be more than 0 ETB."
             )
             return
-        try:
-            record = await admin_api.get_user_balance(tg_id)
-        except Exception as exc:
-            log.warning("get_user_balance failed: %s", exc)
-            await update.message.reply_text(
-                f"Could not look up user {tg_id} — please try again."
-            )
-            return
+        record, error_text = await _resolve_user_target(balance_adjust)
         if record is None:
-            await update.message.reply_text(
-                "The balance lookup is not connected yet — "
-                f"I couldn't look up user {tg_id}."
-            )
+            await update.message.reply_text(error_text)
             return
-        if record.get("user_not_found"):
-            await update.message.reply_text(
-                f"There is no Paxyo user with Telegram id {tg_id}."
-            )
-            return
+        tg_id = record["telegram_id"]
         current = record.get("balance")
         if current is None:
             await update.message.reply_text(
@@ -3548,6 +4342,176 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             _balance_preview(PENDING[user.id]),
             reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+
+    # 5h. Ban / unban in plain language (19 Nov 2026) — "ban
+    # 779060335", "ban @william", "unban 779060335". Confirm-gated
+    # like every other change: the preview shows the user and the
+    # current ban state; the HMAC token is minted only when the
+    # Confirm runs. A user already in the wanted state is told so
+    # plainly and nothing is previewed. The AI is never called.
+    ban_cmd = parse_ban_command(text)
+    unban_cmd = None
+    if ban_cmd is None:
+        unban_cmd = parse_unban_command(text)
+    ban_target = ban_cmd if ban_cmd is not None else unban_cmd
+    if ban_target is not None:
+        action = ban_target["action"]
+        record, error_text = await _resolve_user_target(ban_target)
+        if record is None:
+            await update.message.reply_text(error_text)
+            return
+        tg_id = record["telegram_id"]
+        try:
+            ban_data = await admin_api.get_user_ban(tg_id)
+        except Exception as exc:
+            log.warning("get_user_ban failed: %s", exc)
+            await update.message.reply_text(
+                "Could not check the ban state. Please try again."
+            )
+            return
+        if ban_data is None:
+            await update.message.reply_text(
+                "The ban endpoint is not connected yet. "
+                "Nothing was changed."
+            )
+            return
+        if ban_data.get("user_not_found"):
+            await update.message.reply_text(
+                f"There is no Paxyo user with Telegram id {tg_id}."
+            )
+            return
+        currently_banned = bool(ban_data.get("banned"))
+        user_label = _balance_user_label(record)
+        if action == "ban" and currently_banned:
+            await update.message.reply_text(
+                f"{user_label} is already banned."
+            )
+            return
+        if action == "unban" and not currently_banned:
+            await update.message.reply_text(
+                f"{user_label} is not banned."
+            )
+            return
+        PENDING[user.id] = {
+            "kind": action,
+            "action": action,
+            "telegram_id": tg_id,
+            "user_label": user_label,
+            "currently_banned": currently_banned,
+        }
+        await update.message.reply_text(
+            _ban_preview(PENDING[user.id]),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+
+    # 5i. Set a service price in plain language (19 Nov 2026) —
+    # "set price of service 6139 to 50 ETB". Confirm-gated: the
+    # preview shows the service, the current price and the new
+    # price; the HMAC token is minted only when the Confirm runs.
+    # A zero or negative price is refused here, before any
+    # Confirm. The AI is never called.
+    price_set = parse_price_set_command(text)
+    if price_set is not None:
+        price = price_set["price_etb"]
+        if price <= 0:
+            await update.message.reply_text(
+                "The price has to be more than 0 ETB."
+            )
+            return
+        provider, catalogue_price, override_price, error_text = (
+            await _resolve_price_provider(price_set)
+        )
+        if error_text is not None:
+            await update.message.reply_text(error_text)
+            return
+        current_price = (
+            override_price
+            if override_price is not None
+            else catalogue_price
+        )
+        PENDING[user.id] = {
+            "kind": "price_set",
+            "provider": provider,
+            "service_id": price_set["service_id"],
+            "combined_id": _price_label(provider, price_set["service_id"]),
+            "price_etb": float(price),
+            "current_price": current_price,
+            "current_override": override_price,
+        }
+        await update.message.reply_text(
+            _price_set_preview(PENDING[user.id]),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+
+    # 5j. Clear a service price override in plain language
+    # (19 Nov 2026) — "clear price of service 6139".
+    # Confirm-gated like a set. Clearing a service that has no
+    # override is refused plainly — it already uses the normal
+    # price. The AI is never called.
+    price_clear = parse_price_clear_command(text)
+    if price_clear is not None:
+        provider, catalogue_price, override_price, error_text = (
+            await _resolve_price_provider(price_clear)
+        )
+        if error_text is not None:
+            await update.message.reply_text(error_text)
+            return
+        if override_price is None:
+            await update.message.reply_text(
+                f"Service {_price_label(provider, price_clear['service_id'])} "
+                "has no price override. It already uses the normal price."
+            )
+            return
+        PENDING[user.id] = {
+            "kind": "price_clear",
+            "provider": provider,
+            "service_id": price_clear["service_id"],
+            "combined_id": _price_label(provider, price_clear["service_id"]),
+            "current_price": catalogue_price,
+            "current_override": override_price,
+        }
+        await update.message.reply_text(
+            _price_clear_preview(PENDING[user.id]),
+            reply_markup=CONFIRM_KEYBOARD,
+        )
+        return
+
+    # 5k. Show a service price in plain language (19 Nov 2026) —
+    # "show price of service 6139". Read-only, no preview, no
+    # Confirm. The effective price is the override when one is
+    # set, else the catalogue price when the admin bot can see it
+    # (GOP only — the live list has no SMM prices, so an SMM
+    # service with no override has no known price here). The AI
+    # is never called.
+    price_show = parse_price_show_command(text)
+    if price_show is not None:
+        provider, catalogue_price, override_price, error_text = (
+            await _resolve_price_provider(price_show)
+        )
+        if error_text is not None:
+            await update.message.reply_text(error_text)
+            return
+        combined = _price_label(provider, price_show["service_id"])
+        if override_price is not None:
+            await update.message.reply_text(
+                f"Service {combined}: "
+                f"{format_money(override_price)} ETB per 1000 (override)."
+            )
+            return
+        if catalogue_price is not None:
+            await update.message.reply_text(
+                f"Service {combined}: "
+                f"{format_money(catalogue_price)} ETB per 1000 (normal price)."
+            )
+            return
+        await update.message.reply_text(
+            f"Service {combined} has no price override, and I can't "
+            "see its normal price from here (the live list is GOP "
+            "only). Set a price to fix it."
         )
         return
 

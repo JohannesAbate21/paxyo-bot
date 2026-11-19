@@ -891,7 +891,9 @@ class FakePaxyo:
                  order_records=None, order_status_none=False,
                  split_cover_live=False, dripfeed_live=False,
                  prefs=None, reliability=None, pauses=None,
-                 pause_result=None):
+                 pause_result=None,
+                 banned_ids=None, ban_none=False,
+                 price_overrides=None, price_overrides_none=False):
         self._balance = balance
         self._status = status
         self._status_by_order = dict(status_by_order or {})
@@ -1008,6 +1010,12 @@ class FakePaxyo:
         self._pause_result = pause_result
         self.record_service_cancel_calls = []
         self._services = list(services) if services is not None else SAMPLE_SERVICES
+        # Ban + price overrides (19 Nov 2026).
+        self._banned_ids = set(banned_ids or [])
+        self._ban_none = ban_none
+        self.ban_lookups = []
+        self._price_overrides = list(price_overrides or [])
+        self._price_overrides_none = price_overrides_none
         self.orders_created = []
         self.order_keys = []
         self._recent = list(recent) if recent is not None else []
@@ -1166,6 +1174,31 @@ class FakePaxyo:
 
     async def balance(self, telegram_id):
         return {"found": True, "balance": self._balance}
+
+    async def get_user_ban(self, telegram_id):
+        """Mirror GET /admin/users/{id}/ban (ban, 19 Nov 2026).
+        Banned when the id is in banned_ids; None when ban_none
+        (endpoint not live yet — the real client returns None on
+        its 404)."""
+        self.ban_lookups.append(telegram_id)
+        if self._ban_none:
+            return None
+        return {
+            "ok": True,
+            "banned": telegram_id in self._banned_ids,
+            "telegram_id": telegram_id,
+        }
+
+    async def list_price_overrides(self):
+        """Mirror GET /admin/service-price-overrides (price
+        overrides, 19 Nov 2026). None when price_overrides_none
+        (endpoint not live yet)."""
+        if self._price_overrides_none:
+            return None
+        return {
+            "ok": True,
+            "overrides": [dict(row) for row in self._price_overrides],
+        }
 
     async def create_order(self, telegram_id, service_id, link, quantity, idempotency_key,
                          split_group_id=None, split_part=None,
@@ -9381,7 +9414,10 @@ class TestTurnTimingLogs(unittest.IsolatedAsyncioTestCase):
                 first = await client.services()
             joined = "\n".join(logs.output)
             self.assertRegex(joined, r"api services fetch \d+\.\d\ds")
-            self.assertEqual(len(calls), 1)
+            # Two fetches per refresh since 19 Nov 2026 (price
+            # overrides): the catalogue plus the overrides list.
+            # The duration log line still appears exactly once.
+            self.assertEqual(len(calls), 2)
             self.assertTrue(
                 any(s.get("service") == 1 for s in first)
             )
@@ -9401,7 +9437,7 @@ class TestTurnTimingLogs(unittest.IsolatedAsyncioTestCase):
                 second = await client.services()
             finally:
                 _logger.removeHandler(_handler)
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 2)
             self.assertFalse(
                 any("api services fetch" in m for m in records)
             )
@@ -33531,11 +33567,15 @@ class TestNewApiClients(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.services_refresh_count, 1)
                 await client.services()  # cache hit: no fetch
                 self.assertEqual(client.services_refresh_count, 1)
-                self.assertEqual(send.call_count, 1)
+                # Two HTTP calls per refresh since 19 Nov 2026
+                # (price overrides): the catalogue fetch plus the
+                # overrides fetch. The refresh count still moves
+                # once per refresh.
+                self.assertEqual(send.call_count, 2)
                 client._services_cached_at = -1e9  # expire the cache (0.0 fails on a fresh VM: monotonic < 600s)
                 await client.services()
                 self.assertEqual(client.services_refresh_count, 2)
-                self.assertEqual(send.call_count, 2)
+                self.assertEqual(send.call_count, 4)
         finally:
             await client._client.aclose()
 
@@ -37621,6 +37661,321 @@ class TestMidOrderUnderstanding(unittest.IsolatedAsyncioTestCase):
             msg.text_sent[2],
             "I don't recognise that code, check it and try again.")
         self.assertEqual(fake.referrals_recorded, [])
+
+
+# --- New customer-bot features (19 Nov 2026): ban enforcement and
+# service price overrides. ----------------------------------------
+
+class TestApplyPriceOverrides(unittest.TestCase):
+    """apply_price_overrides is pure: a (provider, service_id)
+    override changes only that provider's row, never the other
+    provider's same bare id."""
+
+    def _catalogue(self):
+        return [
+            {"combined_id": "gop:6139", "provider": "gop",
+             "provider_service_id": 6139, "rate_etb_per_1000": 126.0},
+            {"combined_id": "smm:6139", "provider": "smm",
+             "provider_service_id": 6139, "rate_etb_per_1000": 90.0},
+            {"combined_id": "gop:1665", "provider": "gop",
+             "provider_service_id": 1665, "rate_etb_per_1000": 18.9},
+        ]
+
+    def test_only_the_named_provider_changes(self):
+        out = bot.apply_price_overrides(self._catalogue(), [
+            {"provider": "smm", "service_id": 6139, "price_etb": 50.0},
+        ])
+        by_id = {s["combined_id"]: s for s in out}
+        self.assertEqual(by_id["smm:6139"]["rate_etb_per_1000"], 50.0)
+        self.assertTrue(by_id["smm:6139"]["price_overridden"])
+        self.assertEqual(by_id["gop:6139"]["rate_etb_per_1000"], 126.0)
+        self.assertNotIn("price_overridden", by_id["gop:6139"])
+        self.assertEqual(by_id["gop:1665"]["rate_etb_per_1000"], 18.9)
+
+    def test_unknown_service_and_bad_rows_are_ignored(self):
+        out = bot.apply_price_overrides(self._catalogue(), [
+            {"provider": "gop", "service_id": 9999, "price_etb": 50.0},
+            {"provider": "gop", "service_id": 6139, "price_etb": 0},
+            {"provider": "gop", "service_id": 1665, "price_etb": -5},
+            {"provider": "gop", "service_id": "nope", "price_etb": 50.0},
+            "not a row",
+        ])
+        by_id = {s["combined_id"]: s for s in out}
+        self.assertEqual(by_id["gop:6139"]["rate_etb_per_1000"], 126.0)
+        self.assertEqual(by_id["gop:1665"]["rate_etb_per_1000"], 18.9)
+        self.assertNotIn("price_overridden", by_id["gop:6139"])
+
+    def test_input_rows_are_not_mutated(self):
+        catalogue = self._catalogue()
+        before = [dict(s) for s in catalogue]
+        bot.apply_price_overrides(catalogue, [
+            {"provider": "smm", "service_id": 6139, "price_etb": 50.0},
+        ])
+        self.assertEqual(catalogue, before)
+
+    def test_no_overrides_returns_the_same_prices(self):
+        out = bot.apply_price_overrides(self._catalogue(), [])
+        self.assertEqual(
+            [s["rate_etb_per_1000"] for s in out],
+            [126.0, 90.0, 18.9],
+        )
+
+
+class TestServicesPriceOverrides(unittest.IsolatedAsyncioTestCase):
+    """PaxyoClient.services() applies the admin's price overrides
+    in-memory before caching — quotes and order totals then use
+    the edited price. A missing endpoint or a failed fetch just
+    means no overrides, never a broken catalogue."""
+
+    API_SERVICES = {
+        "success": True, "count": 2, "currency": "ETB",
+        "services": [
+            {"id": 7246, "provider_service_id": 7246,
+             "name": "Tiktok Followers", "category": "Tiktok",
+             "type": "Default", "price": 525, "currency": "ETB",
+             "min": 10, "max": 5000,
+             "average_time": "1 hour 39 minutes", "active": True},
+            {"id": 1665, "provider_service_id": 1665,
+             "name": "TikTok Video Views [ Max 100M ]",
+             "category": "Tiktok Services", "type": "Default",
+             "price": 18.9, "currency": "ETB",
+             "min": 100, "max": 100000000,
+             "average_time": "1 minute", "active": True},
+        ],
+    }
+
+    OVERRIDES = {"ok": True, "overrides": [
+        {"provider": "gop", "service_id": 7246, "price_etb": 100.0,
+         "updated_at": "2026-11-19 10:00:00"},
+        {"provider": "smm", "service_id": 7013, "price_etb": 0.5,
+         "updated_at": "2026-11-19 10:00:00"},
+    ]}
+
+    def _send_for(self, overrides=None, fail_overrides=None):
+        def _send(request):
+            if request.url.path.endswith("/admin/service-price-overrides"):
+                if fail_overrides is not None:
+                    raise fail_overrides
+                return overrides if overrides is not None else {"ok": True, "overrides": []}
+            return dict(self.API_SERVICES)
+        return _send
+
+    async def test_overrides_applied_before_caching(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    side_effect=self._send_for(overrides=self.OVERRIDES)
+                ),
+            ):
+                services = await client.services()
+            by_id = {s["combined_id"]: s for s in services}
+            self.assertEqual(by_id["gop:7246"]["rate_etb_per_1000"], 100.0)
+            self.assertTrue(by_id["gop:7246"]["price_overridden"])
+            self.assertEqual(by_id["gop:1665"]["rate_etb_per_1000"], 18.9)
+            self.assertNotIn("price_overridden", by_id["gop:1665"])
+            # The SMM row comes from the bundled catalogue; its
+            # override applies to it, not to the GOP row.
+            self.assertEqual(by_id["smm:7013"]["rate_etb_per_1000"], 0.5)
+            self.assertTrue(by_id["smm:7013"]["price_overridden"])
+        finally:
+            await client._client.aclose()
+
+    async def test_overrides_endpoint_404_means_no_overrides(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "GET",
+                "https://paxyo.et/api/bot/admin/service-price-overrides",
+            )
+            resp = bot.httpx.Response(
+                404, json={"error": "Not found"}, request=req
+            )
+            error = bot.httpx.HTTPStatusError(
+                "404", request=req, response=resp
+            )
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    side_effect=self._send_for(fail_overrides=error)
+                ),
+            ):
+                services = await client.services()
+            by_id = {s["combined_id"]: s for s in services}
+            self.assertEqual(by_id["gop:7246"]["rate_etb_per_1000"], 525)
+            self.assertNotIn("price_overridden", by_id["gop:7246"])
+        finally:
+            await client._client.aclose()
+
+    async def test_overrides_fetch_failure_means_no_overrides(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    side_effect=self._send_for(
+                        fail_overrides=RuntimeError("api down")
+                    )
+                ),
+            ):
+                services = await client.services()
+            by_id = {s["combined_id"]: s for s in services}
+            self.assertEqual(by_id["gop:7246"]["rate_etb_per_1000"], 525)
+        finally:
+            await client._client.aclose()
+
+
+class TestUserIsBanned(unittest.IsolatedAsyncioTestCase):
+    async def test_banned_user_is_banned(self):
+        with mock.patch("bot.paxyo", FakePaxyo(banned_ids={1})):
+            self.assertTrue(await bot.user_is_banned(1))
+
+    async def test_other_user_is_not_banned(self):
+        with mock.patch("bot.paxyo", FakePaxyo(banned_ids={1})):
+            self.assertFalse(await bot.user_is_banned(2))
+
+    async def test_endpoint_not_live_is_not_banned(self):
+        # Fail-open: a 404 (endpoint not installed yet) must never
+        # block a good user.
+        with mock.patch("bot.paxyo", FakePaxyo(ban_none=True)):
+            self.assertFalse(await bot.user_is_banned(1))
+
+    async def test_lookup_failure_is_not_banned(self):
+        class BrokenPaxyo(FakePaxyo):
+            async def get_user_ban(self, telegram_id):
+                raise RuntimeError("api down")
+
+        with mock.patch("bot.paxyo", BrokenPaxyo()):
+            self.assertFalse(await bot.user_is_banned(1))
+
+    async def test_no_client_is_not_banned(self):
+        with mock.patch("bot.paxyo", None):
+            self.assertFalse(await bot.user_is_banned(1))
+
+
+class TestBanEnforcement(unittest.IsolatedAsyncioTestCase):
+    """A banned user places nothing and deposits nothing: the
+    short refusal, no money moved, no provider call."""
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.PENDING_BUNDLE.clear()
+        bot.LAST_ORDER.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.PENDING_BATCH.clear()
+        bot.PENDING_BUNDLE.clear()
+        bot.LAST_ORDER.clear()
+
+    def test_banned_template_is_short_and_has_no_long_dash(self):
+        for lang in ("en", "am"):
+            text = bot.t("banned", lang)
+            self.assertNotIn("—", text)
+            self.assertIn("support", text.lower())
+
+    async def test_place_pending_order_refuses_banned(self):
+        fake = FakePaxyo(banned_ids={1})
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(make_pending(), 1)
+        self.assertIsNone(result)
+        self.assertEqual(error, ("banned",))
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_place_pending_order_allows_not_banned(self):
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.place_pending_order(make_pending(), 1)
+        self.assertIsNone(error)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(fake.orders_created), 1)
+
+    async def test_place_batch_refuses_banned(self):
+        fake = FakePaxyo(banned_ids={1})
+        batch = {"orders": [make_pending(), make_pending()]}
+        with mock.patch("bot.paxyo", fake):
+            results, error = await bot.place_batch(batch, 1)
+        self.assertIsNone(results)
+        self.assertEqual(error, ("banned",))
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_place_bundle_refuses_banned(self):
+        fake = FakePaxyo(banned_ids={1})
+        bundle = {"orders": [make_pending(), make_pending()]}
+        with mock.patch("bot.paxyo", fake):
+            results, error = await bot.place_bundle(bundle, 1)
+        self.assertIsNone(results)
+        self.assertEqual(error, ("banned",))
+        self.assertEqual(fake.orders_created, [])
+
+    async def test_start_deposit_refuses_banned(self):
+        fake = FakePaxyo(banned_ids={1})
+        with mock.patch("bot.paxyo", fake):
+            result, error = await bot.start_deposit({"amount": 100}, 1)
+        self.assertIsNone(result)
+        self.assertEqual(error, "banned")
+        self.assertEqual(fake.deposits_created, [])
+
+    async def test_refill_confirm_refuses_banned(self):
+        fake = FakePaxyo(banned_ids={1})
+        sent = []
+
+        async def respond(text, reply_markup=None):
+            sent.append(text)
+
+        async def send_new(text, reply_markup=None):
+            sent.append(text)
+
+        with mock.patch("bot.paxyo", fake):
+            await bot._run_refill_confirm(
+                1, {"order_id": 1841}, "en",
+                respond=respond, send_new=send_new,
+            )
+        self.assertEqual(sent, [bot.t("banned", "en")])
+        self.assertEqual(fake.refill_calls, [])
+
+    async def test_delayed_order_never_places_for_banned(self):
+        fake = FakePaxyo(balance=1000.0, banned_ids={1})
+        by_id = {
+            1001: SAMPLE_SERVICES[0],
+            "gop:1001": SAMPLE_SERVICES[0],
+        }
+        item = {
+            "id": 101, "telegram_id": 1, "service_id": 1001,
+            "provider": "gop", "combined_id": "gop:1001",
+            "link": "https://instagram.com/someuser", "quantity": 100,
+            "total": 4.2, "run_at": "2026-11-15 19:00:00",
+            "status": "scheduled", "idempotency_key": "delay-1",
+        }
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_one_delayed(app, item, by_id)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.delayed_finished, [{
+            "id": 101, "status": "failed", "order_id": None,
+            "reason": "account is blocked",
+        }])
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("blocked", app.bot.sent[0][1])
+
+    async def test_recurring_schedule_pauses_for_banned(self):
+        fake = FakePaxyo(due=[due_schedule()], banned_ids={1})
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            await bot.run_scheduler_cycle(app)
+        self.assertEqual(fake.orders_created, [])
+        self.assertEqual(fake.recurring_paused, [7])
+        self.assertEqual(fake.recurring_ran, [])
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn("blocked", app.bot.sent[0][1])
 
 
 if __name__ == "__main__":

@@ -262,7 +262,16 @@ class FakeAdminPaxyo:
                  balance_error=None, balance_error_body=None,
                  balance_adjust_result=None,
                  balance_adjust_error=None,
-                 balance_adjust_error_body=None):
+                 balance_adjust_error_body=None,
+                 user_deposits=None, deposits_none=False,
+                 ban_states=None, ban_none=False,
+                 ban_error=None, ban_error_body=None,
+                 price_overrides=None, price_overrides_none=False,
+                 price_set_result=None, price_set_error=None,
+                 price_set_error_body=None,
+                 price_clear_result=None, price_clear_error=None,
+                 price_clear_error_body=None,
+                 usernames=None, username_lookup_none=False):
         self._stats = stats
         self._stats_none = stats_none
         self._stats_by_days = dict(stats_by_days or {})
@@ -334,6 +343,45 @@ class FakeAdminPaxyo:
         self._balance_adjust_error_body = balance_adjust_error_body
         self.balance_lookups = []
         self.balance_adjust_calls = []
+        # Deposit history / ban / price overrides (19 Nov 2026):
+        # seeded deposits by Telegram id (each a list of dicts,
+        # most recent first); ban states by id; price override
+        # rows. *_none mirrors the real client's 404 (endpoint not
+        # live yet); *_error raises the HTTP error the real client
+        # raises, with *_error_body as the JSON error body.
+        self._user_deposits = {
+            int(k): list(v)
+            for k, v in dict(user_deposits or {}).items()
+        }
+        self._deposits_none = deposits_none
+        self._ban_states = {
+            int(k): bool(v) for k, v in dict(ban_states or {}).items()
+        }
+        self._ban_none = ban_none
+        self._ban_error = ban_error
+        self._ban_error_body = ban_error_body
+        self._price_overrides = list(price_overrides or [])
+        self._price_overrides_none = price_overrides_none
+        self._price_set_result = price_set_result
+        self._price_set_error = price_set_error
+        self._price_set_error_body = price_set_error_body
+        self._price_clear_result = price_clear_result
+        self._price_clear_error = price_clear_error
+        self._price_clear_error_body = price_clear_error_body
+        # Username lookup (19 Nov 2026): seeded records by
+        # lowercase username; an unknown name is "user not found",
+        # the way the real client reports the endpoint's 404.
+        self._usernames = {
+            str(k).lower(): v
+            for k, v in dict(usernames or {}).items()
+        }
+        self._username_lookup_none = username_lookup_none
+        self.username_lookups = []
+        self.deposit_lookups = []
+        self.ban_lookups = []
+        self.ban_calls = []
+        self.price_set_calls = []
+        self.price_clear_calls = []
 
     async def admin_stats(self, days=1, day=None):
         self.stats_days_seen.append(days)
@@ -545,6 +593,112 @@ class FakeAdminPaxyo:
         if self._promo_off_result is not None:
             return self._promo_off_result
         return {"ok": True, "code": code, "active": False}
+
+    # Deposit history / ban / price overrides (19 Nov 2026).
+    # get_user_deposits / get_user_ban mirror the real client's
+    # 404 convention (unknown user -> user_not_found, other 404 ->
+    # None); the set/clear writes raise, like adjust_user_balance.
+
+    async def lookup_user_by_username(self, username):
+        self.username_lookups.append(username)
+        if self._username_lookup_none:
+            return None
+        record = self._usernames.get(str(username).lower())
+        if record is None:
+            return {"user_not_found": True}
+        return dict(record)
+
+    async def get_user_deposits(self, telegram_id):
+        self.deposit_lookups.append(int(telegram_id))
+        if self._deposits_none:
+            return None
+        deposits = self._user_deposits.get(int(telegram_id))
+        if deposits is None:
+            return {"user_not_found": True}
+        return {"deposits": list(deposits)}
+
+    async def get_user_ban(self, telegram_id):
+        self.ban_lookups.append(int(telegram_id))
+        if self._ban_none:
+            return None
+        if int(telegram_id) not in self._balances:
+            return {"user_not_found": True}
+        return {
+            "ok": True,
+            "banned": bool(self._ban_states.get(int(telegram_id), False)),
+            "telegram_id": int(telegram_id),
+        }
+
+    async def set_user_ban(self, telegram_id, action,
+                           admin_telegram_id, confirm_token):
+        self.ban_calls.append({
+            "telegram_id": telegram_id,
+            "action": action,
+            "admin_telegram_id": admin_telegram_id,
+            "confirm_token": confirm_token,
+        })
+        if self._ban_error is not None:
+            raise _status_error(self._ban_error, self._ban_error_body)
+        if self._ban_none:
+            return None
+        self._ban_states[int(telegram_id)] = (action == "ban")
+        return {
+            "ok": True,
+            "telegram_id": int(telegram_id),
+            "banned": action == "ban",
+            "action": action,
+        }
+
+    async def list_price_overrides(self):
+        if self._price_overrides_none:
+            return None
+        return {
+            "ok": True,
+            "overrides": [dict(row) for row in self._price_overrides],
+        }
+
+    async def set_price_override(self, provider, service_id, price_etb,
+                                 admin_telegram_id, confirm_token):
+        self.price_set_calls.append({
+            "provider": provider,
+            "service_id": service_id,
+            "price_etb": price_etb,
+            "admin_telegram_id": admin_telegram_id,
+            "confirm_token": confirm_token,
+        })
+        if self._price_set_error is not None:
+            raise _status_error(
+                self._price_set_error, self._price_set_error_body
+            )
+        if self._price_set_result is not None:
+            return self._price_set_result
+        return {
+            "ok": True,
+            "provider": provider,
+            "service_id": int(service_id),
+            "price_etb": float(price_etb),
+        }
+
+    async def clear_price_override(self, provider, service_id,
+                                   admin_telegram_id, confirm_token):
+        self.price_clear_calls.append({
+            "provider": provider,
+            "service_id": service_id,
+            "admin_telegram_id": admin_telegram_id,
+            "confirm_token": confirm_token,
+        })
+        if self._price_clear_error is not None:
+            raise _status_error(
+                self._price_clear_error, self._price_clear_error_body
+            )
+        if self._price_clear_result is not None:
+            return self._price_clear_result
+        return {
+            "ok": True,
+            "provider": provider,
+            "service_id": int(service_id),
+            "cleared": True,
+        }
 
 
 class FakeApp:
@@ -3810,6 +3964,880 @@ class TestUserBalanceEndpointContract(unittest.TestCase):
         self.assertIn("User not found.", source)
         self.assertIn("bot_aub_user_balance", source)
         self.assertIn("bot_aub_user_balance_adjust", source)
+
+# --- New admin features (19 Nov 2026): deposit history (last 3),
+# username for every user-targeted action, ban/unban, service
+# price set/clear/show. -------------------------------------------
+
+USER_DEPOSITS = [
+    {"id": 301, "amount": 500.00, "method": "telebirr",
+     "status": "completed", "created_at": "2026-11-18 10:00:00"},
+    {"id": 300, "amount": 100.00, "method": "cbe",
+     "status": "completed", "created_at": "2026-11-17 09:00:00"},
+    {"id": 299, "amount": 50.00, "method": None,
+     "status": "pending", "created_at": "2026-11-16 08:00:00"},
+]
+
+PRICED_SERVICES = [
+    {"service": 6139, "name": "Telegram Post Views | Fast",
+     "rate_etb_per_1000": 126.0},
+    {"service": 1665, "name": "TikTok Video Views | Fast",
+     "rate_etb_per_1000": 18.9},
+]
+
+
+def _expected_ban_token(telegram_id=779060335, action="ban",
+                        admin_id=ADMIN_ID):
+    """The HMAC token the bot must mint for a ban/unban, computed
+    independently here from the test secret."""
+    return hmac.new(
+        admin_bot.BOT_API_SECRET.encode(),
+        f"admin-user-ban:{telegram_id}:{action}:{admin_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _expected_price_token(provider="gop", service_id=6139,
+                          price_etb=50.0, admin_id=ADMIN_ID):
+    """The HMAC token the bot must mint for a price set (price
+    given) or clear (price None), computed independently here."""
+    if price_etb is None:
+        msg = f"admin-service-price:clear:{provider}:{service_id}:{admin_id}"
+    else:
+        msg = (
+            f"admin-service-price:set:{provider}:{service_id}:"
+            f"{price_etb:.2f}:{admin_id}"
+        )
+    return hmac.new(
+        admin_bot.BOT_API_SECRET.encode(), msg.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+class TestUserTargetParsing(unittest.TestCase):
+    def test_telegram_id(self):
+        self.assertEqual(
+            admin_bot._user_target_from_text("balance of 779060335"),
+            {"telegram_id": 779060335},
+        )
+
+    def test_at_username(self):
+        self.assertEqual(
+            admin_bot._user_target_from_text("ban @william"),
+            {"username": "william"},
+        )
+
+    def test_bare_username_after_keywords(self):
+        for text in (
+            "balance of william",
+            "add 500 ETB to william",
+            "remove 200 ETB from william",
+            "ban william",
+            "unban william",
+            "show deposits william",
+            "deposit history william",
+            "deposit history of william",
+        ):
+            self.assertEqual(
+                admin_bot._user_target_from_text(text),
+                {"username": "william"},
+                text,
+            )
+
+    def test_no_target(self):
+        for text in (
+            "balance",
+            "ban",
+            "show deposits",
+            "add 500 ETB",
+            "what is my balance?",
+        ):
+            self.assertIsNone(
+                admin_bot._user_target_from_text(text), text
+            )
+
+
+
+class TestDepositHistoryParsing(unittest.TestCase):
+    def test_variants(self):
+        for text in (
+            "deposit history of 779060335",
+            "deposit history of @william",
+            "last deposits 779060335",
+            "last deposits @william",
+            "show deposits william",
+            "deposits of 779060335",
+            "show me the deposit history for william",
+        ):
+            parsed = admin_bot.parse_deposit_history_command(text)
+            self.assertIsNotNone(parsed, text)
+
+    def test_targets(self):
+        self.assertEqual(
+            admin_bot.parse_deposit_history_command(
+                "deposit history of 779060335"
+            ),
+            {"telegram_id": 779060335},
+        )
+        self.assertEqual(
+            admin_bot.parse_deposit_history_command(
+                "last deposits @william"
+            ),
+            {"username": "william"},
+        )
+
+    def test_not_a_command(self):
+        for text in (
+            "how many deposits today",
+            "deposits by method",
+            "deposits over 1000 ETB today",
+            "how much did we make today",
+            "deposit 500 ETB",
+            "Hello",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_deposit_history_command(text), text
+            )
+
+
+class TestBanParsing(unittest.TestCase):
+    def test_ban_variants(self):
+        for text in ("ban 779060335", "ban @william", "ban william",
+                     "please ban user 779060335"):
+            self.assertEqual(
+                admin_bot.parse_ban_command(text),
+                {"action": "ban", "telegram_id": 779060335}
+                if "779060335" in text else
+                {"action": "ban", "username": "william"},
+                text,
+            )
+
+    def test_unban_variants(self):
+        for text in ("unban 779060335", "unban @william",
+                     "unban william"):
+            self.assertEqual(
+                admin_bot.parse_unban_command(text),
+                {"action": "unban", "telegram_id": 779060335}
+                if "779060335" in text else
+                {"action": "unban", "username": "william"},
+                text,
+            )
+
+    def test_unban_is_not_a_ban(self):
+        self.assertIsNone(admin_bot.parse_ban_command("unban 779060335"))
+        self.assertIsNone(admin_bot.parse_ban_command("unban @william"))
+
+    def test_ban_is_not_an_unban(self):
+        self.assertIsNone(admin_bot.parse_unban_command("ban 779060335"))
+
+    def test_not_a_command(self):
+        for text in (
+            "ban",
+            "ban the service",
+            "are accounts being banned",
+            "Hello",
+        ):
+            self.assertIsNone(admin_bot.parse_ban_command(text), text)
+            self.assertIsNone(admin_bot.parse_unban_command(text), text)
+
+
+class TestPriceParsing(unittest.TestCase):
+    def test_set_variants(self):
+        cases = (
+            # No provider word -> None; the handler resolves it
+            # from the catalogue (gop) at preview time.
+            ("set price of service 6139 to 50 ETB", None, 6139, 50.0),
+            ("edit price 6139 50", None, 6139, 50.0),
+            ("change the price of gop service 6139 to 50.00 birr",
+             "gop", 6139, 50.0),
+            ("set smm service 6139 price to 75 ETB",
+             "smm", 6139, 75.0),
+            ("update price of service 1665 to 20 ETB",
+             None, 1665, 20.0),
+        )
+        for text, provider, service_id, price in cases:
+            parsed = admin_bot.parse_price_set_command(text)
+            self.assertIsNotNone(parsed, text)
+            self.assertEqual(parsed["service_id"], service_id, text)
+            self.assertEqual(parsed["price_etb"], price, text)
+            self.assertEqual(parsed.get("provider"), provider, text)
+
+    def test_set_not_a_command(self):
+        for text in (
+            "what is the price of service 6139",
+            "set price",
+            "price of service 6139",
+            "Hello",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_price_set_command(text), text
+            )
+
+    def test_clear_variants(self):
+        for text in (
+            "clear price of service 6139",
+            "remove price override 6139",
+            "reset the price of smm service 6139",
+            "delete price override for service 6139",
+        ):
+            parsed = admin_bot.parse_price_clear_command(text)
+            self.assertIsNotNone(parsed, text)
+            self.assertEqual(parsed["service_id"], 6139, text)
+
+    def test_clear_not_a_command(self):
+        for text in (
+            "set price of service 6139 to 50 ETB",
+            "show price of service 6139",
+            "clear",
+            "Hello",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_price_clear_command(text), text
+            )
+
+    def test_show_variants(self):
+        for text in (
+            "show price of service 6139",
+            "what is the price of service 6139",
+            "price of service 6139",
+            "show me the price of smm service 6139",
+        ):
+            parsed = admin_bot.parse_price_show_command(text)
+            self.assertIsNotNone(parsed, text)
+            self.assertEqual(parsed["service_id"], 6139, text)
+
+    def test_show_not_a_command(self):
+        for text in (
+            "set price of service 6139 to 50 ETB",
+            "clear price of service 6139",
+            "what is the balance of 779060335",
+            "Hello",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_price_show_command(text), text
+            )
+
+
+class TestNewTokenBinding(unittest.TestCase):
+    def test_ban_token_shape_and_binding(self):
+        token = admin_bot.mint_admin_ban_token(779060335, "ban", ADMIN_ID)
+        self.assertEqual(token, _expected_ban_token())
+        self.assertEqual(len(token), 64)
+        self.assertTrue(all(c in "0123456789abcdef" for c in token))
+        # Bound to one user + one action + one admin.
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_ban_token(779060336, "ban", ADMIN_ID),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_ban_token(779060335, "unban", ADMIN_ID),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_ban_token(779060335, "ban", OTHER_ID),
+        )
+
+    def test_price_token_shape_and_binding(self):
+        token = admin_bot.mint_admin_price_token(
+            "gop", 6139, ADMIN_ID, 50.0
+        )
+        self.assertEqual(token, _expected_price_token())
+        self.assertEqual(len(token), 64)
+        self.assertTrue(all(c in "0123456789abcdef" for c in token))
+        # Bound to one provider + one service + one price + one admin.
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_price_token("smm", 6139, ADMIN_ID, 50.0),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_price_token("gop", 1665, ADMIN_ID, 50.0),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_price_token("gop", 6139, ADMIN_ID, 51.0),
+        )
+        self.assertNotEqual(
+            token,
+            admin_bot.mint_admin_price_token("gop", 6139, OTHER_ID, 50.0),
+        )
+
+    def test_price_clear_token_differs_from_set_token(self):
+        clear = admin_bot.mint_admin_price_token("gop", 6139, ADMIN_ID)
+        self.assertEqual(clear, _expected_price_token(price_etb=None))
+        self.assertNotEqual(
+            clear,
+            admin_bot.mint_admin_price_token("gop", 6139, ADMIN_ID, 50.0),
+        )
+
+
+class TestDepositHistoryFlow(AdminBotBase):
+    def _fake(self, **kwargs):
+        params = dict(
+            stats=STATS, balances={779060335: dict(USER_BALANCE)},
+            user_deposits={779060335: list(USER_DEPOSITS)},
+        )
+        params.update(kwargs)
+        return FakeAdminPaxyo(**params)
+
+    async def test_history_shows_last_3_with_method_date_status(self):
+        fake = self._fake()
+        message = await self._text(
+            "deposit history of 779060335", fake=fake
+        )
+        self.assertEqual(len(message.text_sent), 1)
+        reply = message.text_sent[0]
+        self.assertIn("william (779060335)", reply)
+        self.assertIn("500.00 ETB, telebirr, 2026-11-18 10:00, completed", reply)
+        self.assertIn("100.00 ETB, cbe, 2026-11-17 09:00, completed", reply)
+        self.assertIn("50.00 ETB, method not recorded, 2026-11-16 08:00, pending", reply)
+        self.assertEqual(fake.deposit_lookups, [779060335])
+
+    async def test_history_by_username_resolves_to_id(self):
+        fake = self._fake(usernames={"william": dict(USER_BALANCE)})
+        message = await self._text(
+            "last deposits @william", fake=fake
+        )
+        self.assertIn("william (779060335)", message.text_sent[0])
+        self.assertIn("500.00 ETB", message.text_sent[0])
+        self.assertEqual(fake.deposit_lookups, [779060335])
+        self.assertEqual(fake.username_lookups, ["william"])
+
+    async def test_no_deposits_says_so(self):
+        fake = self._fake(user_deposits={779060335: []})
+        message = await self._text(
+            "deposit history of 779060335", fake=fake
+        )
+        self.assertIn("No deposits yet for william (779060335).",
+                      message.text_sent[0])
+
+    async def test_unknown_user_says_so(self):
+        fake = self._fake()
+        message = await self._text(
+            "deposit history of 999999999", fake=fake
+        )
+        self.assertIn(
+            "There is no Paxyo user with Telegram id 999999999.",
+            message.text_sent[0],
+        )
+        self.assertEqual(fake.deposit_lookups, [])
+
+    async def test_unknown_username_says_so(self):
+        fake = self._fake(usernames={"william": dict(USER_BALANCE)})
+        message = await self._text(
+            "deposit history of @ghost", fake=fake
+        )
+        self.assertIn(
+            "There is no Paxyo user with username @ghost.",
+            message.text_sent[0],
+        )
+        self.assertEqual(fake.deposit_lookups, [])
+
+    async def test_endpoint_not_live_says_so(self):
+        fake = self._fake(deposits_none=True)
+        message = await self._text(
+            "deposit history of 779060335", fake=fake
+        )
+        self.assertIn("not connected yet", message.text_sent[0])
+
+    async def test_ai_never_called_for_deposit_history(self):
+        fake = self._fake()
+        self._patch_api(fake)
+        with mock.patch.object(
+            admin_bot, "ai_reply",
+            mock.AsyncMock(side_effect=AssertionError("AI must not be called")),
+        ):
+            message = await self._text("deposit history of 779060335")
+        self.assertIn("500.00 ETB", message.text_sent[0])
+
+
+class TestUsernameResolutionFlow(AdminBotBase):
+    def _fake(self, **kwargs):
+        return FakeAdminPaxyo(
+            stats=STATS, balances={779060335: dict(USER_BALANCE)},
+            usernames={"william": dict(USER_BALANCE)}, **kwargs
+        )
+
+    async def test_balance_check_by_username(self):
+        fake = self._fake()
+        message = await self._text(
+            "what is the balance of @william?", fake=fake
+        )
+        self.assertIn("william (779060335)", message.text_sent[0])
+        self.assertIn("1,045.05 ETB", message.text_sent[0])
+        self.assertEqual(fake.balance_lookups, [])
+
+    async def test_balance_adjust_by_username_previews_with_name(self):
+        fake = self._fake()
+        message = await self._text(
+            "add 500 ETB to @william", fake=fake
+        )
+        self.assertIn(
+            "Add 500.00 ETB to william (779060335)", message.text_sent[0]
+        )
+        self.assertIn("New balance: 1,545.05 ETB", message.text_sent[0])
+        query = await self._callback("admin_confirm")
+        self.assertEqual(len(fake.balance_adjust_calls), 1)
+        self.assertEqual(
+            fake.balance_adjust_calls[0]["telegram_id"], 779060335
+        )
+        self.assertEqual(
+            query.edited,
+            ["✅ Added 500.00 ETB to william (779060335). "
+             "New balance: 1,545.05 ETB."],
+        )
+
+    async def test_unknown_username_says_so(self):
+        fake = self._fake()
+        message = await self._text(
+            "what is the balance of @ghost?", fake=fake
+        )
+        self.assertIn(
+            "There is no Paxyo user with username @ghost.",
+            message.text_sent[0],
+        )
+
+    async def test_lookup_not_live_says_so(self):
+        fake = self._fake(username_lookup_none=True)
+        message = await self._text(
+            "what is the balance of @william?", fake=fake
+        )
+        self.assertIn("not connected yet", message.text_sent[0])
+
+
+class TestBanFlow(AdminBotBase):
+    def _fake(self, **kwargs):
+        params = dict(
+            stats=STATS, balances={779060335: dict(USER_BALANCE)},
+            usernames={"william": dict(USER_BALANCE)},
+            ban_states={779060335: False},
+        )
+        params.update(kwargs)
+        return FakeAdminPaxyo(**params)
+
+    async def _preview(self, fake, text="ban 779060335"):
+        self._patch_api(fake)
+        return await self._text(text)
+
+    async def test_ban_preview_shows_user_and_state(self):
+        fake = self._fake()
+        message = await self._preview(fake)
+        self.assertEqual(len(message.text_sent), 1)
+        preview = message.text_sent[0]
+        self.assertIn("Ban william (779060335)?", preview)
+        self.assertIn("Currently: not banned.", preview)
+        self.assertIsNotNone(message.markups[0])
+        self.assertEqual(
+            admin_bot.PENDING[ADMIN_ID],
+            {
+                "kind": "ban",
+                "action": "ban",
+                "telegram_id": 779060335,
+                "user_label": "william (779060335)",
+                "currently_banned": False,
+            },
+        )
+
+    async def test_nothing_banned_before_confirm(self):
+        fake = self._fake()
+        await self._preview(fake)
+        self.assertEqual(fake.ban_calls, [])
+
+    async def test_confirm_bans_with_right_token_and_body(self):
+        fake = self._fake()
+        await self._preview(fake)
+        query = await self._callback("admin_confirm")
+        self.assertEqual(len(fake.ban_calls), 1)
+        call = fake.ban_calls[0]
+        self.assertEqual(call["telegram_id"], 779060335)
+        self.assertEqual(call["action"], "ban")
+        self.assertEqual(call["admin_telegram_id"], ADMIN_ID)
+        self.assertEqual(
+            call["confirm_token"], _expected_ban_token(),
+        )
+        self.assertEqual(
+            query.edited,
+            ["✅ william (779060335) is now banned."],
+        )
+
+    async def test_ban_by_username(self):
+        fake = self._fake()
+        message = await self._preview(fake, "ban @william")
+        self.assertIn("Ban william (779060335)?", message.text_sent[0])
+        query = await self._callback("admin_confirm")
+        self.assertEqual(fake.ban_calls[0]["telegram_id"], 779060335)
+        self.assertEqual(
+            query.edited, ["✅ william (779060335) is now banned."]
+        )
+
+    async def test_already_banned_refused_before_confirm(self):
+        fake = self._fake(ban_states={779060335: True})
+        message = await self._preview(fake)
+        self.assertIn(
+            "william (779060335) is already banned.", message.text_sent[0]
+        )
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+        self.assertEqual(fake.ban_calls, [])
+
+    async def test_unban_preview_and_confirm(self):
+        fake = self._fake(ban_states={779060335: True})
+        message = await self._preview(fake, "unban @william")
+        self.assertIn("Unban william (779060335)?", message.text_sent[0])
+        self.assertIn("Currently: banned.", message.text_sent[0])
+        query = await self._callback("admin_confirm")
+        self.assertEqual(fake.ban_calls[0]["action"], "unban")
+        self.assertEqual(
+            fake.ban_calls[0]["confirm_token"],
+            _expected_ban_token(action="unban"),
+        )
+        self.assertEqual(
+            query.edited, ["✅ william (779060335) is now unbanned."]
+        )
+
+    async def test_not_banned_unban_refused(self):
+        fake = self._fake()
+        message = await self._preview(fake, "unban 779060335")
+        self.assertIn(
+            "william (779060335) is not banned.", message.text_sent[0]
+        )
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_typed_yes_bans(self):
+        fake = self._fake()
+        await self._preview(fake)
+        message = await self._text("yes")
+        self.assertEqual(len(fake.ban_calls), 1)
+        self.assertEqual(
+            message.text_sent,
+            ["✅ william (779060335) is now banned."],
+        )
+
+    async def test_double_confirm_bans_once(self):
+        fake = self._fake()
+        await self._preview(fake)
+        first = await self._callback("admin_confirm")
+        second = await self._callback("admin_confirm")
+        self.assertEqual(
+            first.edited, ["✅ william (779060335) is now banned."]
+        )
+        self.assertEqual(second.edited, ["Nothing to confirm."])
+        self.assertEqual(len(fake.ban_calls), 1)
+
+    async def test_cancel_drops_pending(self):
+        fake = self._fake()
+        await self._preview(fake)
+        message = await self._text("cancel")
+        self.assertEqual(message.text_sent, ["Cancelled."])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+        self.assertEqual(fake.ban_calls, [])
+
+    async def test_unknown_user_says_so(self):
+        fake = self._fake()
+        message = await self._preview(fake, "ban 999999999")
+        self.assertIn(
+            "There is no Paxyo user with Telegram id 999999999.",
+            message.text_sent[0],
+        )
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_endpoint_not_live_at_preview(self):
+        fake = self._fake(ban_none=True)
+        message = await self._preview(fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_confirm_403_shows_server_message(self):
+        fake = self._fake(ban_error=403,
+                          ban_error_body={"error": "Only the owner can ban users."})
+        await self._preview(fake)
+        query = await self._callback("admin_confirm")
+        self.assertEqual(
+            query.edited, ["Only the owner can ban users."]
+        )
+
+    async def test_ai_never_called_for_ban(self):
+        fake = self._fake()
+        self._patch_api(fake)
+        with mock.patch.object(
+            admin_bot, "ai_reply",
+            mock.AsyncMock(side_effect=AssertionError("AI must not be called")),
+        ):
+            message = await self._text("ban 779060335")
+        self.assertIn("Ban william (779060335)?", message.text_sent[0])
+
+
+class TestPriceFlow(AdminBotBase):
+    def _fake(self, **kwargs):
+        return FakeAdminPaxyo(
+            stats=STATS, services=list(PRICED_SERVICES), **kwargs
+        )
+
+    async def _preview(self, fake, text):
+        self._patch_api(fake)
+        return await self._text(text)
+
+    async def test_set_preview_shows_service_current_and_new(self):
+        fake = self._fake()
+        message = await self._preview(
+            fake, "set price of service 6139 to 50 ETB"
+        )
+        self.assertEqual(len(message.text_sent), 1)
+        preview = message.text_sent[0]
+        self.assertIn(
+            "Set the price of service gop:6139 to 50.00 ETB per 1000?",
+            preview,
+        )
+        self.assertIn("Current price: 126.00 ETB per 1000", preview)
+        self.assertIsNotNone(message.markups[0])
+        self.assertEqual(
+            admin_bot.PENDING[ADMIN_ID],
+            {
+                "kind": "price_set",
+                "provider": "gop",
+                "service_id": 6139,
+                "combined_id": "gop:6139",
+                "price_etb": 50.0,
+                "current_price": 126.0,
+                "current_override": None,
+            },
+        )
+
+    async def test_nothing_set_before_confirm(self):
+        fake = self._fake()
+        await self._preview(fake, "set price of service 6139 to 50 ETB")
+        self.assertEqual(fake.price_set_calls, [])
+
+    async def test_confirm_sets_with_right_token_and_body(self):
+        fake = self._fake()
+        await self._preview(fake, "set price of service 6139 to 50 ETB")
+        query = await self._callback("admin_confirm")
+        self.assertEqual(len(fake.price_set_calls), 1)
+        call = fake.price_set_calls[0]
+        self.assertEqual(call["provider"], "gop")
+        self.assertEqual(call["service_id"], 6139)
+        self.assertEqual(call["price_etb"], 50.0)
+        self.assertEqual(call["admin_telegram_id"], ADMIN_ID)
+        self.assertEqual(
+            call["confirm_token"], _expected_price_token(),
+        )
+        self.assertEqual(
+            query.edited,
+            ["✅ Price of service gop:6139 set to 50.00 ETB per 1000. "
+             "The customer bot picks it up within 10 minutes."],
+        )
+
+    async def test_zero_and_negative_refused_before_confirm(self):
+        fake = self._fake()
+        for text in (
+            "set price of service 6139 to 0 ETB",
+            "set price of service 6139 to -10 ETB",
+        ):
+            message = await self._preview(fake, text)
+            self.assertIn("more than 0 ETB", message.text_sent[0], text)
+            self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+        self.assertEqual(fake.price_set_calls, [])
+
+    async def test_double_confirm_sets_once(self):
+        fake = self._fake()
+        await self._preview(fake, "set price of service 6139 to 50 ETB")
+        first = await self._callback("admin_confirm")
+        second = await self._callback("admin_confirm")
+        self.assertEqual(
+            first.edited,
+            ["✅ Price of service gop:6139 set to 50.00 ETB per 1000. "
+             "The customer bot picks it up within 10 minutes."],
+        )
+        self.assertEqual(second.edited, ["Nothing to confirm."])
+        self.assertEqual(len(fake.price_set_calls), 1)
+
+    async def test_unknown_service_asks_for_provider_or_id(self):
+        fake = self._fake()
+        message = await self._preview(
+            fake, "set price of service 9999 to 50 ETB"
+        )
+        self.assertIn("I don't see service 9999 in the live list.",
+                      message.text_sent[0])
+        self.assertIn("smm service 9999", message.text_sent[0])
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+
+    async def test_smm_word_resolves_smm_service(self):
+        fake = self._fake()
+        message = await self._preview(
+            fake, "set price of smm service 9999 to 50 ETB"
+        )
+        self.assertIn(
+            "Set the price of service smm:9999 to 50.00 ETB per 1000?",
+            message.text_sent[0],
+        )
+        self.assertIn("Current price: not in the live list",
+                      message.text_sent[0])
+        query = await self._callback("admin_confirm")
+        self.assertEqual(fake.price_set_calls[0]["provider"], "smm")
+        self.assertEqual(
+            fake.price_set_calls[0]["confirm_token"],
+            _expected_price_token(provider="smm", service_id=9999),
+        )
+
+    async def test_override_settles_provider_without_word(self):
+        fake = self._fake(price_overrides=[
+            {"provider": "smm", "service_id": 9999, "price_etb": 40.0,
+             "updated_at": "2026-11-19 10:00:00"},
+        ])
+        message = await self._preview(
+            fake, "set price of service 9999 to 45 ETB"
+        )
+        self.assertIn(
+            "Set the price of service smm:9999 to 45.00 ETB per 1000?",
+            message.text_sent[0],
+        )
+        self.assertIn("Current price: 40.00 ETB per 1000 (override)",
+                      message.text_sent[0])
+
+    async def test_clear_preview_and_confirm(self):
+        fake = self._fake(price_overrides=[
+            {"provider": "gop", "service_id": 6139, "price_etb": 50.0,
+             "updated_at": "2026-11-19 10:00:00"},
+        ])
+        message = await self._preview(
+            fake, "clear price of service 6139"
+        )
+        preview = message.text_sent[0]
+        self.assertIn(
+            "Clear the price override for service gop:6139?", preview
+        )
+        self.assertIn("Override now: 50.00 ETB per 1000", preview)
+        self.assertIn("Normal price: 126.00 ETB per 1000", preview)
+        self.assertEqual(
+            admin_bot.PENDING[ADMIN_ID]["kind"], "price_clear"
+        )
+        query = await self._callback("admin_confirm")
+        self.assertEqual(len(fake.price_clear_calls), 1)
+        call = fake.price_clear_calls[0]
+        self.assertEqual(call["provider"], "gop")
+        self.assertEqual(call["service_id"], 6139)
+        self.assertEqual(
+            call["confirm_token"],
+            _expected_price_token(price_etb=None),
+        )
+        self.assertEqual(
+            query.edited,
+            ["✅ Price override cleared for service gop:6139. "
+             "It now uses the normal price."],
+        )
+
+    async def test_clear_without_override_refused(self):
+        fake = self._fake()
+        message = await self._preview(
+            fake, "clear price of service 6139"
+        )
+        self.assertIn(
+            "Service gop:6139 has no price override. "
+            "It already uses the normal price.",
+            message.text_sent[0],
+        )
+        self.assertNotIn(ADMIN_ID, admin_bot.PENDING)
+        self.assertEqual(fake.price_clear_calls, [])
+
+    async def test_show_with_override(self):
+        fake = self._fake(price_overrides=[
+            {"provider": "gop", "service_id": 6139, "price_etb": 50.0,
+             "updated_at": "2026-11-19 10:00:00"},
+        ])
+        message = await self._text(
+            "show price of service 6139", fake=fake
+        )
+        self.assertEqual(
+            message.text_sent,
+            ["Service gop:6139: 50.00 ETB per 1000 (override)."],
+        )
+
+    async def test_show_normal_price(self):
+        fake = self._fake()
+        message = await self._text(
+            "what is the price of service 6139", fake=fake
+        )
+        self.assertEqual(
+            message.text_sent,
+            ["Service gop:6139: 126.00 ETB per 1000 (normal price)."],
+        )
+
+    async def test_show_smm_without_override_has_no_known_price(self):
+        fake = self._fake()
+        message = await self._text(
+            "show price of smm service 9999", fake=fake
+        )
+        self.assertIn(
+            "Service smm:9999 has no price override", message.text_sent[0]
+        )
+        self.assertIn("live list is GOP only", message.text_sent[0])
+
+    async def test_confirm_400_shows_server_message(self):
+        fake = self._fake(price_set_error=400,
+                          price_set_error_body={"error": "Price must be above 0."})
+        await self._preview(fake, "set price of service 6139 to 50 ETB")
+        query = await self._callback("admin_confirm")
+        self.assertEqual(query.edited, ["Price must be above 0."])
+
+    async def test_ai_never_called_for_price_commands(self):
+        fake = self._fake()
+        self._patch_api(fake)
+        with mock.patch.object(
+            admin_bot, "ai_reply",
+            mock.AsyncMock(side_effect=AssertionError("AI must not be called")),
+        ):
+            message = await self._text("show price of service 6139")
+        self.assertIn("126.00 ETB per 1000", message.text_sent[0])
+
+
+class TestNewRepliesNoLongDash(AdminBotBase):
+    """No long dash in any new user-visible reply (19 Nov 2026)."""
+
+    def _fake(self, **kwargs):
+        return FakeAdminPaxyo(
+            stats=STATS, balances={779060335: dict(USER_BALANCE)},
+            usernames={"william": dict(USER_BALANCE)},
+            user_deposits={779060335: list(USER_DEPOSITS)},
+            ban_states={779060335: False},
+            services=list(PRICED_SERVICES),
+            price_overrides=[
+                {"provider": "gop", "service_id": 6139, "price_etb": 50.0,
+                 "updated_at": "2026-11-19 10:00:00"},
+            ],
+            **kwargs
+        )
+
+    async def test_new_replies_have_no_long_dash(self):
+        fake = self._fake()
+        # Only the NEW replies: the balance-check reply is
+        # pre-existing 18 Nov text ("william (779060335) — balance:
+        # ..."), not part of this build.
+        texts = (
+            "deposit history of 779060335",
+            "ban 779060335",
+            "set price of service 6139 to 50 ETB",
+            "clear price of service 6139",
+            "show price of service 6139",
+        )
+        for text in texts:
+            # A preview-creating command leaves PENDING set; the
+            # next text would get the (pre-existing) "change
+            # waiting" reply instead of its own — cancel first so
+            # each text is answered on its own.
+            admin_bot.PENDING.clear()
+            message = await self._text(text, fake=fake)
+            for reply in message.text_sent:
+                self.assertNotIn("—", reply, text)
+        # The Confirm executions too.
+        admin_bot.PENDING.clear()
+        await self._text("ban 779060335", fake=fake)
+        query = await self._callback("admin_confirm")
+        for reply in query.edited:
+            self.assertNotIn("—", reply)
+        await self._text("set price of service 6139 to 50 ETB", fake=fake)
+        query = await self._callback("admin_confirm")
+        for reply in query.edited:
+            self.assertNotIn("—", reply)
+
 
 if __name__ == "__main__":
     unittest.main()
