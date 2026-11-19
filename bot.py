@@ -5764,8 +5764,12 @@ class PaxyoClient:
         the Paxyo cover on order placement (server /
         api-order-split-cover.php installed, 15 Nov 2026).
         404-tolerant like the other optional endpoints: unknown
-        means not live. Cached per process — a deploy restarts
-        it, and the install flips it on the next deploy."""
+        means not live. Cached per process: a deploy restarts
+        it, and the install flips it on the next deploy. Any
+        failure (a non-404 status, a non-JSON body, a connection
+        error, a timeout) means not live too: the probe must
+        never raise into a chat (19 Nov 2026: the dripfeed
+        probe raised exactly this way and the turn went silent)."""
         if self._split_cover_live is not None:
             return self._split_cover_live
         try:
@@ -5778,9 +5782,14 @@ class PaxyoClient:
                     "GET /split-cover/status returned 404 "
                     "(endpoint not live yet)"
                 )
-                self._split_cover_live = False
-                return False
-            raise
+            else:
+                log.warning("GET /split-cover/status failed: %s", exc)
+            self._split_cover_live = False
+            return False
+        except Exception as exc:
+            log.warning("GET /split-cover/status failed: %s", exc)
+            self._split_cover_live = False
+            return False
         live = bool((data or {}).get("split_cover_live"))
         self._split_cover_live = live
         return live
@@ -5790,7 +5799,12 @@ class PaxyoClient:
         honours runs/interval on order placement (server /
         api-order-dripfeed.php installed, 15 Nov 2026).
         404-tolerant like split_cover_live: unknown means not
-        live. Cached per process."""
+        live. Cached per process. Any failure (a non-404 status,
+        a non-JSON body, a connection error, a timeout) means
+        not live too: the probe must never raise into a chat
+        (19 Nov 2026: the first live drip request after a
+        deploy went silent because this probe raised and
+        on_text had no safety net)."""
         if self._dripfeed_live is not None:
             return self._dripfeed_live
         try:
@@ -5803,9 +5817,18 @@ class PaxyoClient:
                     "GET /orders/dripfeed-status returned 404 "
                     "(endpoint not live yet)"
                 )
-                self._dripfeed_live = False
-                return False
-            raise
+            else:
+                log.warning(
+                    "GET /orders/dripfeed-status failed: %s", exc
+                )
+            self._dripfeed_live = False
+            return False
+        except Exception as exc:
+            log.warning(
+                "GET /orders/dripfeed-status failed: %s", exc
+            )
+            self._dripfeed_live = False
+            return False
         live = bool((data or {}).get("dripfeed_live"))
         self._dripfeed_live = live
         return live
@@ -23751,7 +23774,15 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
     # shown: a repeat is a provider drip-feed order, and without
     # the endpoint the bot would promise what it cannot place.
     # The service's own drip-feed flag is checked after the pick.
-    if not await paxyo.dripfeed_live():
+    # A probe failure is "not live", never silence: the probe
+    # itself is total too, but this call must never raise into
+    # the turn either (19 Nov 2026: it did, and the user got
+    # no reply at all).
+    try:
+        _drip_live = await paxyo.dripfeed_live()
+    except Exception:
+        _drip_live = False
+    if not _drip_live:
         await reply_message(update.message, t("drip_not_live", lang), lang, voice=voice)
         return
     try:
@@ -24750,7 +24781,14 @@ async def complete_order(message, user_id, merged, lang, voice=False,
     span = merged.get("drip_span")
     deadline = _deadline_from_draft(merged.get("deadline"))
     if span is not None:
-        if not await paxyo.dripfeed_live():
+        # A probe failure is "not live", never silence (19 Nov
+        # 2026: the unwrapped probe raised and the turn got no
+        # reply at all).
+        try:
+            _drip_live = await paxyo.dripfeed_live()
+        except Exception:
+            _drip_live = False
+        if not _drip_live:
             await reply_message(
                 message,
                 "Drip-feed isn't set up on the server yet, so I "
@@ -30026,9 +30064,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sender = getattr(quoted, "from_user", None)
         if sender is None or getattr(sender, "is_bot", False):
             quoted_text = getattr(quoted, "text", None) or None
-    await handle_order_text(
-        update, context, update.message.text or "", quoted_text=quoted_text
-    )
+    # A text message always gets a reply: an unhandled failure
+    # in the order flow must never go silent (19 Nov 2026: the
+    # first live drip request after a deploy got no reply at all
+    # because the dripfeed probe raised here). Same safety net
+    # as on_voice; the exception is logged, not hidden.
+    try:
+        await handle_order_text(
+            update, context, update.message.text or "", quoted_text=quoted_text
+        )
+    except Exception as exc:
+        log.exception("text order flow failed: %s", exc)
+        await update.message.reply_text(
+            t("not_understood", lang_of("", update.effective_user.language_code))
+        )
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):

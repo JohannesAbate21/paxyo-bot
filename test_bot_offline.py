@@ -3544,6 +3544,117 @@ class TestBoundedDripPlans(unittest.IsolatedAsyncioTestCase):
         self.assertIn("isn't set up on the server", msg.text_sent[0])
         self.assertEqual(bot.PENDING, {})
 
+    async def test_drip_probe_http_error_answers_not_live(self):
+        # Live failure 19 Nov 2026 (commit a15745e): the first
+        # drip request after a deploy got NO reply at all. The
+        # link and the 100k total were found, so the flow reached
+        # the dripfeed probe, and the probe raised (the server
+        # endpoint is not installed, and the probe only tolerated
+        # a 404), the exception escaped handle_order_text, and
+        # on_text had no safety net. Now a failing probe is an
+        # honest refusal, never silence.
+        paxyo = self._live(
+            services=[dict(self.TIKTOK_VIEWS)],
+            recent=[self.TELEGRAM_RECENT], balance=10000.0)
+        req = bot.httpx.Request(
+            "GET", "https://paxyo.et/api/bot/orders/dripfeed-status")
+        paxyo.dripfeed_live = mock.AsyncMock(side_effect=(
+            bot.httpx.HTTPStatusError(
+                "server error", request=req,
+                response=bot.httpx.Response(500, request=req))))
+        await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        await self._send(
+            "I want 100k views how much is it",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      quantity=100000),
+            paxyo=paxyo,
+        )
+        self.assertEqual(bot.PARKED_DRAFT[1]["quantity"], 100000)
+        msg = await self._send(
+            "Can you place the order 10k views for every 1 hr next",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("isn't set up on the server", msg.text_sent[0])
+        self.assertNotIn("t.me", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_drip_probe_bad_body_answers_not_live(self):
+        # Same silence, other probe failure: the server answers
+        # 200 with a non-JSON body (an HTML error page), so
+        # response.json() raises. Also an honest refusal now.
+        paxyo = self._live(
+            services=[dict(self.TIKTOK_VIEWS)],
+            recent=[self.TELEGRAM_RECENT], balance=10000.0)
+        paxyo.dripfeed_live = mock.AsyncMock(side_effect=(
+            json.JSONDecodeError("Expecting value", "<html>", 0)))
+        await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        await self._send(
+            "I want 100k views how much is it",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      quantity=100000),
+            paxyo=paxyo,
+        )
+        msg = await self._send(
+            "Can you place the order 10k views for every 1 hr next",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("isn't set up on the server", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_pending_plain_order_drip_probe_failure_answers_not_live(self):
+        # Live flow 2 (19 Nov 2026): a plain 20k confirm card is
+        # pending, then the drip request. The probe fails (a
+        # connection error this time), so the drip turn still gets
+        # its honest refusal instead of silence, and the plain
+        # card is left alone.
+        paxyo = self._live(services=[dict(self.TIKTOK_VIEWS)], balance=10000.0)
+        req = bot.httpx.Request(
+            "GET", "https://paxyo.et/api/bot/orders/dripfeed-status")
+        paxyo.dripfeed_live = mock.AsyncMock(side_effect=(
+            bot.httpx.ConnectError("connection refused", request=req)))
+        await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        msg = await self._send(
+            "I want 20k views",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      quantity=20000),
+            paxyo=paxyo,
+        )
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        msg = await self._send(
+            "place the order 10k views for every 1 hr",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("isn't set up on the server", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+
     async def test_drip_refused_on_non_dripfeed_service(self):
         svc = dict(self.TIKTOK_VIEWS, dripfeed=False)
         paxyo = self._live(services=[svc])
@@ -3612,6 +3723,44 @@ class TestBoundedDripPlans(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.parse_interval_minutes("every week"), 10080)
         self.assertEqual(bot.parse_interval_minutes("every 2 weeks"), 20160)
         self.assertEqual(bot.parse_interval_minutes("every 3 days"), 4320)
+
+
+class TestOnTextNeverSilent(unittest.IsolatedAsyncioTestCase):
+    """A text message always gets a reply (19 Nov 2026): the first
+    live drip request after a deploy went silent because the
+    dripfeed probe raised out of handle_order_text and on_text
+    had no safety net. on_voice already had one; on_text now
+    does too."""
+
+    def setUp(self):
+        bot.SEEN_UPDATES.clear()
+
+    def tearDown(self):
+        bot.SEEN_UPDATES.clear()
+
+    async def test_handler_exception_still_replies(self):
+        msg = FakeMessage(text="place the order 10k views for every 1 hr")
+        update = FakeUpdate(msg)
+        with mock.patch.object(
+            bot, "handle_order_text",
+            new=mock.AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await bot.on_text(update, None)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("I did not understand", msg.text_sent[0])
+
+    async def test_healthy_turn_is_untouched(self):
+        # The net only catches failures: a healthy turn flows
+        # through with no extra reply and no swallowed message.
+        msg = FakeMessage(text="hello")
+        update = FakeUpdate(msg)
+        with mock.patch.object(
+            bot, "handle_order_text",
+            new=mock.AsyncMock(return_value=None),
+        ) as flow:
+            await bot.on_text(update, None)
+        flow.assert_awaited_once()
+        self.assertEqual(msg.text_sent, [])
 
 
 class TestSchedules(unittest.IsolatedAsyncioTestCase):
@@ -6709,6 +6858,98 @@ class TestDepositApiClient(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.method, "GET")
             self.assertTrue(request.url.path.endswith("/deposits/dep-1"))
             self.assertIn("telegram_id=1", str(request.url))
+        finally:
+            await client._client.aclose()
+
+
+class TestProbeEndpoints(unittest.IsolatedAsyncioTestCase):
+    """The optional-endpoint probes (GET /split-cover/status,
+    GET /orders/dripfeed-status) never raise into a chat: any
+    failure means "not live" (19 Nov 2026: the dripfeed probe
+    raised on a non-404 failure and the first live drip request
+    after a deploy got no reply at all)."""
+
+    def _probe_request(self):
+        return bot.httpx.Request(
+            "GET", "https://paxyo.et/api/bot/orders/dripfeed-status")
+
+    async def test_dripfeed_live_http_500_returns_false_and_caches(self):
+        client = bot.PaxyoClient()
+        try:
+            req = self._probe_request()
+            err = bot.httpx.HTTPStatusError(
+                "server error", request=req,
+                response=bot.httpx.Response(500, request=req))
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ) as send:
+                self.assertIs(await client.dripfeed_live(), False)
+                self.assertIs(await client.dripfeed_live(), False)
+            self.assertEqual(send.call_count, 1)
+        finally:
+            await client._client.aclose()
+
+    async def test_dripfeed_live_non_json_body_returns_false(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=(
+                    json.JSONDecodeError("Expecting value", "<html>", 0)))
+            ):
+                self.assertIs(await client.dripfeed_live(), False)
+        finally:
+            await client._client.aclose()
+
+    async def test_dripfeed_live_connect_error_returns_false(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=(
+                    bot.httpx.ConnectError(
+                        "connection refused", request=self._probe_request())))
+            ):
+                self.assertIs(await client.dripfeed_live(), False)
+        finally:
+            await client._client.aclose()
+
+    async def test_dripfeed_live_404_returns_false(self):
+        client = bot.PaxyoClient()
+        try:
+            req = self._probe_request()
+            err = bot.httpx.HTTPStatusError(
+                "not found", request=req,
+                response=bot.httpx.Response(404, request=req))
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertIs(await client.dripfeed_live(), False)
+        finally:
+            await client._client.aclose()
+
+    async def test_dripfeed_live_true_when_endpoint_answers(self):
+        client = bot.PaxyoClient()
+        try:
+            with mock.patch.object(
+                client, "_send",
+                new=mock.AsyncMock(
+                    return_value={"ok": True, "dripfeed_live": True}),
+            ):
+                self.assertIs(await client.dripfeed_live(), True)
+        finally:
+            await client._client.aclose()
+
+    async def test_split_cover_live_http_500_returns_false(self):
+        client = bot.PaxyoClient()
+        try:
+            req = bot.httpx.Request(
+                "GET", "https://paxyo.et/api/bot/split-cover/status")
+            err = bot.httpx.HTTPStatusError(
+                "server error", request=req,
+                response=bot.httpx.Response(500, request=req))
+            with mock.patch.object(
+                client, "_send", new=mock.AsyncMock(side_effect=err)
+            ):
+                self.assertIs(await client.split_cover_live(), False)
         finally:
             await client._client.aclose()
 
