@@ -298,24 +298,30 @@ function bot_dripfeed_status() {
 // --- GOP: public_html/api/bot.php, POST /orders ---
 //
 // Apply the same six edits to the GOP order handler, matching
-// bot.php's actual locals: read runs/interval with drp_read_fields
-// after the quantity is read; check the service's dripfeed flag
-// on the GOP services list the handler already fetched for the
-// live rate (fail 400 "This service does not offer drip-feed."
-// when it is false — 6,297 of 7,175 GOP services have it); compute
-// the total from the per-run quantity x runs and debit that;
-// insert the order row with the total quantity plus the three drip
-// columns; call the provider's `add` with quantity = the per-run
-// quantity plus runs + interval (the GOP provider call takes the
-// same three params — see the SMM smm_place edit above for the
-// shape); refund the full total on provider failure. When the
-// fields are absent the handler must behave byte-for-byte as it
-// does today. The split-cover fields (split_group_id, split_part,
-// confirmed_total_etb, paxyo_cover_etb) and the drip fields never
-// ride on the same order: a drip order is placed whole, never
-// split-tested, so the two splices never interact — but both must
-// be applied to the same total/debit/insert lines, so apply them
-// together and re-run php -l after each.
+// bot.php's actual locals: FIRST, call drp_add_order_columns($db)
+// as soon as the database handle is available, before any drip
+// logic or insert — a drip order must never fail on missing
+// columns just because the status probe never ran (19 Nov 2026:
+// the probe was the only other caller, and the GOP handler had
+// no column-ensure step at all). Then read runs/interval with
+// drp_read_fields after the quantity is read; check the service's
+// dripfeed flag on the GOP services list the handler already
+// fetched for the live rate (fail 400 "This service does not
+// offer drip-feed." when it is false — 6,297 of 7,175 GOP
+// services have it); compute the total from the per-run quantity
+// x runs and debit that; insert the order row with the total
+// quantity plus the three drip columns; call the provider's `add`
+// with quantity = the per-run quantity plus runs + interval (the
+// GOP provider call takes the same three params — see the SMM
+// smm_place edit above for the shape); refund the full total on
+// provider failure. When the fields are absent the handler must
+// behave byte-for-byte as it does today. The split-cover fields
+// (split_group_id, split_part, confirmed_total_etb,
+// paxyo_cover_etb) and the drip fields never ride on the same
+// order: a drip order is placed whole, never split-tested, so
+// the two splices never interact — but both must be applied to
+// the same total/debit/insert lines, so apply them together and
+// re-run php -l after each.
 //
 // ============================================================================
 // DISPATCH — insert these lines in bot.php BEFORE the 404 fallback:
@@ -324,8 +330,11 @@ function bot_dripfeed_status() {
 //
 // (Add the same bot_rate_limit(...) call the other GET endpoints use
 // to that dispatch line — copy the exact call from the balance
-// handler. The bot calls this at most once per process — it caches
-// the answer — so the probe costs one request per deploy.)
+// handler. The bot re-probes at most once every 5 minutes
+// (DRIPFEED_LIVE_CACHE_SECONDS in bot.py, 19 Nov 2026), so no
+// bot restart is needed after this install: a drip request
+// retried a few minutes after the install will see the
+// endpoint live.)
 //
 // LIVE CURL TEST — read this whole block before running it. The test
 // places a REAL small drip order on the operating account, with
