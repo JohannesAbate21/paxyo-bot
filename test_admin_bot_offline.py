@@ -51,7 +51,7 @@ import os
 import re
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -1703,6 +1703,99 @@ class TestPromoParsing(unittest.TestCase):
         ):
             self.assertIsNone(admin_bot.parse_promo_create_command(text))
 
+    def test_duration_expiry_hours(self):
+        # "for 12 hrs" -> expires about 12h from now (EAT).
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code GENA20 20% for 12 hrs"
+        )
+        self.assertEqual(parsed["code"], "GENA20")
+        self.assertEqual(parsed["percent"], 20)
+        expected = datetime.now(admin_bot.EAT_TZ) + timedelta(hours=12)
+        actual = datetime.strptime(
+            parsed["expires_at"], "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=admin_bot.EAT_TZ)
+        self.assertLess(abs((actual - expected).total_seconds()), 120)
+        # An explicit date still wins over a duration.
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code GENA20 20% expires 2026-12-31 for 12 hrs"
+        )
+        self.assertEqual(parsed["expires_at"], "2026-12-31 23:59:59")
+
+    def test_duration_expiry_days(self):
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code GENA20 20% for 1 day"
+        )
+        self.assertEqual(parsed["code"], "GENA20")
+        expected = datetime.now(admin_bot.EAT_TZ) + timedelta(days=1)
+        actual = datetime.strptime(
+            parsed["expires_at"], "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=admin_bot.EAT_TZ)
+        self.assertLess(abs((actual - expected).total_seconds()), 120)
+
+    def test_duration_tomorrow_and_today(self):
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code GENA20 20% tomorrow"
+        )
+        tomorrow = (
+            datetime.now(admin_bot.EAT_TZ) + timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        self.assertEqual(parsed["expires_at"], tomorrow + " 23:59:59")
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code GENA20 20% today"
+        )
+        today = datetime.now(admin_bot.EAT_TZ).strftime("%Y-%m-%d")
+        self.assertEqual(parsed["expires_at"], today + " 23:59:59")
+
+    def test_use_this_code_form(self):
+        parsed = admin_bot.parse_promo_create_command(
+            "use this code GENA20 for it give 20% bonus when users "
+            "deposit with this code"
+        )
+        self.assertEqual(
+            parsed,
+            {"code": "GENA20", "percent": 20, "fixed_etb": None,
+             "expires_at": None, "max_uses": None},
+        )
+        parsed = admin_bot.parse_promo_create_command(
+            "using this code GENA20 20%"
+        )
+        self.assertEqual(parsed["code"], "GENA20")
+        self.assertEqual(parsed["percent"], 20)
+
+    def test_use_this_code_without_bonus_is_not_a_create(self):
+        for text in (
+            "use this code GENA20",
+            "can I use this code GENA20",
+            "using code GENA20",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_promo_create_command(text), text
+            )
+
+    def test_stop_word_code(self):
+        # "Lets create promo code for 12 hrs" (19 Nov 2026): "for"
+        # is not a code — the code is None, the 12h duration is
+        # still read, and the validator asks for the code name.
+        parsed = admin_bot.parse_promo_create_command(
+            "Lets create promo code for 12 hrs"
+        )
+        self.assertIsNone(parsed["code"])
+        expected = datetime.now(admin_bot.EAT_TZ) + timedelta(hours=12)
+        actual = datetime.strptime(
+            parsed["expires_at"], "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=admin_bot.EAT_TZ)
+        self.assertLess(abs((actual - expected).total_seconds()), 120)
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code for 12 hrs"
+        )
+        self.assertIsNone(parsed["code"])
+        # A code-like token after the stop word is recovered.
+        parsed = admin_bot.parse_promo_create_command(
+            "create promo code for GENA20 20%"
+        )
+        self.assertEqual(parsed["code"], "GENA20")
+        self.assertEqual(parsed["percent"], 20)
+
 
 class TestPromoValidation(unittest.TestCase):
     def _parsed(self, code="PAXYO20", percent=20, expires_at=None,
@@ -1763,6 +1856,15 @@ class TestPromoValidation(unittest.TestCase):
             "Max uses must be at least 1.",
         )
 
+    def test_code_none(self):
+        # The parser found no code-like token (e.g. "lets create
+        # promo code for 12 hrs") — ask for the name, plainly.
+        self.assertEqual(
+            admin_bot.validate_promo_create(self._parsed(code=None)),
+            'Tell me the code name too — for example "create promo '
+            'code GENA20 20%".',
+        )
+
 
 class TestCapabilityQuestions(unittest.TestCase):
     """Natural questions about what the bot can do (19 Nov 2026):
@@ -1770,6 +1872,19 @@ class TestCapabilityQuestions(unittest.TestCase):
     never an AI guess about a panel section. Only question/ask
     forms match — an actual command, a greeting, or a general
     "what can you do" returns None."""
+
+    def test_lets_questions(self):
+        # "lets" / "let's" is an ask form too (19 Nov 2026).
+        answer = admin_bot.parse_capability_question(
+            "lets check a balance"
+        )
+        self.assertIsNotNone(answer)
+        self.assertIn("balance of", answer)
+        answer = admin_bot.parse_capability_question(
+            "let's create a promo code"
+        )
+        self.assertIsNotNone(answer)
+        self.assertIn("create promo code", answer)
 
     def test_promo_question(self):
         for text in (

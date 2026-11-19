@@ -1918,6 +1918,82 @@ async def _resolve_price_provider(parsed: dict):
     return provider, catalogue_price, override_price, None
 
 
+# Stop words that can never be a promo code name (19 Nov 2026):
+# when the captured code token is one of these, the real code (if
+# any) comes later in the message.
+_PROMO_CODE_STOP_WORDS = frozenset((
+    "for", "the", "a", "an", "this", "that", "code", "promo",
+    "today", "tomorrow", "with", "give", "bonus", "percent",
+    "hours", "hrs", "hour", "day", "days", "use", "using",
+    "please", "and", "or", "to", "of", "in", "on", "at", "by",
+    "from", "expires", "expiry", "max", "uses", "new", "make",
+    "create", "lets", "let", "us", "it", "is", "be", "will",
+    "can", "could", "should", "would", "want", "like",
+))
+
+
+def _promo_code_after_stop_word(after: str):
+    """The next code-like token in the text after a stop word was
+    captured as the code (19 Nov 2026): 4-20 letters/digits, not a
+    stop word, not purely numeric, not a date. Returns it
+    uppercased, or None when there is none."""
+    for raw in after.split():
+        token = raw.strip("\"'.,%").lower()
+        if not token or token in _PROMO_CODE_STOP_WORDS:
+            continue
+        if token.isdigit():
+            continue
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+            continue
+        if not re.fullmatch(r"[a-z0-9]{4,20}", token):
+            continue
+        return token.upper()
+    return None
+
+
+def _promo_duration_expiry(s: str, now=None):
+    """An expiry from a duration in the message (19 Nov 2026):
+    "for 12 hrs" / "for 1 day" -> now + that long; "tomorrow" ->
+    tomorrow 23:59:59; "today" -> today 23:59:59. Returns a
+    "YYYY-MM-DD HH:MM:SS" string, or None. Times are EAT: the
+    server compares expires_at against NOW() in the server's time
+    zone (server/api-promo-codes.php A4), and the codebase
+    convention is EAT everywhere — the admin bot schedules in
+    EAT (EAT_TZ above), and
+    server/admin-targeted-broadcasts.php sets
+    date_default_timezone_set('Africa/Addis_Ababa'). If the server
+    clock were not EAT, a duration expiry would be off by the
+    difference, so this uses the same EAT clock the rest of the
+    bot uses."""
+    now_eat = (now or datetime.now(EAT_TZ)).astimezone(EAT_TZ)
+    dm = re.search(r"for\s+(\d+)\s*(?:hours?|hrs?|h)\b", s)
+    if dm:
+        try:
+            hours = int(dm.group(1))
+        except ValueError:
+            hours = 0
+        return (now_eat + timedelta(hours=hours)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    dm = re.search(r"for\s+(\d+)\s*(?:days?|d)\b", s)
+    if dm:
+        try:
+            days = int(dm.group(1))
+        except ValueError:
+            days = 0
+        return (now_eat + timedelta(days=days)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    if re.search(r"\btomorrow\b", s):
+        return (
+            (now_eat + timedelta(days=1)).strftime("%Y-%m-%d")
+            + " 23:59:59"
+        )
+    if re.search(r"\btoday\b", s):
+        return now_eat.strftime("%Y-%m-%d") + " 23:59:59"
+    return None
+
+
 def parse_promo_create_command(text: str):
     """Deterministic promo-code creation parser. "create promo code
     PAXYO20 20%", "new promo code WELCOME10 10 percent" ->
@@ -1926,11 +2002,19 @@ def parse_promo_create_command(text: str):
     A fixed ETB bonus instead of a percent (25, 15 Nov 2026):
     "create promo code FLAT100 100 ETB" -> {"fixed_etb": 100,
     "percent": None}. Optional "expires 2026-12-31" and "max 100
-    uses" are parsed when present. The code is uppercased here
+    uses" are parsed when present. (19 Nov 2026) A duration expiry
+    is parsed too: "for 12 hrs" / "for 1 day" / "tomorrow" /
+    "today" -> expires_at from now, in EAT. The "use this code
+    GENA20 ... 20%" form also creates, but only when a percent or
+    a fixed amount is present, so a plain question about using a
+    code never becomes a create. The code is uppercased here
     (the server normalises the same way). percent / fixed_etb are
     None when neither was given — the handler then asks for one,
-    plainly. The code keeps its raw shape for validate_promo_create,
-    which refuses bad ones before any Confirm."""
+    plainly. When the captured code token is a stop word ("for",
+    "this", ...), the next code-like token is used instead, or the
+    code is None when there is none — validate_promo_create then
+    asks for the code name. The code keeps its raw shape for
+    validate_promo_create, which refuses bad ones before any Confirm."""
     s = _normalize_admin_text(
         re.sub(r"\s+", " ", (text or "").strip()).lower()
     )
@@ -1941,10 +2025,27 @@ def parse_promo_create_command(text: str):
         s,
         re.IGNORECASE,
     )
-    if not m:
+    use_form = False
+    if m is None:
+        # "use this code GENA20 for it give 20% bonus ..." — a
+        # create only when a bonus is given too (checked below,
+        # after percent / fixed_etb are parsed).
+        m = re.search(
+            r"(?:use|using)\s+(?:this\s+)?code\s+(\S+)",
+            s,
+            re.IGNORECASE,
+        )
+        use_form = m is not None
+    if m is None:
         return None
     code = m.group(1).strip().strip("\"'.,").upper()
     rest = s[m.end():]
+    if code.lower() in _PROMO_CODE_STOP_WORDS:
+        # "lets create promo code for 12 hrs" captured "for" as
+        # the code — take the next code-like token, or None when
+        # there is none (validate_promo_create then asks for the
+        # code name).
+        code = _promo_code_after_stop_word(rest)
     percent = None
     # No \b after the unit: "%" is not a word char, so "20% " has
     # no word boundary after the "%" and \b would never match it.
@@ -1963,12 +2064,36 @@ def parse_promo_create_command(text: str):
             fixed_etb = float(fm.group(1))
         except ValueError:
             fixed_etb = None
+    if use_form and percent is None and fixed_etb is None:
+        # The bonus may come before the code in this form
+        # ("give 20% bonus, use this code GENA20") — check the
+        # whole message before giving up.
+        pm = re.search(r"(\d+)\s*(?:%|percent|pct)", s, re.IGNORECASE)
+        if pm:
+            try:
+                percent = int(pm.group(1))
+            except ValueError:
+                percent = None
+        if percent is None:
+            fm = re.search(
+                r"(\d+(?:\.\d+)?)\s*(?:ETB|birr)\b", s, re.IGNORECASE
+            )
+            if fm:
+                try:
+                    fixed_etb = float(fm.group(1))
+                except ValueError:
+                    fixed_etb = None
     expires_at = None
     em = re.search(
         r"expir(?:y|es)?\s+(\d{4}-\d{2}-\d{2})", rest, re.IGNORECASE
     )
     if em:
         expires_at = em.group(1) + " 23:59:59"
+    if expires_at is None:
+        # A duration ("for 12 hrs", "tomorrow") is searched from
+        # the command itself, so "for" captured as the code still
+        # leaves its duration readable. An explicit date above wins.
+        expires_at = _promo_duration_expiry(s[m.start():])
     max_uses = None
     um = re.search(r"max\s+(?:uses\s+)?(\d+)", rest, re.IGNORECASE)
     if not um:
@@ -1978,6 +2103,11 @@ def parse_promo_create_command(text: str):
             max_uses = int(um.group(1))
         except ValueError:
             max_uses = None
+    if use_form and percent is None and fixed_etb is None:
+        # "use this code GENA20" with no bonus is a question about
+        # using a code, not a create — leave it to the capability
+        # question / AI route.
+        return None
     return {
         "code": code,
         "percent": percent,
@@ -2193,7 +2323,8 @@ def parse_capability_question(text: str):
     promo code", "how do I check a balance", "can I ban a user" —
     -> the guidance answer, or None. Only question/ask forms match
     (can/could we|I|you, how do/can I|we, is it possible to, I want
-    to, I'd like to): an actual command ("create promo code PAXYO20
+    to, I'd like to, lets): an actual command ("create promo code
+    PAXYO20
     20%", "ban @william") is handled by its own parser above and
     never reaches here, and a general "what can you do" goes to the
     help/AI route, not here. (19 Nov 2026.)"""
@@ -2217,7 +2348,8 @@ def parse_capability_question(text: str):
         r"|\bis\s+it\s+possible\s+to\b"
         r"|\bi\s+want\s+to\b"
         r"|\bi'?d\s+like\s+to\b"
-        r"|\bi\s+would\s+like\s+to\b",
+        r"|\bi\s+would\s+like\s+to\b"
+        r"|\blets\b|\blet'?s\b",
         s,
     ):
         return None
@@ -2382,7 +2514,15 @@ def validate_promo_create(parsed: dict):
     EITHER a percent (1–100) OR a fixed ETB amount (>= 1) —
     never both, never neither. Expiry must be a real date, not in
     the past. Max uses must be at least 1."""
-    code = (parsed.get("code") or "").strip().upper()
+    code = parsed.get("code")
+    if code is None:
+        # The parser found no code-like token (e.g. "lets create
+        # promo code for 12 hrs") — ask for the name, plainly.
+        return (
+            'Tell me the code name too — for example "create promo '
+            'code GENA20 20%".'
+        )
+    code = code.strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{4,20}", code):
         return (
             "That code won't work — use 4–20 letters and digits, "
