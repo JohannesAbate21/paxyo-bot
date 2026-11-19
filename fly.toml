@@ -10,6 +10,10 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile"
 
+[processes]
+  app = "python bot.py"
+  worker = "python refill_worker.py --loop"
+
 [env]
   PORT = "8080"
   PAXYO_API_BASE = "https://paxyo.et/api/bot"
@@ -27,3 +31,8 @@ primary_region = "iad"
   size = "shared-cpu-1x"
   memory = "512mb"
   processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  processes = ["worker"]

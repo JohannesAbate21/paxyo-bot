@@ -327,6 +327,8 @@ DRIPFEED_LIVE_CACHE_SECONDS = 300  # 5 minutes: the drip-feed probe
 # the probe cached False forever per process, so installing
 # api-order-dripfeed.php on paxyo.et changed nothing until the
 # next Fly deploy).
+REFILLS_LIVE_CACHE_SECONDS = 300  # 5 minutes: same rule for the
+# auto-refill probe (GET /refills/status, server api-auto-refill.php).
 # Auto-refill / keep-above-target (19 Nov 2026): the bot checks a
 # live count once an hour and tops it back up to the target from
 # the user's balance. Guards: a drop smaller than the minimum
@@ -5759,6 +5761,11 @@ class PaxyoClient:
         # effect until a redeploy (19 Nov 2026).
         self._dripfeed_live = None
         self._dripfeed_live_at = 0.0
+        # Auto-refill (19 Nov 2026): whether the server has the
+        # refill endpoints (GET /refills/status). Same cache rule
+        # as the drip-feed probe: a False must expire.
+        self._refills_live = None
+        self._refills_live_at = 0.0
         # Price-change watch (feature 6, 15 Nov 2026): incremented
         # on each REAL catalogue fetch (never on a cache hit), so
         # the scheduler can tell a fresh catalogue from a cached
@@ -6072,6 +6079,105 @@ class PaxyoClient:
         self._dripfeed_live = live
         self._dripfeed_live_at = time.monotonic()
         return live
+
+    # --------------------------------------------- auto-refill records --
+    # Contract (server side, api-auto-refill.php — the durable home
+    # for keep-above-target records, 19 Nov 2026): the bot keeps a
+    # confirmed refill in memory only (AUTO_REFILL_ACTIVE), so a
+    # deploy forgets it. These calls persist it: POST /refills on
+    # Confirm, GET /refills for the status list, POST
+    # /refills/{id}/stop on stop. All 404-tolerant like the rest
+    # of this client: until the endpoint exists the bot works
+    # from memory alone, exactly as before.
+
+    async def refills_live(self):
+        """GET /refills/status -> True when the server has the
+        refill endpoints. 404-tolerant like dripfeed_live:
+        unknown means not live. Cached for
+        REFILLS_LIVE_CACHE_SECONDS, then re-probed."""
+        if (
+            self._refills_live is not None
+            and time.monotonic() - self._refills_live_at < REFILLS_LIVE_CACHE_SECONDS
+        ):
+            return self._refills_live
+        try:
+            data = await self._send(build_api_request("GET", "/refills/status"))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /refills/status returned 404 (endpoint not live yet)")
+            else:
+                log.warning("GET /refills/status failed: %s", exc)
+            self._refills_live = False
+            self._refills_live_at = time.monotonic()
+            return False
+        except Exception as exc:
+            log.warning("GET /refills/status failed: %s", exc)
+            self._refills_live = False
+            self._refills_live_at = time.monotonic()
+            return False
+        live = bool((data or {}).get("refills_live"))
+        self._refills_live = live
+        self._refills_live_at = time.monotonic()
+        return live
+
+    async def create_refill(self, telegram_id: int, service_id: int,
+                            provider, link: str, platform: str, metric: str,
+                            target: int, service: dict, idempotency_key: str):
+        """POST /refills {...} -> {"ok": true, "id": N, "refill":
+        {...}}. Returns None on 404 (endpoint not live yet); any
+        other failure raises, so the caller can log it."""
+        try:
+            return await self._send(
+                build_api_request("POST", "/refills", {
+                    "telegram_id": telegram_id,
+                    "service_id": service_id,
+                    "provider": provider,
+                    "link": link,
+                    "platform": platform,
+                    "metric": metric,
+                    "target": target,
+                    "service_json": service,
+                    "idempotency_key": idempotency_key,
+                })
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /refills returned 404 (endpoint not live yet)")
+                return None
+            raise
+
+    async def list_refills(self, telegram_id: int, status: str = "active"):
+        """GET /refills?telegram_id=N&status=active -> {"ok": true,
+        "refills": [...]}. Returns [] on 404."""
+        try:
+            data = await self._send(
+                build_api_request(
+                    "GET",
+                    f"/refills?telegram_id={telegram_id}&status={status}",
+                )
+            )
+            return data.get("refills", []) if isinstance(data, dict) else []
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET /refills returned 404 (endpoint not live yet)")
+                return []
+            raise
+
+    async def stop_refill(self, refill_id, telegram_id: int):
+        """POST /refills/{id}/stop {telegram_id} -> {"ok": true}.
+        Returns None on 404."""
+        try:
+            return await self._send(
+                build_api_request(
+                    "POST", f"/refills/{refill_id}/stop",
+                    {"telegram_id": telegram_id},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("POST /refills stop returned 404 (endpoint not live yet)")
+                return None
+            raise
 
     # --------------------------------------------- second provider ------
     # Contract (server side, server/api-order-smm.php — NOT installed
@@ -23264,6 +23370,132 @@ async def delayed_store_finish(record, status, order_id=None, reason=None):
         log.warning("finish_delayed_order failed: %s", exc)
 
 
+def _refill_record_fields(record):
+    """A server or memory refill row -> the bot-side record shape
+    (the dict auto_refill_check() takes). Server rows already
+    carry that shape; memory rows are the register_auto_refill
+    dict. `_server` marks a row the server holds, so the stop
+    handler knows whether to tell the server too."""
+    out = {
+        "id": record.get("id"),
+        "telegram_id": record.get("telegram_id"),
+        "service": record.get("service") or {},
+        "link": record.get("link") or "",
+        "target": record.get("target"),
+        "metric": record.get("metric"),
+        "platform": record.get("platform"),
+        "spent_today": record.get("spent_today") or 0,
+        "spent_date": record.get("spent_date"),
+        "last_count": record.get("last_count"),
+        "last_check": record.get("last_check"),
+        "count_usage": dict(record.get("count_usage") or {}),
+        "created_at": record.get("created_at"),
+        "_server": bool(record.get("_server")),
+    }
+    return out
+
+
+async def refill_store_create(setup, user_id: int):
+    """Save a confirmed auto-refill: memory first (the record the
+    chat already uses), then the server (POST /refills) so the
+    hourly worker can see it. Any server failure — 404 (endpoint
+    not live yet), unreachable API, a rejected body — keeps the
+    memory record and logs: a refill that lives only in memory
+    still works for the chat, and the status list says so
+    honestly, instead of losing the user's setup over a
+    transient server error. Returns the stored record."""
+    refill = register_auto_refill(setup, user_id)
+    service = setup.get("service") or {}
+    try:
+        result = await paxyo.create_refill(
+            user_id,
+            int(service["service"]),
+            service_provider(service),
+            setup.get("link") or "",
+            (setup.get("platform") or "").strip().lower(),
+            (setup.get("metric") or "").strip().lower(),
+            int(setup.get("target")),
+            service,
+            str(refill["id"]),
+        )
+    except Exception as exc:
+        log.warning("create_refill failed, keeping memory record: %s", exc)
+        return refill
+    if not result:
+        # 404: endpoint not live yet — memory record stands.
+        return refill
+    saved = result.get("refill", result) if isinstance(result, dict) else {}
+    if not saved or saved.get("id") is None:
+        log.warning("create_refill answered without an id, keeping memory record")
+        return refill
+    # The server id replaces the memory id everywhere: the worker
+    # and the stop handler both key on it from here on.
+    refill["id"] = saved.get("id")
+    refill["_server"] = True
+    return refill
+
+
+async def refill_store_list(user_id: int):
+    """The user's confirmed auto-refills: server rows plus memory
+    rows, server first. A server failure returns only the memory
+    rows, never an exception — so a restart never hides a refill
+    the chat already knows about, and a refill the server holds
+    stays visible (and stoppable) after a bot restart."""
+    rows = []
+    try:
+        rows.extend(await paxyo.list_refills(user_id))
+    except Exception as exc:
+        log.warning("list_refills failed: %s", exc)
+    seen = set()
+    out = []
+    for raw in rows:
+        record = _refill_record_fields(raw)
+        record["_server"] = True
+        seen.add(str(record.get("id")))
+        out.append(record)
+    for record in list_auto_refills(user_id):
+        if str(record.get("id")) in seen:
+            continue
+        out.append(_refill_record_fields(record))
+    return out
+
+
+async def refill_store_stop(record, user_id: int):
+    """Stop one auto-refill (memory + server when the server
+    holds it). Returns True when it was stopped."""
+    stopped = False
+    active = AUTO_REFILL_ACTIVE.get(user_id) or []
+    if any(r is record for r in active):
+        AUTO_REFILL_ACTIVE[user_id] = [r for r in active if r is not record]
+        stopped = True
+    elif any(str(r.get("id")) == str(record.get("id")) for r in active):
+        AUTO_REFILL_ACTIVE[user_id] = [
+            r for r in active if str(r.get("id")) != str(record.get("id"))
+        ]
+        stopped = True
+    if record.get("_server"):
+        try:
+            await paxyo.stop_refill(record["id"], user_id)
+        except Exception as exc:
+            log.warning("stop_refill failed: %s", exc)
+        stopped = True
+    return stopped
+
+
+async def refills_live():
+    """True when GET /refills/status answers (server
+    api-auto-refill.php installed). Fail-open False: a missing
+    method (old fake client) or any error means not live, never
+    an exception into the chat."""
+    if paxyo is None:
+        return False
+    try:
+        return bool(await paxyo.refills_live())
+    except Exception as exc:
+        log.warning("refills_live failed: %s", exc)
+        return False
+
+
 def pending_deposit_for_user(user_id: int):
     """(confirm_id, draft) of the user's most recent deposit awaiting
     Confirm, or (None, None)."""
@@ -25614,11 +25846,13 @@ def _is_auto_refill_followup(text, user_id):
 
 async def handle_auto_refill_status(update, lang, voice=False):
     """List the user's confirmed auto-refills, or say there are
-    none. The line is honest about the server: until the hourly
-    worker is installed, a listed refill is set up but not yet
-    checking."""
+    none. The lines are honest about the server: until the
+    refill endpoint is live the hourly check is not installed,
+    and a refill saved on this chat only (the server save
+    failed) is named as such, so the user is never told a
+    refill is checking when it is not."""
     user = update.effective_user
-    refills = list_auto_refills(user.id)
+    refills = await refill_store_list(user.id)
     if not refills:
         await reply_message(
             update.message, t("auto_refill_none", lang), lang, voice=voice,
@@ -25632,10 +25866,16 @@ async def handle_auto_refill_status(update, lang, voice=False):
             f"keep {refill.get('metric')} above {refill.get('target'):,} — "
             f"{refill.get('link')}"
         )
-    lines.append(
-        "The hourly check on the server is not installed yet, "
-        "so no top-up will happen until that is live."
-    )
+    if not await refills_live():
+        lines.append(
+            "The hourly check on the server is not installed yet, "
+            "so no top-up will happen until that is live."
+        )
+    if any(not r.get("_server") for r in refills):
+        lines.append(
+            "One refill is saved on this chat only and not on the "
+            "server yet, so the hourly check will not see it."
+        )
     await reply_message(
         update.message, "\n".join(lines), lang, voice=voice,
     )
@@ -25645,7 +25885,7 @@ async def handle_auto_refill_stop(update, text, lang, voice=False):
     """Stop the user's auto-refill(s). One refill stops itself;
     several ask which one (the same shape as stop_schedule)."""
     user = update.effective_user
-    refills = list_auto_refills(user.id)
+    refills = await refill_store_list(user.id)
     if not refills:
         await reply_message(
             update.message, t("auto_refill_none_to_stop", lang), lang, voice=voice,
@@ -25653,7 +25893,7 @@ async def handle_auto_refill_stop(update, text, lang, voice=False):
         return
     if len(refills) == 1:
         stopped = refills[0]
-        AUTO_REFILL_ACTIVE[user.id] = []
+        await refill_store_stop(stopped, user.id)
         await reply_message(
             update.message,
             t(
@@ -25676,9 +25916,7 @@ async def handle_auto_refill_stop(update, text, lang, voice=False):
             named = refill
             break
     if named is not None:
-        AUTO_REFILL_ACTIVE[user.id] = [
-            r for r in refills if r is not named
-        ]
+        await refill_store_stop(named, user.id)
         await reply_message(
             update.message,
             t(
@@ -30833,12 +31071,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             return
         # A "yes" can also confirm an auto-refill setup awaiting
-        # Confirm: switch it on (in-memory until the server table
-        # lands) and answer with a short text confirmation.
+        # Confirm: switch it on (memory + server when the refill
+        # endpoint is live) and answer with a short text
+        # confirmation.
         auto_id, auto_setup = pending_auto_refill_for_user(user.id)
         if auto_setup is not None:
             PENDING_AUTO_REFILL.pop(auto_id, None)
-            register_auto_refill(auto_setup, user.id)
+            await refill_store_create(auto_setup, user.id)
             await update.message.reply_text(
                 t(
                     "auto_refill_started",
@@ -34693,10 +34932,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "cancel":
             await query.edit_message_text(t("cancelled", lang))
             return
-        # Confirm tap: switch the auto-refill on (in-memory until
-        # the server bot_refills table lands) and replace the
+        # Confirm tap: switch the auto-refill on (memory + server
+        # when the refill endpoint is live) and replace the
         # preview with a short confirmation (text).
-        register_auto_refill(auto_setup, user.id)
+        await refill_store_create(auto_setup, user.id)
         await query.edit_message_text(
             t(
                 "auto_refill_started",
