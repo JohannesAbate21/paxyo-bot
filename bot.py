@@ -12467,7 +12467,13 @@ def drip_plan(quantity, service, span_min):
 #   1. EnsembleData — 50 units/day free trial (trial ends 26 Nov
 #      2026; after that unknown). TikTok video 2 units, TikTok
 #      user 1 unit. Token from ENSEMBLEDATA_API_TOKEN only.
-#   2. SocialHolmes — DISABLED until verified (see below).
+#   2. SocialHolmes — new unified API (api.socialholmes.com),
+#      async start-run + poll, Bearer key from
+#      SOCIALHOLMES_API_TOKEN. TikTok video (play_count) and
+#      profile (follower_count), 1 result per check out of the
+#      first 1,000 free results, one-time — enforced as a total
+#      budget in code, not a daily one. A run that returns
+#      nothing costs nothing, so only delivered answers spend it.
 #   3. Scrape Everything — 100 credits one-time on signup (the
 #      account exists already). Its TikTok lookup FAILED 8 times
 #      on 19 Nov (PROXY_CONNECT_FAILED / PARSE_ERROR: TikTok
@@ -12502,22 +12508,26 @@ COUNT_SCRAPER_USER_AGENT = (
 
 # Per-provider daily budgets the code enforces. None means no
 # daily cap is tracked here: Scrape Everything's 100 credits are
-# one-time (its own balance is the limit), Telegram has no quota,
-# and SocialHolmes is disabled (its pricing page says the first
-# 1,000 results are free, one-time — NOT 100 requests/day, which
-# is what the earlier research claimed and is unverified).
+# one-time (its own balance is the limit) and Telegram has no
+# quota. SocialHolmes has no daily cap either — its first 1,000
+# results are free ONE-TIME, so it carries a total_budget
+# instead (see CountUsage): once 1,000 results are used, the
+# chain skips it until the operator tops the account up and
+# resets the counter.
 COUNT_PROVIDERS = {
     "own_scraper": {"daily_budget": None, "cost": 0, "enabled": True},
     "ensembledata": {"daily_budget": 50, "cost": 2, "enabled": True},
-    "socialholmes": {"daily_budget": None, "cost": 1, "enabled": False},
+    "socialholmes": {
+        "daily_budget": None, "cost": 1, "enabled": True,
+        "total_budget": 1000,
+    },
     "scrapeeverything": {"daily_budget": None, "cost": 1, "enabled": True},
     "youtube": {"daily_budget": 10000, "cost": 1, "enabled": True},
     "telegram": {"daily_budget": None, "cost": 0, "enabled": True},
 }
 # (platform, metric) -> providers in try order. SocialHolmes sits
-# second for TikTok but is disabled (see its note below), so the
-# chain skips it until its shape is verified; enabling it is one
-# flag flip. Instagram has no chain yet: no free provider is
+# second for TikTok, after EnsembleData and before Scrape
+# Everything. Instagram has no chain yet: no free provider is
 # wired for it, so setup refuses it honestly.
 COUNT_CHAIN = {
     ("tiktok", "views"): [
@@ -12530,21 +12540,27 @@ COUNT_CHAIN = {
     ("youtube", "subscribers"): ["own_scraper", "youtube"],
     ("telegram", "members"): ["own_scraper", "telegram"],
 }
-# SocialHolmes (tik.socialholmes.com) — NOT WIRED, 19 Nov 2026.
-# What its pricing page actually says: POST
-# $SOCIALHOLMES_BASE_URL/api/public/v1/scrape/tiktok/video with
-# "Authorization: Bearer <token>" and body
-# {"parameters": {"video_id": "..."}} returns a RUN ID at once,
-# and the record comes back later by webhook, polling or a
-# dashboard download — it is ASYNC, not a synchronous count.
-# The page never names the polling endpoint or the base URL, and
-# its free allowance is "your first 1,000 TikTok results are on
-# us" (one-time), not 100 requests/day. Until the polling
-# endpoint, the base URL and the free allowance are confirmed
-# with a live test, this provider stays disabled and the chain
-# skips it. A sample record does carry "play_count", so the
-# parser below already knows the field.
-SOCIALHOLMES_NOTE = "async run API, polling endpoint unconfirmed"
+# SocialHolmes — WIRED 19 Nov 2026 (new unified API at
+# api.socialholmes.com, docs developers.socialholmes.com; the
+# old TikTok-only API at tik.socialholmes.com is dead). The
+# account is abatejohannes@gmail.com with the first 1,000
+# results free, one-time; the key is the SOCIALHOLMES_API_TOKEN
+# Fly secret. A check is one run: POST
+# /scrape/tiktok/video {"parameters": {"video_id": "..."},
+# "limit": 1} (views) or POST /scrape/tiktok/profile
+# {"parameters": {"username": "..."}, "limit": 1} (followers)
+# answers 202 with a run id; poll GET /runs/:id every few
+# seconds until the status is terminal (succeeded, empty,
+# failed, cancelled); read GET /runs/:id/results. The video
+# record carries play_count, the profile record
+# follower_count. Only a delivered result is billed (1 per
+# check); empty/failed runs cost nothing. The run is capped at
+# 60 seconds of polling — a slow run falls through to the next
+# provider, it never stalls the hourly check.
+SOCIALHOLMES_BASE_URL = "https://api.socialholmes.com/api/public/v1"
+SOCIALHOLMES_POLL_INTERVAL_SECONDS = 2.0
+SOCIALHOLMES_POLL_MAX_SECONDS = 60.0
+SOCIALHOLMES_TOTAL_BUDGET = 1000  # first 1,000 results free, one-time
 
 
 def count_tokens_from_env():
@@ -13131,6 +13147,119 @@ async def _fetch_ensembledata(platform, metric, link, token, http_get):
     return count, None, cost
 
 
+def _tiktok_video_id_from_link(link):
+    """The numeric video id out of a TikTok video link
+    (.../video/7666462351436107015), or None. A short link
+    (vt.tiktok.com/...) carries no id, so this provider cannot
+    use it — the chain falls through to the next provider."""
+    match = re.search(r"/video/(\d+)", link or "")
+    return match.group(1) if match else None
+
+
+async def _fetch_socialholmes(platform, metric, link, token, http_get):
+    """SocialHolmes (new unified API): POST /scrape/tiktok/video
+    {"parameters": {"video_id": ...}, "limit": 1} for views,
+    POST /scrape/tiktok/profile {"parameters": {"username": ...},
+    "limit": 1} for followers. Async: 202 + run id, then poll
+    GET /runs/:id until a terminal status and read
+    GET /runs/:id/results. The video record carries play_count,
+    the profile record follower_count. Returns
+    (count, error_key, cost): cost is 1 only on a delivered
+    result — an empty/failed run, a timeout or a 401 costs
+    nothing, so the 1,000-result free allowance is spent only
+    on answers. Any failure here only means "try the next
+    provider": it never raises, and polling is capped at
+    SOCIALHOLMES_POLL_MAX_SECONDS."""
+    if not token:
+        return None, "not_configured", 0
+    if platform != "tiktok":
+        return None, "unsupported", 0
+    if metric == "views":
+        video_id = _tiktok_video_id_from_link(link)
+        if not video_id:
+            return None, "unsupported", 0
+        endpoint, params = "video", {"video_id": video_id}
+        field = "play_count"
+    elif metric == "followers":
+        username = _tiktok_username_from_link(link)
+        if not username:
+            return None, "unsupported", 0
+        endpoint, params = "profile", {"username": username}
+        field = "follower_count"
+    else:
+        return None, "unsupported", 0
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        status, body = await _count_http_get(
+            http_get, "POST",
+            f"{SOCIALHOLMES_BASE_URL}/scrape/tiktok/{endpoint}",
+            json_body={"parameters": params, "limit": 1},
+            headers=headers,
+        )
+    except Exception:
+        return None, "unavailable", 0
+    if status == 429:
+        return None, "rate_limited", 0
+    if status != 202 or not body:
+        return None, "unavailable", 0
+    try:
+        run = json.loads(body)
+    except (ValueError, TypeError):
+        return None, "unavailable", 0
+    run_id = run.get("id") if isinstance(run, dict) else None
+    if not run_id:
+        return None, "unavailable", 0
+    deadline = time.monotonic() + SOCIALHOLMES_POLL_MAX_SECONDS
+    terminal = None
+    while True:
+        try:
+            status, body = await _count_http_get(
+                http_get, "GET",
+                f"{SOCIALHOLMES_BASE_URL}/runs/{run_id}",
+                headers=headers,
+            )
+        except Exception:
+            return None, "unavailable", 0
+        if status == 429:
+            return None, "rate_limited", 0
+        if status == 404:
+            return None, "unavailable", 0
+        if status == 200 and body:
+            try:
+                polled = json.loads(body)
+            except (ValueError, TypeError):
+                polled = None
+            if isinstance(polled, dict):
+                state = polled.get("status")
+                if state in ("succeeded", "empty", "failed", "cancelled"):
+                    terminal = state
+                    break
+        if time.monotonic() >= deadline:
+            return None, "unavailable", 0
+        await asyncio.sleep(SOCIALHOLMES_POLL_INTERVAL_SECONDS)
+    if terminal != "succeeded":
+        return None, "unavailable", 0
+    try:
+        status, body = await _count_http_get(
+            http_get, "GET",
+            f"{SOCIALHOLMES_BASE_URL}/runs/{run_id}/results",
+            headers=headers,
+        )
+    except Exception:
+        return None, "unavailable", 0
+    if status != 200 or not body:
+        return None, "unavailable", 0
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return None, "unavailable", 0
+    count = _deep_find_count(
+        payload, [field, field.replace("_count", "Count")])
+    if count is None:
+        return None, "unavailable", 0
+    return count, None, 1
+
+
 async def _fetch_scrapeeverything(platform, metric, link, key, http_get):
     """Scrape Everything: POST /v1/tiktok/video {"url": ...} (1
     credit) for views, POST /v1/tiktok/profile {"username": ...}
@@ -13271,17 +13400,25 @@ class CountUsage:
     resets the count; a 429 parks the provider for an hour.
     Providers with no daily budget (own scraper, Telegram, Scrape
     Everything's one-time credits) are never blocked by budget —
-    their own balance or quota is the limit."""
+    their own balance or quota is the limit. SocialHolmes instead
+    carries a total_budget (its 1,000 free results, one-time):
+    its "total_used" never resets with the date, so once 1,000
+    results are spent the chain skips it until the operator tops
+    the account up and resets the counter."""
 
     def __init__(self, raw=None):
         self.data = {}
         for name, entry in (raw or {}).items():
             if isinstance(entry, dict):
-                self.data[str(name)] = {
+                kept = {
                     "date": entry.get("date"),
                     "used": int(entry.get("used") or 0),
                     "backoff_until": float(entry.get("backoff_until") or 0),
                 }
+                if (COUNT_PROVIDERS.get(str(name)) or {}).get(
+                        "total_budget") is not None:
+                    kept["total_used"] = int(entry.get("total_used") or 0)
+                self.data[str(name)] = kept
 
     def _today(self, now=None):
         stamp = now if now is not None else time.time()
@@ -13293,6 +13430,12 @@ class CountUsage:
             return 0
         return int(entry.get("used") or 0)
 
+    def total_used(self, provider):
+        """Cumulative results spent on a provider with a
+        total_budget (SocialHolmes' 1,000 free results, one-time).
+        Unlike used_today it never resets with the date."""
+        return int((self.data.get(provider) or {}).get("total_used") or 0)
+
     def is_parked(self, provider, now=None):
         stamp = now if now is not None else time.time()
         entry = self.data.get(provider) or {}
@@ -13302,16 +13445,28 @@ class CountUsage:
         if self.is_parked(provider, now):
             return False
         budget = (COUNT_PROVIDERS.get(provider) or {}).get("daily_budget")
-        if budget is None:
-            return True
-        return self.used_today(provider, now) + int(cost) <= int(budget)
+        if budget is not None:
+            if self.used_today(provider, now) + int(cost) > int(budget):
+                return False
+        total = (COUNT_PROVIDERS.get(provider) or {}).get("total_budget")
+        if total is not None:
+            return self.total_used(provider) + int(cost) <= int(total)
+        return True
 
     def record(self, provider, cost, now=None):
         today = self._today(now)
         entry = self.data.get(provider) or {}
         if entry.get("date") != today:
-            entry = {"date": today, "used": 0, "backoff_until": 0}
+            fresh = {"date": today, "used": 0, "backoff_until": 0}
+            if (COUNT_PROVIDERS.get(provider) or {}).get(
+                    "total_budget") is not None:
+                fresh["total_used"] = int(entry.get("total_used") or 0)
+            entry = fresh
         entry["used"] = int(entry.get("used") or 0) + int(cost)
+        if (COUNT_PROVIDERS.get(provider) or {}).get(
+                "total_budget") is not None:
+            entry["total_used"] = (
+                int(entry.get("total_used") or 0) + int(cost))
         self.data[provider] = entry
 
     def park(self, provider, seconds=3600, now=None):
@@ -13319,7 +13474,11 @@ class CountUsage:
         today = self._today(now)
         entry = self.data.get(provider) or {}
         if entry.get("date") != today:
-            entry = {"date": today, "used": 0, "backoff_until": 0}
+            fresh = {"date": today, "used": 0, "backoff_until": 0}
+            if (COUNT_PROVIDERS.get(provider) or {}).get(
+                    "total_budget") is not None:
+                fresh["total_used"] = int(entry.get("total_used") or 0)
+            entry = fresh
         entry["backoff_until"] = stamp + seconds
         self.data[provider] = entry
 
@@ -13381,7 +13540,7 @@ async def fetch_live_count(platform, metric, link, usage=None,
         # provider's side even though the answer is thrown away.
         if name == "ensembledata":
             _cost = 2 if metric == "views" else 1
-        elif name in ("scrapeeverything", "youtube"):
+        elif name in ("scrapeeverything", "youtube", "socialholmes"):
             _cost = 1
         else:
             _cost = 0
@@ -13397,9 +13556,9 @@ async def fetch_live_count(platform, metric, link, usage=None,
                 platform, metric, link, tokens.get("ensembledata"), http_get,
             )
         elif name == "socialholmes":
-            # Disabled until verified (see SOCIALHOLMES_NOTE): the
-            # chain never reaches a live call here.
-            continue
+            count, error, cost = await _fetch_socialholmes(
+                platform, metric, link, tokens.get("socialholmes"), http_get,
+            )
         elif name == "scrapeeverything":
             count, error, cost = await _fetch_scrapeeverything(
                 platform, metric, link, tokens.get("scrapeeverything"), http_get,
