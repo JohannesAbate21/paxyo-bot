@@ -5898,6 +5898,53 @@ class TestDepositBundle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(query.caption_edited), 1)
         self.assertIn("how much", query.caption_edited[0].lower())
 
+    async def test_confirm_on_guide_photo_creates_deposit(self):
+        # Live bug 20 Nov 2026: the Confirm card sits on the guide
+        # photo, and the Confirm tap's first edit was a plain
+        # edit_message_text, refused on a photo — the tap did
+        # nothing and no deposit was ever created. The whole
+        # Confirm flow must land as caption edits on a photo.
+        fake = FakePaxyo(deposits=[])
+        await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        guide_query = FakeQuery("depguide", photo=True)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(guide_query), None)
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        query = FakeQuery(f"confirm:{confirm_id}", photo=True)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        self.assertTrue(query.answered)
+        self.assertEqual(query.edited, [])  # no text edit possible
+        self.assertEqual(len(query.caption_edited), 2)
+        instructions = query.caption_edited[-1]
+        self.assertIn("10.00 ETB", instructions)
+        self.assertIn("balance updates automatically", instructions.lower())
+        self.assertEqual(len(fake.deposits_created), 1)
+        self.assertEqual(bot.PENDING_DEPOSIT, {})
+
+    async def test_cancel_on_guide_photo_cancels(self):
+        # Cancel on the photo Confirm card must land as a caption
+        # edit too, not die silently.
+        fake = FakePaxyo(deposits=[])
+        await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        guide_query = FakeQuery("depguide", photo=True)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(guide_query), None)
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        query = FakeQuery(f"cancel:{confirm_id}", photo=True)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        self.assertEqual(query.edited, [])
+        self.assertEqual(query.caption_edited, ["Order cancelled."])
+        self.assertEqual(fake.deposits_created, [])
+        self.assertEqual(bot.PENDING_DEPOSIT, {})
+
     async def test_three_deposits_bring_back_old_card(self):
         fake = FakePaxyo(deposits=self._completed(3))
         msg = await self._send(
