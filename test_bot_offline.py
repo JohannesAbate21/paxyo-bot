@@ -3288,6 +3288,174 @@ class TestBoundedDripPlans(unittest.IsolatedAsyncioTestCase):
             {"runs": 10, "interval": 60, "per_run_qty": 10000},
         )
 
+    async def test_price_question_parks_link_and_total_then_drip_uses_both(self):
+        # Live flow 1 (19 Nov 2026): the link is sent, then a price
+        # question parks the draft, then the drip request. The
+        # parked link AND the parked 100k total are used: 10 runs,
+        # total 100,000, 1,890.00 ETB and the last drop, never
+        # "Please send the link".
+        paxyo = self._live(
+            services=[dict(self.TIKTOK_VIEWS)],
+            recent=[self.TELEGRAM_RECENT], balance=10000.0)
+        msg = await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        self.assertEqual(msg.text_sent, ["How many? (for example 1000)"])
+        msg = await self._send(
+            "I want 100k views how much is it",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      quantity=100000),
+            paxyo=paxyo,
+        )
+        self.assertIn("unfinished order is saved", msg.text_sent[0])
+        self.assertIn("1,890.00", msg.text_sent[1])
+        self.assertEqual(bot.PARKED_DRAFT[1]["link"],
+                         "https://www.tiktok.com/@user/video/123")
+        self.assertEqual(bot.PARKED_DRAFT[1]["quantity"], 100000)
+        msg = await self._send(
+            "Can you place the order 10k views for every 1 hr next",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+        self.assertNotIn("t.me", msg.text_sent[0])
+        self.assertIn(
+            "Drip-feed: 10 runs of 10,000 every 1 hour", msg.text_sent[0])
+        self.assertIn("100000", msg.text_sent[0])
+        self.assertIn("1,890.00", msg.text_sent[0])
+        self.assertIn("Last drop", msg.text_sent[0])
+        self.assertNotIn("per order", msg.text_sent[0])
+        self.assertIn(
+            "https://www.tiktok.com/@user/video/123", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["quantity"], 100000)
+        self.assertEqual(pending["total"], 1890.0)
+        self.assertEqual(
+            pending["drip"],
+            {"runs": 10, "interval": 60, "per_run_qty": 10000},
+        )
+
+    async def test_pending_plain_order_link_reused_for_drip(self):
+        # Live flow 2 (19 Nov 2026): a plain 20k confirm card is
+        # pending, then the drip request reuses its link (and its
+        # 20k total: 2 runs) and shows the bounded card.
+        paxyo = self._live(services=[dict(self.TIKTOK_VIEWS)], balance=10000.0)
+        await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        msg = await self._send(
+            "I want 20k views",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      quantity=20000),
+            paxyo=paxyo,
+        )
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn(
+            "https://www.tiktok.com/@user/video/123", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        msg = await self._send(
+            "place the order 10k views for every 1 hr",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+        self.assertIn(
+            "Drip-feed: 2 runs of 10,000 every 1 hour", msg.text_sent[0])
+        self.assertIn("20000", msg.text_sent[0])
+        self.assertIn("378.00", msg.text_sent[0])
+        self.assertIn("Last drop", msg.text_sent[0])
+        self.assertNotIn("per order", msg.text_sent[0])
+        self.assertIn(
+            "https://www.tiktok.com/@user/video/123", msg.text_sent[0])
+        drip = [p for p in bot.PENDING.values() if "drip" in p]
+        self.assertEqual(len(drip), 1)
+        self.assertEqual(
+            drip[0]["drip"],
+            {"runs": 2, "interval": 60, "per_run_qty": 10000},
+        )
+        self.assertEqual(drip[0]["quantity"], 20000)
+        self.assertEqual(drip[0]["total"], 378.0)
+
+    async def test_drip_right_after_link_uses_partial_link(self):
+        # No price question in between: the link just sent (still
+        # in the draft being built) is reused by the drip request.
+        paxyo = self._live(services=[dict(self.TIKTOK_VIEWS)], balance=10000.0)
+        await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        msg = await self._send(
+            "place the order 10k views for every 1 hr, 10 times",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertNotIn("Please send the link", msg.text_sent[0])
+        self.assertIn(
+            "Drip-feed: 10 runs of 10,000 every 1 hour", msg.text_sent[0])
+        self.assertIn(
+            "https://www.tiktok.com/@user/video/123", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_parked_link_wrong_platform_is_refused(self):
+        # A parked link for another platform is refused, never
+        # silently reused and never on a card.
+        paxyo = self._live(services=[dict(self.TIKTOK_VIEWS)])
+        bot.PARKED_DRAFT[1] = {
+            "platform": "instagram", "service_hint": "followers",
+            "link": "https://instagram.com/p/x", "quantity": 5000,
+        }
+        msg = await self._send(
+            "place the order 10k views for every 1 hr, 10 times",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                quantity=10000, interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("That link is instagram", msg.text_sent[0])
+        self.assertIn("tiktok", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_price_question_other_metric_does_not_touch_linked_draft(self):
+        # A price question about a different metric on the same
+        # platform never touches a linked draft: the TikTok views
+        # link stays, and no followers quantity lands in it.
+        paxyo = self._live(services=[dict(self.TIKTOK_VIEWS)])
+        await self._send(
+            "https://www.tiktok.com/@user/video/123",
+            intent_of("order", platform="tiktok", service_hint="views",
+                      link="https://www.tiktok.com/@user/video/123"),
+            paxyo=paxyo,
+        )
+        msg = await self._send(
+            "how much are 5000 tiktok followers?",
+            intent_of("order", platform="tiktok",
+                      service_hint="followers", quantity=5000),
+            paxyo=paxyo,
+        )
+        self.assertIn("unfinished order is saved", msg.text_sent[0])
+        self.assertEqual(
+            bot.PARKED_DRAFT[1],
+            {"platform": "tiktok", "service_hint": "views",
+             "link": "https://www.tiktok.com/@user/video/123"},
+        )
+
     async def test_asks_how_many_times_then_accepts_10_times(self):
         paxyo = self._live()
         msg = await self._send(

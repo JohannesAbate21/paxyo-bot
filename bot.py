@@ -15221,12 +15221,38 @@ def _remember_price_question(user_id: int, platform, hint, qty, text):
     when no Confirm card is pending and the draft has no link (a
     price question never hijacks an order already being built). A
     different metric replaces a link-less draft, the same as a new
-    order does (round 7)."""
+    order does (round 7). When the draft DOES have a link, the
+    quantity is still remembered when the question is about that
+    same order (same platform and metric): a follow-up drip version
+    of this order derives its runs from it (19 Nov 2026). A
+    question about a different platform or metric never touches
+    the linked draft."""
     _cid, pending = pending_for_user(user_id)
     if pending is not None:
         return
     stored = PARTIAL.get(user_id) or {}
     if stored.get("link"):
+        stored_platform = (stored.get("platform") or "").strip().lower()
+        new_platform = (platform or "").strip().lower()
+        if new_platform and stored_platform and new_platform != stored_platform:
+            return
+        stored_metric = _primary_metric(
+            kind_from_text(stored.get("service_hint") or "")
+        )
+        new_metric = _primary_metric(kind_from_text(hint or ""))
+        if (
+            stored_metric is not None
+            and new_metric is not None
+            and stored_metric != new_metric
+        ):
+            return
+        merged = {k: v for k, v in stored.items() if v is not None}
+        merged["quantity"] = qty
+        if platform and not merged.get("platform"):
+            merged["platform"] = platform
+        if hint and not merged.get("service_hint"):
+            merged["service_hint"] = hint
+        PARTIAL[user_id] = merged
         return
     stored_metric = _primary_metric(kind_from_text(stored.get("service_hint") or ""))
     new_metric = _primary_metric(kind_from_text(hint or ""))
@@ -23509,11 +23535,12 @@ def _is_recurring_followup(text, user_id):
 
 def _runs_from_total(user_id, merged):
     """Runs from a total the user already gave: a parked or
-    in-progress draft for the SAME platform whose quantity is a
-    whole multiple of this plan's per-drop quantity. 100k total
-    at 10k a drop is 10 runs. None when there is no such total,
-    or it does not split evenly: the bot then asks how many
-    times instead of guessing."""
+    in-progress draft, or the plain Confirm card still waiting,
+    for the SAME platform whose quantity is a whole multiple of
+    this plan's per-drop quantity. 100k total at 10k a drop is 10
+    runs. None when there is no such total, or it does not split
+    evenly: the bot then asks how many times instead of guessing.
+    """
     try:
         per_drop = int(merged.get("quantity") or 0)
     except (TypeError, ValueError):
@@ -23523,7 +23550,11 @@ def _runs_from_total(user_id, merged):
     platform = (merged.get("platform") or "").strip().lower()
     if not platform:
         return None
-    for draft in (PARTIAL.get(user_id) or {}, PARKED_DRAFT.get(user_id) or {}):
+    _candidates = [PARTIAL.get(user_id) or {}, PARKED_DRAFT.get(user_id) or {}]
+    _cid, _pending = pending_for_user(user_id)
+    if _pending is not None:
+        _candidates.append(_pending)
+    for draft in _candidates:
         try:
             total = int(draft.get("quantity") or 0)
         except (TypeError, ValueError):
@@ -23569,6 +23600,23 @@ async def _refuse_mismatched_link(update, draft_store, user_id, merged,
     return True
 
 
+def _current_conversation_order(user_id):
+    """The order this user is already building in THIS conversation:
+    the in-progress draft, the parked draft, or the plain Confirm
+    card still waiting. Returns the first one found, or None. Only
+    for link (and platform/hint) reuse by the drip handler: an old
+    placed order is never in this list, so a stale link from
+    another order can never sneak in this way."""
+    if PARTIAL.get(user_id):
+        return PARTIAL[user_id]
+    if PARKED_DRAFT.get(user_id):
+        return PARKED_DRAFT[user_id]
+    _cid, pending = pending_for_user(user_id)
+    if pending is not None:
+        return pending
+    return None
+
+
 async def handle_recurring_text(update, text, intent, lang, voice=False):
     """Build a BOUNDED repeating-order plan (drip-feed) over several
     turns, then show the plan summary with a Confirm card. Nothing
@@ -23582,7 +23630,11 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
     stale link for another platform must never land on a Confirm
     card, and a link from another platform is refused before the
     card (a wrong link type is caught at placement, the same
-    backstop the normal order flow uses). The plan is always bounded: the number of runs
+    backstop the normal order flow uses). The link IS taken from
+    the current conversation (the draft being built, the parked
+    draft, or the plain card still waiting), so a drip version of
+    the order just discussed does not ask for the link again.
+    The plan is always bounded: the number of runs
     comes from the user ("10 times"), from a total they already
     gave (100k total at 10k a drop is 10 runs), or the bot asks
     "how many times?". The card shows per-drop quantity, interval,
@@ -23653,6 +23705,21 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         if last and last.get("link"):
             merged["link"] = last.get("link")
             last_service_id = last.get("combined_id") or last.get("service_id")
+    if not merged.get("link"):
+        # The link from the CURRENT conversation: the draft being
+        # built, the parked draft a price question just saved, or
+        # the plain Confirm card still waiting. Those are this
+        # conversation, so their links are safe to reuse — unlike
+        # an old placed order, which stays explicit-"that link"-
+        # only. The platform and hint ride along when the request
+        # does not name its own.
+        _current = _current_conversation_order(user.id)
+        if _current is not None and _current.get("link"):
+            merged["link"] = _current.get("link")
+            if not merged.get("platform") and _current.get("platform"):
+                merged["platform"] = _current.get("platform")
+            if not merged.get("service_hint") and _current.get("service_hint"):
+                merged["service_hint"] = _current.get("service_hint")
     if not merged.get("platform") and not merged.get("service_hint") and last_service_id is None:
         RECURRING_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
         await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
