@@ -333,8 +333,8 @@ function bot_asp_price_set() {
     }
     $admin_telegram_id = (int)($in['admin_telegram_id'] ?? 0);
     if ($admin_telegram_id <= 0) asp_fail(400, 'admin_telegram_id is required.');
-$confirm_token=<redacted>
-if ($confirm_token=<redacted>
+    $confirm_token = isset($in['confirm_token']) ? (string)$in['confirm_token'] : '';
+    if ($confirm_token === '') {
         asp_fail(400, 'confirm_token is required.');
     }
 
@@ -387,8 +387,8 @@ function bot_asp_price_clear() {
     if ($service_id <= 0) asp_fail(400, 'service_id is required.');
     $admin_telegram_id = (int)($in['admin_telegram_id'] ?? 0);
     if ($admin_telegram_id <= 0) asp_fail(400, 'admin_telegram_id is required.');
-$confirm_token=<redacted>
-if ($confirm_token=<redacted>
+    $confirm_token = isset($in['confirm_token']) ? (string)$in['confirm_token'] : '';
+    if ($confirm_token === '') {
         asp_fail(400, 'confirm_token is required.');
     }
 

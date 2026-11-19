@@ -312,8 +312,8 @@ function bot_aub_user_balance_adjust($telegram_id) {
     if (!is_finite($delta) || $delta == 0.0) {
         aub_fail(400, 'delta_etb must be a non-zero amount.');
     }
-$confirm_token=<redacted>
-if ($confirm_token=<redacted>
+    $confirm_token = isset($in['confirm_token']) ? (string)$in['confirm_token'] : '';
+    if ($confirm_token === '') {
         aub_fail(400, 'confirm_token is required.');
     }
 

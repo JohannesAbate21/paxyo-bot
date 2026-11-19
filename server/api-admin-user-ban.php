@@ -283,8 +283,8 @@ function bot_aban_user_ban_set($telegram_id) {
     if ($action !== 'ban' && $action !== 'unban') {
         aban_fail(400, 'action must be "ban" or "unban".');
     }
-$confirm_token=<redacted>
-if ($confirm_token=<redacted>
+    $confirm_token = isset($in['confirm_token']) ? (string)$in['confirm_token'] : '';
+    if ($confirm_token === '') {
         aban_fail(400, 'confirm_token is required.');
     }
 
