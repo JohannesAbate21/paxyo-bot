@@ -438,6 +438,29 @@ async def _self_test():
 
 
 # ---------------------------------------------------------------------- main
+def _log_tick_http_error(log_fn, exc):
+    """Log a tick HTTP error with a truncated response body plus the
+    Server and Content-Type response headers, so a 403 from a layer
+    in front of bot.php (hosting firewall / WAF) can be told apart
+    from a bot.php JSON error. Only the response body and two
+    response headers are logged — never request headers, and any
+    occurrence of the bot secret in the body is redacted first."""
+    resp = exc.response
+    try:
+        body = resp.text or ""
+    except Exception:  # noqa: BLE001
+        body = ""
+    if BOT_SECRET and BOT_SECRET in body:
+        body = body.replace(BOT_SECRET, "[redacted]")
+    body = " ".join(body.split())[:500]
+    log_fn(
+        "tick failed: HTTP %s body=%r server=%r content-type=%r",
+        resp.status_code, body,
+        resp.headers.get("server", ""),
+        resp.headers.get("content-type", ""),
+    )
+
+
 async def _amain(args):
     if args.self_test:
         return await _self_test()
@@ -452,7 +475,7 @@ async def _amain(args):
                     await run_tick(api, dry_run=args.dry_run,
                                    refill_id=args.refill_id)
                 except httpx.HTTPStatusError as exc:
-                    log.warning("tick failed: HTTP %s", exc.response.status_code)
+                    _log_tick_http_error(log.warning, exc)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("tick failed: %s", exc)
                 await asyncio.sleep(CHECK_INTERVAL_SECONDS)
@@ -462,7 +485,7 @@ async def _amain(args):
             if exc.response.status_code == 404:
                 log.info("refills endpoint not installed yet: nothing to do")
                 return 0
-            log.error("tick failed: HTTP %s", exc.response.status_code)
+            _log_tick_http_error(log.error, exc)
             return 1
         except Exception as exc:  # noqa: BLE001
             log.error("tick failed: %s", exc)

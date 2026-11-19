@@ -35113,6 +35113,67 @@ class TestRefillApiClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["refill_id"], "55")
 
 
+class TestRefillWorkerHttpErrorLog(unittest.IsolatedAsyncioTestCase):
+    """refill_worker logs a truncated error body on a tick HTTP
+    failure (diagnostic, 20 Nov 2026): the Fly worker's hourly
+    tick gets HTTP 403 from a layer in front of bot.php, and the
+    body is what tells which layer."""
+
+    def _error_403(self, body):
+        req = bot.httpx.Request(
+            "GET", "https://paxyo.et/api/bot/refills?status=active"
+        )
+        resp = bot.httpx.Response(
+            403, text=body, request=req,
+            headers={"server": "LiteSpeed",
+                     "content-type": "text/html"},
+        )
+        return bot.httpx.HTTPStatusError("403", request=req, response=resp)
+
+    def test_403_html_body_logged_and_truncated(self):
+        import refill_worker
+        body = ("<html><head><title>403 Forbidden</title></head><body>"
+                + "x" * 700 + "</body></html>")
+        with self.assertLogs("refill_worker", level="WARNING") as logs:
+            refill_worker._log_tick_http_error(
+                refill_worker.log.warning, self._error_403(body))
+        out = "\n".join(logs.output)
+        self.assertIn("HTTP 403", out)
+        self.assertIn("LiteSpeed", out)
+        self.assertIn("text/html", out)
+        self.assertIn("403 Forbidden", out)
+        self.assertNotIn("x" * 700, out)  # truncated to ~500 chars
+
+    def test_secret_in_body_is_redacted(self):
+        import refill_worker
+        secret = "test-secret-value"
+        body = "<html><body>403 Forbidden secret=%s</body></html>" % secret
+        with mock.patch.object(refill_worker, "BOT_SECRET", secret):
+            with self.assertLogs("refill_worker", level="WARNING") as logs:
+                refill_worker._log_tick_http_error(
+                    refill_worker.log.warning, self._error_403(body))
+        out = "\n".join(logs.output)
+        self.assertNotIn(secret, out)
+        self.assertIn("[redacted]", out)
+
+    async def test_once_mode_403_logs_body_and_exits_1(self):
+        import refill_worker
+        import argparse
+        body = "<html><body>403 Forbidden by WAF</body></html>"
+        api = mock.AsyncMock()
+        api.list_active = mock.AsyncMock(side_effect=self._error_403(body))
+        args = argparse.Namespace(self_test=False, loop=False,
+                                  dry_run=False, refill_id=None)
+        with mock.patch.object(refill_worker, "BOT_SECRET", "test-secret"), \
+             mock.patch.object(refill_worker, "RefillApi", return_value=api), \
+             self.assertLogs("refill_worker", level="INFO") as logs:
+            rc = await refill_worker._amain(args)
+        self.assertEqual(rc, 1)
+        out = "\n".join(logs.output)
+        self.assertIn("HTTP 403", out)
+        self.assertIn("403 Forbidden by WAF", out)
+
+
 class TestRefillInChat(unittest.IsolatedAsyncioTestCase):
     """Refill in chat (15 Nov 2026, feature 3): "refill my last
     order" / "refill order #1841" resolves the caller's own
