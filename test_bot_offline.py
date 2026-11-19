@@ -40223,6 +40223,30 @@ class TestCountUsage(unittest.TestCase):
         self.assertFalse(
             usage.is_parked("ensembledata", now=self.DAY + 3601))
 
+    def test_total_budget_enforced_and_survives_day_rollover(self):
+        # SocialHolmes' 1,000 free results are one-time, not
+        # daily: the total is enforced, and a new day resets the
+        # daily count but NOT the total.
+        usage = bot.CountUsage()
+        usage.record("socialholmes", 999, now=self.DAY)
+        self.assertEqual(usage.total_used("socialholmes"), 999)
+        self.assertTrue(usage.can_use("socialholmes", 1, now=self.DAY))
+        usage.record("socialholmes", 1, now=self.DAY)
+        self.assertEqual(usage.total_used("socialholmes"), 1000)
+        self.assertFalse(usage.can_use("socialholmes", 1, now=self.DAY))
+        self.assertEqual(
+            usage.used_today("socialholmes", now=self.DAY + 86400), 0)
+        self.assertFalse(
+            usage.can_use("socialholmes", 1, now=self.DAY + 86400))
+        self.assertEqual(usage.total_used("socialholmes"), 1000)
+
+    def test_total_used_round_trip(self):
+        usage = bot.CountUsage()
+        usage.record("socialholmes", 7, now=self.DAY)
+        restored = bot.CountUsage(usage.to_dict())
+        self.assertEqual(restored.total_used("socialholmes"), 7)
+        self.assertTrue(restored.can_use("socialholmes", 1, now=self.DAY))
+
     def test_no_budget_providers_never_blocked(self):
         usage = bot.CountUsage()
         self.assertTrue(usage.can_use("own_scraper", 0, now=self.DAY))
@@ -40257,6 +40281,24 @@ class TestCountChain(unittest.IsolatedAsyncioTestCase):
             "play_count": 6000, "like_count": 9,
         },
         "meta": {"credits_charged": 1, "credits_remaining": 99},
+    })
+    SOCIALHOLMES_RUN = json.dumps({
+        "id": "run_1", "status": "queued", "platform": "tiktok",
+        "endpoint": "video", "target": "7666462351436107015",
+        "requested": 1, "created_at": "2026-11-19T23:00:00Z",
+    })
+    SOCIALHOLMES_DONE = json.dumps({
+        "id": "run_1", "status": "succeeded", "platform": "tiktok",
+        "endpoint": "video", "target": "7666462351436107015",
+        "requested": 1, "result_count": 1,
+        "finished_at": "2026-11-19T23:00:05Z",
+    })
+    SOCIALHOLMES_VIDEO_RESULTS = json.dumps({
+        "results": [{"type": "video", "play_count": 5178}],
+    })
+    SOCIALHOLMES_PROFILE_RESULTS = json.dumps({
+        "results": [{"type": "profile", "username": "paxyo251",
+                     "follower_count": 1234}],
     })
     YOUTUBE_VIDEO = json.dumps({
         "items": [{"statistics": {
@@ -40354,7 +40396,8 @@ class TestCountChain(unittest.IsolatedAsyncioTestCase):
                                   "backoff_until": 0}}
         count, provider, cost, out = await bot.fetch_live_count(
             "tiktok", "views", self.LINK, usage=usage,
-            tokens=dict(self.TOKENS), http_get=http_get,
+            tokens=dict(self.TOKENS, socialholmes=None),
+            http_get=http_get,
         )
         self.assertEqual((count, provider, cost),
                          (6000, "scrapeeverything", 1))
@@ -40368,27 +40411,135 @@ class TestCountChain(unittest.IsolatedAsyncioTestCase):
                 200, self.SCRAPEEVERYTHING_VIDEO),
         })
         count, provider, _cost, usage = await bot.fetch_live_count(
-            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
-            http_get=http_get,
+            "tiktok", "views", self.LINK, tokens=dict(
+                self.TOKENS, socialholmes=None), http_get=http_get,
         )
         self.assertEqual((count, provider), (6000, "scrapeeverything"))
         self.assertGreater(
             usage["ensembledata"]["backoff_until"], 0)
 
-    async def test_socialholmes_skipped_even_with_token(self):
-        # Disabled until verified: the chain never calls it, even
-        # with a token configured.
+    async def test_socialholmes_video_run_succeeds(self):
+        # EnsembleData unconfigured and the scraper blocked: the
+        # chain reaches SocialHolmes, which starts a run, polls
+        # it to succeeded and reads play_count out of the
+        # results. One delivered result costs 1 out of the
+        # 1,000-result free allowance.
+        tokens = dict(self.TOKENS, ensembledata=None)
         http_get = self._fake_http({
-            ("GET", "tiktok.com"): (200, self.EMPTY_PAGE),
-            ("GET", "ensembledata.com"): (200, self.ENSEMBLEDATA_VIDEO),
+            ("GET", "tiktok.com"): (403, "blocked"),
+            ("POST", "scrape/tiktok/video"): (202, self.SOCIALHOLMES_RUN),
+            ("GET", "/runs/run_1/results"): (
+                200, self.SOCIALHOLMES_VIDEO_RESULTS),
+            ("GET", "/runs/run_1"): (200, self.SOCIALHOLMES_DONE),
         })
-        count, provider, _cost, _usage = await bot.fetch_live_count(
-            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+        count, provider, cost, usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=tokens, http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost), (5178, "socialholmes", 1))
+        self.assertEqual(usage["socialholmes"]["used"], 1)
+        self.assertEqual(usage["socialholmes"]["total_used"], 1)
+
+    async def test_socialholmes_profile_followers(self):
+        tokens = dict(self.TOKENS, ensembledata=None)
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (403, "blocked"),
+            ("POST", "scrape/tiktok/profile"): (202, self.SOCIALHOLMES_RUN),
+            ("GET", "/runs/run_1/results"): (
+                200, self.SOCIALHOLMES_PROFILE_RESULTS),
+            ("GET", "/runs/run_1"): (200, self.SOCIALHOLMES_DONE),
+        })
+        count, provider, cost, _usage = await bot.fetch_live_count(
+            "tiktok", "followers", self.LINK, tokens=tokens,
             http_get=http_get,
         )
-        self.assertEqual(provider, "ensembledata")
+        self.assertEqual((count, provider, cost), (1234, "socialholmes", 1))
+
+    async def test_socialholmes_failed_run_falls_through(self):
+        # A run that ends failed costs nothing and the chain
+        # moves on to Scrape Everything.
+        tokens = dict(self.TOKENS, ensembledata=None)
+        failed = json.dumps({"id": "run_1", "status": "failed",
+                             "reason": "not_completed"})
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (403, "blocked"),
+            ("POST", "scrape/tiktok/video"): (202, self.SOCIALHOLMES_RUN),
+            ("GET", "/runs/run_1"): (200, failed),
+            ("POST", "api.scrapeeverything.com"): (
+                200, self.SCRAPEEVERYTHING_VIDEO),
+        })
+        count, provider, cost, usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=tokens, http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost),
+                         (6000, "scrapeeverything", 1))
+        self.assertNotIn("socialholmes", usage)
+
+    async def test_socialholmes_total_budget_exhausted_skips(self):
+        # 1,000 results spent: the chain never calls it, even
+        # with a token configured.
+        today = bot.CountUsage()._today()
+        usage = {"socialholmes": {"date": today, "used": 5,
+                                  "total_used": 1000, "backoff_until": 0}}
+        tokens = dict(self.TOKENS, ensembledata=None)
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (403, "blocked"),
+            ("POST", "api.scrapeeverything.com"): (
+                200, self.SCRAPEEVERYTHING_VIDEO),
+        })
+        count, provider, cost, out = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, usage=usage,
+            tokens=tokens, http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost),
+                         (6000, "scrapeeverything", 1))
         self.assertFalse(
             any("socialholmes" in url for _m, url, _p in http_get.calls))
+        self.assertEqual(out["socialholmes"]["total_used"], 1000)
+
+    async def test_socialholmes_short_link_unsupported(self):
+        # A vt.tiktok.com short link carries no video id, so
+        # SocialHolmes cannot use it — the chain falls through.
+        tokens = dict(self.TOKENS, ensembledata=None)
+        http_get = self._fake_http({
+            ("GET", "vt.tiktok.com"): (403, "blocked"),
+            ("POST", "api.scrapeeverything.com"): (
+                200, self.SCRAPEEVERYTHING_VIDEO),
+        })
+        count, provider, cost, _usage = await bot.fetch_live_count(
+            "tiktok", "views", "https://vt.tiktok.com/ZSp349gen/",
+            tokens=tokens, http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost),
+                         (6000, "scrapeeverything", 1))
+        self.assertFalse(
+            any("socialholmes" in url for _m, url, _p in http_get.calls))
+
+    async def test_socialholmes_poll_timeout_falls_through(self):
+        # A run that never finishes within the poll cap falls
+        # through instead of stalling the hourly check.
+        tokens = dict(self.TOKENS, ensembledata=None)
+        running = json.dumps({"id": "run_1", "status": "running"})
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (403, "blocked"),
+            ("POST", "scrape/tiktok/video"): (202, self.SOCIALHOLMES_RUN),
+            ("GET", "/runs/run_1"): (200, running),
+            ("POST", "api.scrapeeverything.com"): (
+                200, self.SCRAPEEVERYTHING_VIDEO),
+        })
+        old_max = bot.SOCIALHOLMES_POLL_MAX_SECONDS
+        old_interval = bot.SOCIALHOLMES_POLL_INTERVAL_SECONDS
+        bot.SOCIALHOLMES_POLL_MAX_SECONDS = 0
+        bot.SOCIALHOLMES_POLL_INTERVAL_SECONDS = 0
+        try:
+            count, provider, cost, _usage = await bot.fetch_live_count(
+                "tiktok", "views", self.LINK, tokens=tokens,
+                http_get=http_get,
+            )
+        finally:
+            bot.SOCIALHOLMES_POLL_MAX_SECONDS = old_max
+            bot.SOCIALHOLMES_POLL_INTERVAL_SECONDS = old_interval
+        self.assertEqual((count, provider, cost),
+                         (6000, "scrapeeverything", 1))
 
     async def test_no_tokens_and_failed_scraper_is_all_failed(self):
         # The scraper ran (it needs no token) and failed to parse,
