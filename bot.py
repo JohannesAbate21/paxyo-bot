@@ -67,7 +67,7 @@ from typing import Optional
 import httpx
 import tornado.web
 from tornado.httpserver import HTTPServer
-from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
+from telegram import CopyTextButton, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -608,6 +608,20 @@ def user_invite_link(telegram_id: int) -> str:
     return f"https://t.me/paxorder_bot?start={user_invite_code(telegram_id)}"
 
 
+def invite_link_keyboard(code: str, lang: str) -> InlineKeyboardMarkup:
+    """One button under the invite message (19 Nov 2026): tapping it
+    copies the user's invite CODE to the clipboard, so the code gets
+    the same one-tap treatment as the link. copy_text (Bot API 6.4+,
+    PTB 20+) needs no callback: Telegram copies the text and shows a
+    toast, and the bot never sees the tap."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            t("invite_copy_code_button", lang),
+            copy_text=CopyTextButton(code),
+        ),
+    ]])
+
+
 def invite_code_owner(code) -> Optional[int]:
     """The Telegram id that owns a per-user invite code, or None
     when the code is not a valid per-user code. Normalises case and
@@ -1094,9 +1108,62 @@ TEXT = {
         "am": "በchat deposit ገና አልተዘጋጀም — እባክዎ በpaxyo.et deposit ያድርጉ።",
         "en": "Deposit by chat is not ready yet — please deposit at paxyo.et.",
     },
+    # Deposit failed (owner, 19 Nov 2026): the exact wording the
+    # owner gave for every failed-deposit report. The same English
+    # text is used in Amharic too — the links and the MiniApp
+    # reference are language-neutral, and the wording is his.
     "deposit_failed": {
-        "am": "Deposit መጀመር አልቻልኩም። እባክዎ እንደገና ይሞክሩ ወይም በpaxyo.et deposit ያድርጉ።",
-        "en": "I couldn't start the deposit. Please try again or deposit at paxyo.et.",
+        "am": (
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo"
+        ),
+        "en": (
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo"
+        ),
+    },
+    # Deposit guide card (owner, 19 Nov 2026): shown instead of the
+    # old deposit card until the user has 3 successful deposits.
+    # The wording is the owner's exact text; the amount is the
+    # deposit being made (his text used 10.00 ETB as the example).
+    # The same English text is used in Amharic too — the steps
+    # describe the English guide image, and cards are never
+    # translated. The button continues to the Confirm card.
+    "deposit_guide": {
+        "am": (
+            "Pay {amount} ETB deposit:\n\n"
+            "1. Tap the button below.\n"
+            "2. Enter your phone number and payment method on the page.\n"
+            "3. Enter your pin on USSD prompt to confirm.\n\n"
+            "One-time link only. If you put wrong number or cancelled "
+            "USSD and the link is dead. Come back here and ask for a "
+            "new one."
+        ),
+        "en": (
+            "Pay {amount} ETB deposit:\n\n"
+            "1. Tap the button below.\n"
+            "2. Enter your phone number and payment method on the page.\n"
+            "3. Enter your pin on USSD prompt to confirm.\n\n"
+            "One-time link only. If you put wrong number or cancelled "
+            "USSD and the link is dead. Come back here and ask for a "
+            "new one."
+        ),
+    },
+    "deposit_guide_button": {
+        "am": "💳 አሁን deposit ያድርጉ",
+        "en": "💳 Deposit now",
+    },
+    # Deposit Confirm double-tap (owner, 19 Nov 2026): the first
+    # tap shows this at once, so the user sees the deposit is
+    # starting instead of a frozen card — and a second tap while
+    # it is starting gets this again, never "Order cancelled".
+    "deposit_confirm_processing": {
+        "am": "depositዎን እጀምራለሁ — ትንሽ ይጠብቁ።",
+        "en": "Starting your deposit, one moment…",
     },
     # Embedded deposit (owner, 15 Nov 2026): the USSD push could not
     # be sent (Chapa Direct Charge is off for this account), so the
@@ -1177,12 +1244,32 @@ TEXT = {
         "en": "Not yet — if you haven't finished paying on the payment page, tap the deposit button again. If you already paid, give it a minute.",
     },
     "deposit_failed_reason": {
-        "am": "Depositዎ አልተሳካም — {reason}። ገንዘብ አልተቀነሰብዎትም። እንደገና ይሞክሩ ወይም በpaxyo.et deposit ያድርጉ።",
-        "en": "It failed — {reason}. You were not charged. Try again, or deposit at paxyo.et.",
+        "am": (
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo"
+        ),
+        "en": (
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo"
+        ),
     },
     "deposit_failed_check": {
-        "am": "Depositዎ አልተሳካም። ገንዘብ አልተቀነሰብዎትም። እንደገና ይሞክሩ ወይም በpaxyo.et deposit ያድርጉ።",
-        "en": "Your deposit failed. You were not charged. Try again, or deposit at paxyo.et.",
+        "am": (
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo"
+        ),
+        "en": (
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo"
+        ),
     },
     "no_deposits": {
         "am": "ገና deposit የለዎትም። deposit ማድረግ ይፈልጋሉ?",
@@ -2815,6 +2902,14 @@ TEXT = {
             "invite code {code}, they get a 20% bonus — and so do you."
         ),
     },
+    # Copy button under the invite message (19 Nov 2026): one tap
+    # copies the invite CODE, so the code gets the same attention
+    # as the link. The label is localised; the copied text is
+    # always the code itself.
+    "invite_copy_code_button": {
+        "am": "📋 Invite code ቅዳ",
+        "en": "📋 Copy invite code",
+    },
     # In-chat invite codes (both-sides referral bonus, 16 Nov 2026):
     # a user types a friend's code in the chat. Both the new user
     # AND the code owner get 20% of the new user's first deposit.
@@ -2852,16 +2947,19 @@ TEXT = {
     },
     # Referral notices (William, 16 Nov 2026): when someone joins
     # with a code, the code giver hears about it; when their first
-    # deposit lands, BOTH sides hear their 20% bonus landed. The
-    # new user is never named to the referrer — only that someone
-    # joined. Amharic is first-pass, unreviewed.
+    # deposit lands, BOTH sides hear their 20% bonus landed. Since
+    # 19 Nov 2026 the new user IS named to the referrer (first
+    # name plus @username when one exists) — the referrer must see
+    # who joined and, on the deposit, how much they made from it.
+    # Never a phone number, Telegram id or balance. Amharic is
+    # first-pass, unreviewed.
     "referral_joined": {
         "am": (
-            "አንድ ሰው በinvite codeህ Paxyo ተቀላቅሏል! የመጀመሪያ "
+            "{name} በinvite codeህ Paxyo ተቀላቅሏል! የመጀመሪያ "
             "depositቸውን ሲያደርጉ፣ ሁለታችሁም 20% bonus ታገኛላችሁ።"
         ),
         "en": (
-            "Someone joined Paxyo with your invite code! When they "
+            "{name} joined Paxyo with your invite code! When they "
             "make their first deposit, you both get a 20% bonus."
         ),
     },
@@ -2872,6 +2970,14 @@ TEXT = {
     "referral_bonus_referrer": {
         "am": "ጓደኛህ የመጀመሪያ depositውን አድርጓል — የ20% bonusህ ደርሷል: {amount} ETB።",
         "en": "Your friend made their first deposit — your 20% bonus landed: {amount} ETB.",
+    },
+    # Same as referral_bonus_referrer, but naming the friend who
+    # deposited (19 Nov 2026): the referrer sees who it was and
+    # exactly how much they made. Used whenever the name is known;
+    # the unnamed one stays as the fallback when it is not.
+    "referral_bonus_referrer_named": {
+        "am": "{name} የመጀመሪያ depositውን አድርጓል — የ20% bonusህ ደርሷል: {amount} ETB።",
+        "en": "{name} made their first deposit — your 20% bonus landed: {amount} ETB.",
     },
     # Promo codes (ideas batch 2, feature 1, 15 Nov 2026): a code
     # never discounts an order price — it only adds a bonus on a
@@ -10391,6 +10497,15 @@ DEPOSIT_DRAFT = {}
 # "phone"}. Nothing is created on the server until the user taps
 # Confirm (or says yes).
 PENDING_DEPOSIT = {}
+# Deposit Confirms in flight (owner, 19 Nov 2026): confirm_id ->
+# user_id while start_deposit is running for that tap. The first
+# tap pops the draft and then waits on two slow server calls, so
+# a second tap in that window used to find nothing and fall
+# through to "Order cancelled" — even though the deposit was
+# being created. A second tap on an id here gets the processing
+# message instead, and only one start_deposit ever runs per tap.
+# Keys are confirm ids; the retry button uses "retry:<user_id>".
+DEPOSIT_CONFIRM_IN_FLIGHT = {}
 # Most recent deposit created in this session: telegram_id ->
 # deposit_id. The recheck prefers this id; after a restart the list
 # endpoint is the fallback, so "did my deposit go through?" still
@@ -20791,6 +20906,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await _notify_referrer_joined(
                         getattr(context, "bot", None),
                         _ref_result["referrer_telegram_id"],
+                        user.first_name, user.username,
                     )
     # Ideas batch (15 Nov 2026): the quick-reply keyboard stays
     # under the chat from here on; a brand-new user also gets the
@@ -22658,25 +22774,49 @@ def extract_invite_code(text: str):
     return None
 
 
-async def _notify_referrer_joined(bot, referrer_id: int) -> bool:
+def format_person_name(first_name, username):
+    """Display name for naming a user to someone else (referral
+    notices, 19 Nov 2026): first name plus @username when one
+    exists, first name alone when there is none, @username alone
+    when there is no first name. Never a phone number, Telegram
+    id or balance. Returns None when nothing is known."""
+    name = (first_name or "").strip()
+    handle = (username or "").strip().lstrip("@")
+    if name and handle:
+        return f"{name} (@{handle})"
+    if name:
+        return name
+    if handle:
+        return f"@{handle}"
+    return None
+
+
+async def _notify_referrer_joined(bot, referrer_id: int,
+                                  joiner_name=None,
+                                  joiner_username=None) -> bool:
     """Tell a referrer someone joined with their code (William,
     16 Nov 2026): the code giver hears about it the moment a new
-    user registers with their code. Best-effort and never raises —
-    a failed send must not break the registration reply (or
-    /start). Returns True when the message was sent. The new user
-    is never named — only that someone joined. Language is the
-    referrer's last seen language (LAST_LANG), English when the
-    referrer never chatted with the bot."""
+    user registers with their code. Since 19 Nov 2026 the new
+    user is named (first name plus @username when one exists).
+    Best-effort and never raises — a failed send must not break
+    the registration reply (or /start). Returns True when the
+    message was sent. Language is the referrer's last seen
+    language (LAST_LANG), English when the referrer never chatted
+    with the bot."""
     try:
         referrer_id = int(referrer_id)
     except (TypeError, ValueError):
         return False
     if referrer_id <= 0 or bot is None:
         return False
+    lang = LAST_LANG.get(referrer_id, "en")
+    display = format_person_name(joiner_name, joiner_username)
+    if display is None:
+        display = "አንድ ሰው" if lang == "am" else "Someone"
     try:
         await bot.send_message(
             chat_id=referrer_id,
-            text=t("referral_joined", LAST_LANG.get(referrer_id, "en")),
+            text=t("referral_joined", lang, name=display),
             reply_markup=hide_reply_keyboard(),
         )
     except Exception as exc:
@@ -22798,7 +22938,9 @@ async def handle_invite_code_text(update, text: str, lang: str, voice=False) -> 
             _bot = update.message.get_bot()
         except Exception:
             _bot = None
-        await _notify_referrer_joined(_bot, referrer)
+        await _notify_referrer_joined(
+            _bot, referrer, user.first_name, user.username,
+        )
     return True
 
 
@@ -23305,7 +23447,8 @@ async def _maybe_big_deposit_alert(app, deposit, user_id: int,
     await notify_admins(app, text)
 
 
-async def _referral_bonus_lines(user_id: int, deposit, lang: str, app=None) -> list:
+async def _referral_bonus_lines(user_id: int, deposit, lang: str, app=None,
+                              first_name=None, username=None) -> list:
     """Referral-bonus notices for a completed first deposit (William,
     16 Nov 2026). The server's deposit record carries referral_bonus
     {referrer, invitee_paid, referrer_paid, invitee_bonus,
@@ -23317,8 +23460,12 @@ async def _referral_bonus_lines(user_id: int, deposit, lang: str, app=None) -> l
     a bot restart — never re-sends it. The invitee's line is returned
     (appended to the recheck reply); the referrer's is sent directly
     (needs app — without it the side is skipped this time and picked
-    up on a later recheck, the flag stays 0). Never raises: a failed
-    send or ack only logs, and the reply still stands."""
+    up on a later recheck, the flag stays 0). The referrer's message
+    names the friend who deposited and the exact bonus they made
+    (19 Nov 2026): the name comes from first_name/username when the
+    caller has them, else a best-effort get_chat lookup, else the
+    unnamed wording. Never raises: a failed send or ack only logs,
+    and the reply still stands."""
     bonus = (deposit or {}).get("referral_bonus")
     if not isinstance(bonus, dict):
         return []
@@ -23353,14 +23500,37 @@ async def _referral_bonus_lines(user_id: int, deposit, lang: str, app=None) -> l
             referrer = 0
             amount = 0.0
         if referrer > 0 and amount > 0:
+            display = format_person_name(first_name, username)
+            if display is None and app is not None:
+                # The credit watcher has no user object — ask
+                # Telegram for the depositor's name, best-effort.
+                try:
+                    chat = await app.bot.get_chat(user_id)
+                    display = format_person_name(
+                        getattr(chat, "first_name", None),
+                        getattr(chat, "username", None),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "referral depositor name lookup failed: %s", exc
+                    )
+            referrer_lang = LAST_LANG.get(referrer, "en")
+            if display is not None:
+                text = t(
+                    "referral_bonus_referrer_named",
+                    referrer_lang,
+                    name=display, amount=format_money(amount),
+                )
+            else:
+                text = t(
+                    "referral_bonus_referrer",
+                    referrer_lang,
+                    amount=format_money(amount),
+                )
             try:
                 await app.bot.send_message(
                     chat_id=referrer,
-                    text=t(
-                        "referral_bonus_referrer",
-                        LAST_LANG.get(referrer, "en"),
-                        amount=format_money(amount),
-                    ),
+                    text=text,
                     reply_markup=hide_reply_keyboard(),
                 )
             except Exception as exc:
@@ -23374,7 +23544,7 @@ async def _referral_bonus_lines(user_id: int, deposit, lang: str, app=None) -> l
 
 
 async def deposit_status_text(user_id: int, lang: str, app=None,
-                              username=None) -> str:
+                              username=None, first_name=None) -> str:
     """Recheck the user's most recent deposit and say what happened,
     in one short message.
 
@@ -23461,7 +23631,10 @@ async def deposit_status_text(user_id: int, lang: str, app=None,
         if promo_line:
             extra_lines.append(promo_line)
         extra_lines.extend(
-            await _referral_bonus_lines(user_id, deposit, lang, app)
+            await _referral_bonus_lines(
+                user_id, deposit, lang, app,
+                first_name=first_name, username=username,
+            )
         )
         if extra_lines:
             return base + "\n" + "\n".join(extra_lines)
@@ -24174,6 +24347,77 @@ async def _continue_parked_draft(message, user_id, lang, voice=False):
     await reply_message(message, t("ask_platform", lang), lang, voice=voice)
 
 
+# Deposit guide image (19 Nov 2026): the how-to-pay photo shipped
+# with the repo, so the bot can send it from its own files — no
+# hosting and no file_id step needed. The file rides along with
+# the Fly deploy like the rest of the repo.
+DEPOSIT_GUIDE_IMAGE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "assets", "how_to_pay_paxyo_deposit.png",
+)
+
+
+async def successful_deposits_count(user_id: int):
+    """Number of the user's completed deposits (19 Nov 2026):
+    GET /deposits, counting status completed/success/paid. The
+    list endpoint already exists server-side (api-deposits.php)
+    and returns the status per deposit — no new server endpoint
+    is needed. Returns None when the count cannot be read (the
+    endpoint is not live yet, or a read error): the caller then
+    shows the old deposit card, so a read failure never blocks
+    a deposit."""
+    try:
+        deposits = await paxyo.list_deposits(user_id, limit=100)
+    except Exception as exc:
+        log.warning("successful deposits count failed: %s", exc)
+        return None
+    if deposits is None:
+        return None
+    return sum(
+        1 for dep in deposits
+        if isinstance(dep, dict)
+        and str(dep.get("status") or "").strip().lower()
+        in ("completed", "success", "paid")
+    )
+
+
+async def send_deposit_guide(message, amount, lang: str):
+    """Deposit guide card for a user with fewer than 3 successful
+    deposits (owner, 19 Nov 2026): the how-to-pay photo plus the
+    steps, with a Deposit now button that continues to the
+    Confirm card. Nothing is created on the server here — the
+    guide only teaches; the deposit starts at Confirm, as
+    before. The photo is best-effort: a missing file or a failed
+    send still sends the text and button, so the deposit flow
+    never breaks on an image."""
+    text = t("deposit_guide", lang, amount=format_money(amount))
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            t("deposit_guide_button", lang), callback_data="depguide"
+        ),
+    ]])
+    try:
+        with open(DEPOSIT_GUIDE_IMAGE, "rb") as fh:
+            photo = fh.read()
+    except Exception as exc:
+        log.warning("deposit guide image missing: %s", exc)
+        photo = None
+    if photo:
+        try:
+            await message.reply_photo(
+                photo=InputFile(
+                    io.BytesIO(photo),
+                    filename="how-to-pay-paxyo-deposit.png",
+                ),
+                caption=text,
+                reply_markup=markup,
+            )
+            return
+        except Exception as exc:
+            log.warning("deposit guide photo failed: %s", exc)
+    await message.reply_text(text, reply_markup=markup)
+
+
 def deposit_confirm_card(user_id: int, amount, lang: str):
     """(text, markup) for a deposit Confirm card (owner, 17 Nov
     2026): the amount ONLY — the method + phone are chosen on the
@@ -24270,6 +24514,17 @@ async def handle_deposit_text(update, text, intent, lang, voice=False):
     DEPOSIT_METHOD_DECLINED.discard(user.id)
     PARTIAL.pop(user.id, None)
     RECURRING_DRAFT.pop(user.id, None)
+    # Deposit guide (owner, 19 Nov 2026): until the user has 3
+    # successful deposits, show the how-to-pay guide instead of
+    # the old card. The amount is kept in DEPOSIT_DRAFT so the
+    # guide's Deposit now button can continue to the Confirm
+    # card. A count that cannot be read shows the old card, so
+    # the guide never blocks a deposit.
+    count = await successful_deposits_count(user.id)
+    if count is not None and count < 3:
+        DEPOSIT_DRAFT[user.id] = {"amount": amount}
+        await send_deposit_guide(update.message, amount, lang)
+        return
     card_text, card_markup = deposit_confirm_card(user.id, amount, lang)
     await reply_message(
         update.message, card_text, lang,
@@ -28171,37 +28426,50 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # A "yes" can also confirm a deposit awaiting Confirm: start
         # it and answer with the payment instructions IN TEXT (they
         # carry a link/code the user must read, so voice is wrong).
+        # A second "yes" while the first is still starting the
+        # deposit (19 Nov 2026): the first "yes" already popped
+        # the draft, so this check must come before the lookup —
+        # say it is starting, never start it twice.
+        if user.id in DEPOSIT_CONFIRM_IN_FLIGHT.values():
+            await update.message.reply_text(
+                t("deposit_confirm_processing", lang)
+            )
+            return
         dep_id, dep_draft = pending_deposit_for_user(user.id)
         if dep_draft is not None:
             PENDING_DEPOSIT.pop(dep_id, None)
-            result, error = await start_deposit(dep_draft, user.id)
-            # Ban (19 Nov 2026): a banned user deposits nothing.
-            if error == "banned":
-                await update.message.reply_text(t("banned", lang))
-                return
-            if error:
-                if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
-                    # The push could not be sent: offer the deposit
-                    # page embedded in Telegram instead of a bare
-                    # paxyo.et text. Keep the failed draft so the
-                    # "Try again" button can restart it (ideas
-                    # batch, 15 Nov 2026).
-                    FAILED_DEPOSIT[user.id] = dict(dep_draft)
-                    text, markup = deposit_webapp_message(
-                        dep_draft["amount"], lang,
-                        allow_retry=True, user_id=user.id,
-                    )
-                    await update.message.reply_text(text, reply_markup=markup)
-                else:
-                    await update.message.reply_text(_strip_dashes(error))
-                return
-            await update.message.reply_text(
-                t(
-                    "deposit_popup_ready", lang,
-                    amount=format_money(dep_draft["amount"]),
-                ),
-                reply_markup=deposit_success_markup(result, dep_draft, lang),
-            )
+            DEPOSIT_CONFIRM_IN_FLIGHT[dep_id] = user.id
+            try:
+                result, error = await start_deposit(dep_draft, user.id)
+                # Ban (19 Nov 2026): a banned user deposits nothing.
+                if error == "banned":
+                    await update.message.reply_text(t("banned", lang))
+                    return
+                if error:
+                    if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
+                        # The push could not be sent: offer the deposit
+                        # page embedded in Telegram instead of a bare
+                        # paxyo.et text. Keep the failed draft so the
+                        # "Try again" button can restart it (ideas
+                        # batch, 15 Nov 2026).
+                        FAILED_DEPOSIT[user.id] = dict(dep_draft)
+                        text, markup = deposit_webapp_message(
+                            dep_draft["amount"], lang,
+                            allow_retry=True, user_id=user.id,
+                        )
+                        await update.message.reply_text(text, reply_markup=markup)
+                    else:
+                        await update.message.reply_text(_strip_dashes(error))
+                    return
+                await update.message.reply_text(
+                    t(
+                        "deposit_popup_ready", lang,
+                        amount=format_money(dep_draft["amount"]),
+                    ),
+                    reply_markup=deposit_success_markup(result, dep_draft, lang),
+                )
+            finally:
+                DEPOSIT_CONFIRM_IN_FLIGHT.pop(dep_id, None)
             return
         # A "yes" can also confirm a batch of orders awaiting Confirm:
         # place them all and answer with one short line per order.
@@ -28285,6 +28553,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     user.id, lang,
                     app=getattr(context, "application", None),
                     username=user.username,
+                    first_name=user.first_name,
                 ),
                 lang, voice=voice,
             )
@@ -28317,6 +28586,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     user.id, lang,
                     app=getattr(context, "application", None),
                     username=user.username,
+                    first_name=user.first_name,
                 ),
                 lang, voice=voice,
             )
@@ -28926,6 +29196,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 user.id, lang,
                 app=getattr(context, "application", None),
                 username=user.username,
+                first_name=user.first_name,
             ),
             lang, voice=voice,
         )
@@ -29099,6 +29370,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             update.message,
             t("invite_link", lang, link=user_invite_link(user.id), code=_own_code),
             lang, voice=voice,
+            reply_markup=invite_link_keyboard(_own_code, lang),
         )
         return
     if intent_type == "greeting":
@@ -30977,6 +31249,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.id, lang,
                 app=getattr(context, "application", None),
                 username=user.username,
+                first_name=user.first_name,
             )
         )
         return
@@ -30999,6 +31272,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         card_text, card_markup = deposit_confirm_card(
             user.id, _amount, lang
+        )
+        await query.edit_message_text(card_text, reply_markup=card_markup)
+        return
+
+    if action == "depguide":
+        # Deposit now on the guide card (19 Nov 2026): continue to
+        # the Confirm card for the amount the guide was shown for.
+        # The amount rides on DEPOSIT_DRAFT, saved when the guide
+        # was shown; a missing draft (a restart dropped it) asks
+        # for the amount instead. The guide itself never created
+        # anything, so this is the first Confirm card for the
+        # deposit. The message edited here is the guide photo, so
+        # the edit replaces its caption with the card.
+        draft = DEPOSIT_DRAFT.pop(user.id, None) or {}
+        amount = draft.get("amount")
+        if amount is None:
+            await query.edit_message_text(t("ask_deposit_amount", lang))
+            return
+        card_text, card_markup = deposit_confirm_card(
+            user.id, amount, lang
         )
         await query.edit_message_text(card_text, reply_markup=card_markup)
         return
@@ -31200,34 +31493,50 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # the same deposit draft (amount/method/phone kept) after a
         # failed push. The draft is consumed here — a retry that
         # fails again re-saves it through start_deposit's failure
-        # path, so the button stays usable.
+        # path, so the button stays usable. Same double-tap guard
+        # as Confirm (19 Nov 2026): a second tap while the first
+        # retry is still starting gets the processing message,
+        # never "Order cancelled".
+        retry_key = f"retry:{user.id}"
+        if DEPOSIT_CONFIRM_IN_FLIGHT.get(retry_key) == user.id:
+            await query.edit_message_text(
+                t("deposit_confirm_processing", lang)
+            )
+            return
         draft = FAILED_DEPOSIT.pop(user.id, None)
         if draft is None:
             await query.edit_message_text(t("cancelled", lang))
             return
-        result, error = await start_deposit(draft, user.id)
-        # Ban (19 Nov 2026): a banned user deposits nothing.
-        if error == "banned":
-            await query.edit_message_text(t("banned", lang))
-            return
-        if error:
-            if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
-                FAILED_DEPOSIT[user.id] = dict(draft)
-                text, markup = deposit_webapp_message(
-                    draft["amount"], lang,
-                    allow_retry=True, user_id=user.id,
-                )
-                await query.edit_message_text(text, reply_markup=markup)
-            else:
-                await query.edit_message_text(_strip_dashes(error))
-            return
-        await query.edit_message_text(
-            t(
-                "deposit_popup_ready", lang,
-                amount=format_money(draft["amount"]),
-            ),
-            reply_markup=deposit_success_markup(result, draft, lang),
-        )
+        DEPOSIT_CONFIRM_IN_FLIGHT[retry_key] = user.id
+        try:
+            await query.edit_message_text(
+                t("deposit_confirm_processing", lang)
+            )
+            result, error = await start_deposit(draft, user.id)
+            # Ban (19 Nov 2026): a banned user deposits nothing.
+            if error == "banned":
+                await query.edit_message_text(t("banned", lang))
+                return
+            if error:
+                if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
+                    FAILED_DEPOSIT[user.id] = dict(draft)
+                    text, markup = deposit_webapp_message(
+                        draft["amount"], lang,
+                        allow_retry=True, user_id=user.id,
+                    )
+                    await query.edit_message_text(text, reply_markup=markup)
+                else:
+                    await query.edit_message_text(_strip_dashes(error))
+                return
+            await query.edit_message_text(
+                t(
+                    "deposit_popup_ready", lang,
+                    amount=format_money(draft["amount"]),
+                ),
+                reply_markup=deposit_success_markup(result, draft, lang),
+            )
+        finally:
+            DEPOSIT_CONFIRM_IN_FLIGHT.pop(retry_key, None)
         return
 
     if action == "reorder":
@@ -31890,6 +32199,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if DEPOSIT_CONFIRM_IN_FLIGHT.get(arg) == user.id:
+        # Double tap (19 Nov 2026): the first tap is still starting
+        # the deposit — the draft is already popped, but the deposit
+        # is NOT cancelled. Say it is starting instead of falling
+        # through to "Order cancelled" below.
+        await query.edit_message_text(t("deposit_confirm_processing", lang))
+        return
     dep_draft = PENDING_DEPOSIT.pop(arg, None)
     if dep_draft is not None:
         if dep_draft["user_id"] != user.id:
@@ -31898,36 +32214,49 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "cancel":
             await query.edit_message_text(t("cancelled", lang))
             return
-        # Confirm tap: start the deposit and replace the summary with
-        # the payment instructions (text — they carry a link/code the
-        # user must read).
-        result, error = await start_deposit(dep_draft, user.id)
-        # Ban (19 Nov 2026): a banned user deposits nothing.
-        if error == "banned":
-            await query.edit_message_text(t("banned", lang))
-            return
-        if error:
-            if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
-                # The push could not be sent: offer the deposit page
-                # embedded in Telegram instead of a bare paxyo.et text.
-                # Keep the failed draft so the "Try again" button can
-                # restart it (ideas batch, 15 Nov 2026).
-                FAILED_DEPOSIT[user.id] = dict(dep_draft)
-                text, markup = deposit_webapp_message(
-                    dep_draft["amount"], lang,
-                    allow_retry=True, user_id=user.id,
-                )
-                await query.edit_message_text(text, reply_markup=markup)
-            else:
-                await query.edit_message_text(_strip_dashes(error))
-            return
-        await query.edit_message_text(
-            t(
-                "deposit_popup_ready", lang,
-                amount=format_money(dep_draft["amount"]),
-            ),
-            reply_markup=deposit_success_markup(result, dep_draft, lang),
-        )
+        # Confirm tap: mark it in flight BEFORE the slow
+        # start_deposit calls, and tell the user at once that it
+        # is starting — the card used to sit unchanged until the
+        # server answered, which read as lag and invited a second
+        # tap. The finally clears the flag whatever happens, so a
+        # later tap is never stuck on "processing".
+        DEPOSIT_CONFIRM_IN_FLIGHT[arg] = user.id
+        try:
+            await query.edit_message_text(
+                t("deposit_confirm_processing", lang)
+            )
+            # Start the deposit and replace the summary with the
+            # payment instructions (text — they carry a link/code
+            # the user must read).
+            result, error = await start_deposit(dep_draft, user.id)
+            # Ban (19 Nov 2026): a banned user deposits nothing.
+            if error == "banned":
+                await query.edit_message_text(t("banned", lang))
+                return
+            if error:
+                if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
+                    # The push could not be sent: offer the deposit page
+                    # embedded in Telegram instead of a bare paxyo.et text.
+                    # Keep the failed draft so the "Try again" button can
+                    # restart it (ideas batch, 15 Nov 2026).
+                    FAILED_DEPOSIT[user.id] = dict(dep_draft)
+                    text, markup = deposit_webapp_message(
+                        dep_draft["amount"], lang,
+                        allow_retry=True, user_id=user.id,
+                    )
+                    await query.edit_message_text(text, reply_markup=markup)
+                else:
+                    await query.edit_message_text(_strip_dashes(error))
+                return
+            await query.edit_message_text(
+                t(
+                    "deposit_popup_ready", lang,
+                    amount=format_money(dep_draft["amount"]),
+                ),
+                reply_markup=deposit_success_markup(result, dep_draft, lang),
+            )
+        finally:
+            DEPOSIT_CONFIRM_IN_FLIGHT.pop(arg, None)
         return
 
     batch = PENDING_BATCH.pop(arg, None)

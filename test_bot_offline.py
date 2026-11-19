@@ -527,6 +527,7 @@ class FakeMessage:
         self.text_sent = []
         self.voice_sent = []
         self.photos_sent = []
+        self.photo_markups = []
         self.markups = []
         self.chat_id = 1
         self.bot = FakeMessageBot()
@@ -546,8 +547,9 @@ class FakeMessage:
         self._next_message_id += 1
         return FakeSentMessage(self._next_message_id)
 
-    async def reply_photo(self, photo, caption=None):
+    async def reply_photo(self, photo, caption=None, reply_markup=None):
         self.photos_sent.append((photo, caption))
+        self.photo_markups.append(reply_markup)
         self._next_message_id += 1
         return FakeSentMessage(self._next_message_id)
 
@@ -1041,7 +1043,19 @@ class FakePaxyo:
         self._payment_none = payment_none
         self._payment_error = payment_error
         self._payment_error_status = payment_error_status
-        self._deposits = list(deposits) if deposits is not None else []
+        # Deposit bundle (19 Nov 2026): the default fake is an
+        # established user with 3 completed deposits, so the deposit
+        # guide card does not gate flows that predate the guide.
+        # Tests for new-user behaviour pass deposits=[] (or fewer
+        # than 3 completed) explicitly.
+        self._deposits = (
+            list(deposits) if deposits is not None else [
+                {"id": f"dep-old-{i}", "amount": 10,
+                 "status": "completed",
+                 "created_at": "2026-11-13T11:00:00Z"}
+                for i in range(1, 4)
+            ]
+        )
         self._deposits_none = deposits_none
         self.deposit_status_checked = []
         # Session store (smart-loop round 1): a seeded session for
@@ -3895,6 +3909,14 @@ class TestSchedules(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bot.PENDING), 1)  # nothing stopped yet
 
 
+class FakeChat:
+    """Stand-in for a Telegram Chat as get_chat returns it."""
+
+    def __init__(self, first_name="Test", username="testuser"):
+        self.first_name = first_name
+        self.username = username
+
+
 class FakeBot:
     """Stand-in for the Telegram Bot: records messages the scheduler
     sends to users."""
@@ -3902,10 +3924,14 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.sent_markups = []
+        self.chat = FakeChat()
 
     async def send_message(self, chat_id, text, reply_markup=None):
         self.sent.append((chat_id, text))
         self.sent_markups.append(reply_markup)
+
+    async def get_chat(self, chat_id):
+        return self.chat
 
 
 class FakeApp:
@@ -5442,8 +5468,8 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
         )
         query = await self._confirm(fake)
         self.assertTrue(query.answered)
-        self.assertEqual(len(query.edited), 1)
-        instructions = query.edited[0]
+        self.assertEqual(len(query.edited), 2)
+        instructions = query.edited[-1]
         self.assertIn("10.00 ETB", instructions)
         # No checkout URL in the chat, no method/phone, no USSD
         # code — the popup page collects them (17 Nov 2026).
@@ -5536,8 +5562,8 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
             paxyo=fake,
         )
         query = await self._confirm(fake)
-        self.assertIn("couldn't be sent", query.edited[0])
-        self.assertIn("Telegram", query.edited[0])
+        self.assertIn("couldn't be sent", query.edited[-1])
+        self.assertIn("Telegram", query.edited[-1])
         self.assertEqual(fake.deposits_created, [])
 
     async def test_deposit_api_error_shown_briefly(self):
@@ -5548,7 +5574,8 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
             paxyo=fake,
         )
         query = await self._confirm(fake)
-        self.assertEqual(query.edited, ["Amount below minimum (10 ETB)."])
+        self.assertEqual(query.edited, [
+            "Starting your deposit, one moment…", "Amount below minimum (10 ETB)."])
         self.assertEqual(fake.deposits_created, [])
 
     async def test_amharic_deposit_asks_in_amharic(self):
@@ -5614,6 +5641,358 @@ class TestDepositByChat(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ስልክዎ", text)
         self.assertIn("PIN", text)
         self.assertNotIn("paxyo.et", text)
+
+
+class TestDepositBundle(unittest.IsolatedAsyncioTestCase):
+    """Deposit bundle (owner, 19 Nov 2026): the how-to-pay guide
+    card for users with fewer than 3 successful deposits, the
+    named referral join/earnings notices, the deposit Confirm
+    double-tap fix, and the exact failed-deposit wording."""
+
+    def setUp(self):
+        bot.PENDING_DEPOSIT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.DEPOSIT_CONFIRM_IN_FLIGHT.clear()
+        bot.FAILED_DEPOSIT.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.DEPOSIT_CREDIT_WATCH.clear()
+        bot.LAST_LANG.clear()
+
+    def tearDown(self):
+        bot.PENDING_DEPOSIT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.DEPOSIT_CONFIRM_IN_FLIGHT.clear()
+        bot.FAILED_DEPOSIT.clear()
+        bot.LAST_DEPOSIT.clear()
+        bot.DEPOSIT_CREDIT_WATCH.clear()
+        bot.LAST_LANG.clear()
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    def _completed(self, n):
+        return [
+            {"id": i + 1, "amount": 10, "status": "completed"}
+            for i in range(n)
+        ]
+
+    # --- guide card ---
+
+    async def test_new_user_sees_guide_instead_of_confirm_card(self):
+        fake = FakePaxyo(deposits=[])
+        msg = await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        self.assertEqual(len(msg.photos_sent), 1)
+        caption = msg.photos_sent[0][1]
+        self.assertIn("Pay 10.00 ETB deposit:", caption)
+        self.assertIn("Tap the button below.", caption)
+        self.assertIn("One-time link only.", caption)
+        self.assertIn("ask for a new one.", caption)
+        button = msg.photo_markups[0].inline_keyboard[0][0]
+        self.assertEqual(button.callback_data, "depguide")
+        self.assertIn("Deposit now", button.text)
+        self.assertEqual(msg.text_sent, [])  # no confirm card text
+        self.assertEqual(bot.PENDING_DEPOSIT, {})  # nothing created
+        self.assertEqual(bot.DEPOSIT_DRAFT.get(1), {"amount": 10.0})
+
+    async def test_guide_button_continues_to_confirm_card(self):
+        fake = FakePaxyo(deposits=[])
+        await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        query = FakeQuery("depguide", message_text="guide")
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(update, None)
+        self.assertEqual(len(query.edited), 1)
+        self.assertIn("10.00 ETB", query.edited[0])
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+        self.assertEqual(
+            next(iter(bot.PENDING_DEPOSIT.values())),
+            {"user_id": 1, "amount": 10.0},
+        )
+
+    async def test_three_deposits_bring_back_old_card(self):
+        fake = FakePaxyo(deposits=self._completed(3))
+        msg = await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        self.assertEqual(msg.photos_sent, [])  # no guide
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("10.00 ETB", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+
+    async def test_two_deposits_still_show_guide(self):
+        fake = FakePaxyo(deposits=self._completed(2))
+        msg = await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        self.assertEqual(len(msg.photos_sent), 1)
+        self.assertEqual(bot.PENDING_DEPOSIT, {})
+
+    async def test_unreadable_count_shows_old_card(self):
+        # The list endpoint is not live yet: never block a deposit
+        # on a count that cannot be read.
+        fake = FakePaxyo(deposits_none=True)
+        msg = await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        self.assertEqual(msg.photos_sent, [])
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+
+    async def test_successful_deposits_count(self):
+        fake = FakePaxyo(deposits=[
+            {"id": 1, "status": "completed"},
+            {"id": 2, "status": "failed"},
+            {"id": 3, "status": "pending"},
+            {"id": 4, "status": "paid"},
+            {"id": 5, "status": "success"},
+        ])
+        with mock.patch("bot.paxyo", fake):
+            self.assertEqual(await bot.successful_deposits_count(1), 3)
+        with mock.patch("bot.paxyo", FakePaxyo(deposits_none=True)):
+            self.assertIsNone(await bot.successful_deposits_count(1))
+
+    # --- referral naming ---
+
+    def test_format_person_name(self):
+        self.assertEqual(
+            bot.format_person_name("Abebe", "abebe"), "Abebe (@abebe)"
+        )
+        self.assertEqual(bot.format_person_name("Abebe", None), "Abebe")
+        self.assertEqual(bot.format_person_name(None, "abebe"), "@abebe")
+        self.assertEqual(
+            bot.format_person_name("Abebe", "@abebe"), "Abebe (@abebe)"
+        )
+        self.assertIsNone(bot.format_person_name(None, None))
+        self.assertIsNone(bot.format_person_name("", "  "))
+
+    async def test_referrer_join_names_the_new_user(self):
+        message_bot = FakeMessageBot()
+        await bot._notify_referrer_joined(
+            message_bot, 7, "Abebe", "abebe",
+        )
+        self.assertEqual(len(message_bot.sent), 1)
+        chat_id, text = message_bot.sent[0]
+        self.assertEqual(chat_id, 7)
+        self.assertIn("Abebe (@abebe)", text)
+        self.assertNotIn("251", text)
+        self.assertNotIn("Someone joined", text)
+
+    async def test_referrer_join_without_username_names_first_name(self):
+        message_bot = FakeMessageBot()
+        await bot._notify_referrer_joined(message_bot, 7, "Abebe", None)
+        self.assertIn("Abebe joined Paxyo", message_bot.sent[0][1])
+
+    async def test_referrer_join_without_name_stays_generic(self):
+        message_bot = FakeMessageBot()
+        await bot._notify_referrer_joined(message_bot, 7, None, None)
+        self.assertIn("Someone joined Paxyo", message_bot.sent[0][1])
+
+    def _bonus_deposit(self, **overrides):
+        deposit = {
+            "id": 9, "amount": 10,
+            "referral_bonus": {
+                "referrer": 7, "referrer_paid": True,
+                "referrer_notified": False, "referrer_bonus": 2.0,
+                "invitee_paid": True, "invitee_notified": True,
+                "invitee_bonus": 2.0,
+            },
+        }
+        deposit.update(overrides)
+        return deposit
+
+    async def test_referrer_earnings_name_the_depositor(self):
+        fake = FakePaxyo()
+        app = FakeApp()
+        with mock.patch("bot.paxyo", fake):
+            lines = await bot._referral_bonus_lines(
+                1, self._bonus_deposit(), "en", app,
+                first_name="Abebe", username="abebe",
+            )
+        self.assertEqual(lines, [])  # invitee side already notified
+        self.assertEqual(len(app.bot.sent), 1)
+        chat_id, text = app.bot.sent[0]
+        self.assertEqual(chat_id, 7)
+        self.assertIn("Abebe (@abebe)", text)
+        self.assertIn("2.00 ETB", text)
+        self.assertIn("20% bonus landed", text)
+        self.assertEqual(
+            fake.referral_bonus_acks,
+            [{"telegram_id": 1, "deposit_id": 9, "side": "referrer"}],
+        )
+
+    async def test_referrer_earnings_look_up_name_when_unknown(self):
+        fake = FakePaxyo()
+        app = FakeApp()
+        app.bot.chat = FakeChat("Chaltu", "chaltu")
+        with mock.patch("bot.paxyo", fake):
+            await bot._referral_bonus_lines(
+                1, self._bonus_deposit(), "en", app,
+            )
+        self.assertIn("Chaltu (@chaltu)", app.bot.sent[0][1])
+
+    async def test_referrer_earnings_without_name_stay_generic(self):
+        fake = FakePaxyo()
+        app = FakeApp()
+        app.bot.get_chat = mock.AsyncMock(
+            side_effect=Exception("no chat")
+        )
+        with mock.patch("bot.paxyo", fake):
+            await bot._referral_bonus_lines(
+                1, self._bonus_deposit(), "en", app,
+            )
+        self.assertIn("Your friend made their first deposit",
+                      app.bot.sent[0][1])
+
+    async def test_second_deposit_earns_the_referrer_nothing(self):
+        # The real rule is 20% of the FIRST deposit only: a later
+        # deposit pays no bonus, so the referrer hears nothing.
+        fake = FakePaxyo()
+        app = FakeApp()
+        deposit = self._bonus_deposit()
+        deposit["referral_bonus"] = {
+            "referrer": 7, "referrer_paid": False,
+            "referrer_notified": False, "referrer_bonus": 0.0,
+            "invitee_paid": False, "invitee_notified": False,
+            "invitee_bonus": 0.0,
+        }
+        with mock.patch("bot.paxyo", fake):
+            await bot._referral_bonus_lines(
+                1, deposit, "en", app,
+                first_name="Abebe", username="abebe",
+            )
+        self.assertEqual(app.bot.sent, [])
+        self.assertEqual(fake.referral_bonus_acks, [])
+
+    # --- Confirm double-tap ---
+
+    async def test_double_tap_confirm_processes_once(self):
+        fake = FakePaxyo(deposits=self._completed(3))
+        await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def slow_start(draft, user_id):
+            calls.append((draft, user_id))
+            started.set()
+            await release.wait()
+            return (
+                {"deposit_id": 5, "popup_token": "tok",
+                 "checkout_url": "https://checkout.chapa.co/x"},
+                None,
+            )
+
+        query1 = FakeQuery(f"confirm:{confirm_id}",
+                           message_text="Please confirm:")
+        query2 = FakeQuery(f"confirm:{confirm_id}",
+                           message_text="Please confirm:")
+        with mock.patch("bot.paxyo", fake), \
+             mock.patch("bot.start_deposit",
+                        new=mock.AsyncMock(side_effect=slow_start)):
+            task1 = asyncio.create_task(
+                bot.on_callback(FakeCallbackUpdate(query1), None)
+            )
+            await started.wait()
+            self.assertIn(confirm_id, bot.DEPOSIT_CONFIRM_IN_FLIGHT)
+            await bot.on_callback(FakeCallbackUpdate(query2), None)
+            # The second tap is told it is starting — never
+            # "Order cancelled" — and the deposit started once.
+            self.assertEqual(
+                query2.edited, ["Starting your deposit, one moment…"]
+            )
+            self.assertEqual(len(calls), 1)
+            release.set()
+            await task1
+        # The first tap showed the processing line, then the
+        # payment instructions; the flag is cleared afterwards.
+        self.assertEqual(
+            query1.edited[0], "Starting your deposit, one moment…"
+        )
+        self.assertIn("10.00 ETB", query1.edited[-1])
+        self.assertEqual(bot.DEPOSIT_CONFIRM_IN_FLIGHT, {})
+        self.assertEqual(bot.PENDING_DEPOSIT, {})
+        # A later tap on the same, now stale, card still says
+        # cancelled — the guard only covers a tap in flight.
+        query3 = FakeQuery(f"confirm:{confirm_id}",
+                           message_text="Please confirm:")
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query3), None)
+        self.assertEqual(query3.edited, ["Order cancelled."])
+
+    async def test_double_yes_while_starting_is_ignored(self):
+        fake = FakePaxyo(deposits=self._completed(3))
+        await self._send(
+            "I want to deposit 10",
+            intent_of("deposit", amount=10), paxyo=fake,
+        )
+        confirm_id = next(iter(bot.PENDING_DEPOSIT))
+        bot.DEPOSIT_CONFIRM_IN_FLIGHT[confirm_id] = 1
+        msg2 = FakeMessage()
+        update = FakeUpdate(msg2)
+        with mock.patch("bot.extract_intent",
+                        new=mock.AsyncMock(
+                            return_value=intent_of("unclear"))), \
+             mock.patch("bot.paxyo", fake), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, "yes")
+        self.assertEqual(
+            msg2.text_sent, ["Starting your deposit, one moment…"]
+        )
+        self.assertEqual(fake.deposits_created, [])
+
+    # --- failed-deposit wording ---
+
+    def test_failed_deposit_wording_is_exact(self):
+        exact = (
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo"
+        )
+        self.assertEqual(bot.t("deposit_failed", "en"), exact)
+        self.assertEqual(
+            bot.t("deposit_failed_check", "en", amount="10.00"), exact
+        )
+        self.assertEqual(
+            bot.t(
+                "deposit_failed_reason", "en",
+                amount="10.00", reason="Chapa said no",
+            ),
+            exact,
+        )
+
+    async def test_failed_deposit_recheck_shows_exact_text(self):
+        fake = FakePaxyo(deposits=[
+            {"id": 5, "amount": 10, "status": "failed"},
+        ])
+        bot.LAST_DEPOSIT[1] = 5
+        with mock.patch("bot.paxyo", fake):
+            text = await bot.deposit_status_text(1, "en")
+        self.assertEqual(
+            text,
+            "Your deposit failed. Please try again or use our "
+            "MiniApp to deposit and place your order here: "
+            "https://t.me/paxyo_bot\nFor support, contact us here. "
+            "t.me/paxyo",
+        )
 
 
 class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
@@ -5740,11 +6119,11 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
         )
         query = await self._confirm(fake)
         self.assertTrue(query.answered)
-        self.assertEqual(len(query.edited), 1)
-        self.assertIn("couldn't be sent", query.edited[0])
-        self.assertIn("Telegram", query.edited[0])
-        self.assertNotIn("not allowed for direct charges", query.edited[0])
-        webapp = self._webapp_button(query.edited_markups[0])
+        self.assertEqual(len(query.edited), 2)
+        self.assertIn("couldn't be sent", query.edited[-1])
+        self.assertIn("Telegram", query.edited[-1])
+        self.assertNotIn("not allowed for direct charges", query.edited[-1])
+        webapp = self._webapp_button(query.edited_markups[-1])
         self.assertIsNotNone(webapp)
         self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
         self.assertIn("10.00 ETB", webapp.text)
@@ -5758,8 +6137,8 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
             paxyo=fake,
         )
         query = await self._confirm(fake)
-        self.assertIn("couldn't be sent", query.edited[0])
-        webapp = self._webapp_button(query.edited_markups[0])
+        self.assertIn("couldn't be sent", query.edited[-1])
+        webapp = self._webapp_button(query.edited_markups[-1])
         self.assertIsNotNone(webapp)
         self.assertEqual(webapp.web_app.url, bot.DEPOSIT_WEBAPP_URL)
         self.assertEqual(fake.deposits_created, [])
@@ -5775,8 +6154,9 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
             paxyo=fake,
         )
         query = await self._confirm(fake)
-        self.assertEqual(query.edited, ["Amount below minimum (10 ETB)."])
-        self.assertIsNone(query.edited_markups[0])
+        self.assertEqual(query.edited, [
+            "Starting your deposit, one moment…", "Amount below minimum (10 ETB)."])
+        self.assertIsNone(query.edited_markups[-1])
         self.assertEqual(fake.deposits_created, [])
 
     async def test_yes_acceptance_502_offers_webapp(self):
@@ -5814,12 +6194,12 @@ class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
             paxyo=fake,
         )
         query = await self._confirm(fake)
-        self.assertIn("Tap below", query.edited[0])
-        self.assertNotIn("checkout.chapa.co", query.edited[0])
-        self.assertNotIn("Dial", query.edited[0])
+        self.assertIn("Tap below", query.edited[-1])
+        self.assertNotIn("checkout.chapa.co", query.edited[-1])
+        self.assertNotIn("Dial", query.edited[-1])
         self.assertEqual(len(fake.deposits_created), 1)
         self.assertEqual(fake.payment_starts, [("dep-1", "tok-dep-1")])
-        markup = query.edited_markups[0]
+        markup = query.edited_markups[-1]
         self.assertIsNotNone(markup)
         rows = markup.inline_keyboard
         self.assertEqual(len(rows), 1)
@@ -5970,7 +6350,7 @@ class TestDepositQr(unittest.IsolatedAsyncioTestCase):
         ):
             query = await self._confirm(fake)
         self.assertEqual(len(fake.deposits_created), 1)
-        self.assertIn("10.00 ETB", query.edited[0])
+        self.assertIn("10.00 ETB", query.edited[-1])
         self.assertEqual(query.message.photos_sent, [])
 
 
@@ -6109,9 +6489,9 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
 
     async def test_confirm_sends_checkout_button(self):
         query = await self._confirm(FakePaxyo())
-        self.assertIn("10.00 ETB", query.edited[0])
-        self.assertNotIn("checkout.chapa.co", query.edited[0])
-        pay = self._pay_button(query.edited_markups[0])
+        self.assertIn("10.00 ETB", query.edited[-1])
+        self.assertNotIn("checkout.chapa.co", query.edited[-1])
+        pay = self._pay_button(query.edited_markups[-1])
         self.assertIsNotNone(pay)
         self.assertEqual(pay.url, "https://checkout.chapa.co/pay/dep-1")
         # No QR photo any more: the checkout URL is a button
@@ -6165,8 +6545,8 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
         }
         query = await self._run_callback("retrydep", paxyo=FakePaxyo())
         self.assertTrue(query.answered)
-        self.assertEqual(len(query.edited), 1)
-        pay = self._pay_button(query.edited_markups[0])
+        self.assertEqual(len(query.edited), 2)
+        pay = self._pay_button(query.edited_markups[-1])
         self.assertIsNotNone(pay)
         self.assertEqual(pay.url, "https://checkout.chapa.co/pay/dep-1")
         self.assertEqual(bot.FAILED_DEPOSIT, {})
@@ -6179,8 +6559,8 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
         )
         # _confirm sends the sentence itself, then taps Confirm.
         query = await self._confirm(fake)
-        self.assertIn("couldn't be sent", query.edited[0])
-        markup = query.edited_markups[0]
+        self.assertIn("couldn't be sent", query.edited[-1])
+        markup = query.edited_markups[-1]
         # The fallback is still the old login-page Web App, not a
         # checkout button (there is no checkout URL to open) — one
         # button row only now, plus the retry row.
@@ -6201,8 +6581,8 @@ class TestDepositPopup(unittest.IsolatedAsyncioTestCase):
             payment_error_status=502,
         )
         query = await self._confirm(fake)
-        self.assertIn("couldn't be sent", query.edited[0])
-        rows = query.edited_markups[0].inline_keyboard
+        self.assertIn("couldn't be sent", query.edited[-1])
+        rows = query.edited_markups[-1].inline_keyboard
         self.assertEqual(rows[0][0].web_app.url, bot.DEPOSIT_WEBAPP_URL)
         self.assertEqual(fake.payment_starts, [])
         self.assertEqual(len(bot.FAILED_DEPOSIT), 1)
@@ -6282,11 +6662,11 @@ class TestDepositRedesign(unittest.IsolatedAsyncioTestCase):
             f"confirm:{confirm_id}", message_text="Please confirm:")
         with mock.patch("bot.paxyo", fake):
             await bot.on_callback(FakeCallbackUpdate(query), None)
-        self.assertNotIn("checkout.chapa.co", query.edited[0])
-        self.assertNotIn("checkout_url", query.edited[0])
-        self.assertNotIn("deposit-app.html", query.edited[0])
+        self.assertNotIn("checkout.chapa.co", query.edited[-1])
+        self.assertNotIn("checkout_url", query.edited[-1])
+        self.assertNotIn("deposit-app.html", query.edited[-1])
         # And the keyboard is exactly one URL button.
-        rows = query.edited_markups[0].inline_keyboard
+        rows = query.edited_markups[-1].inline_keyboard
         self.assertEqual(len(rows), 1)
         button = rows[0][0]
         self.assertIsNone(getattr(button, "web_app", None))
@@ -6616,7 +6996,10 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ['It failed, Insufficient balance. You were not charged. Try again, or deposit at paxyo.et.'],
+            ["Your deposit failed. Please try again or use our MiniApp "
+             "to deposit and place your order here: "
+             "https://t.me/paxyo_bot\n"
+             "For support, contact us here. t.me/paxyo"],
         )
 
     async def test_recheck_failed_without_reason_is_generic(self):
@@ -6627,12 +7010,14 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             msg.text_sent,
-            ["Your deposit failed. You were not charged. Try again, "
-             "or deposit at paxyo.et."],
+            ["Your deposit failed. Please try again or use our MiniApp "
+             "to deposit and place your order here: "
+             "https://t.me/paxyo_bot\n"
+             "For support, contact us here. t.me/paxyo"],
         )
 
     async def test_no_deposits(self):
-        fake = FakePaxyo()
+        fake = FakePaxyo(deposits=[])
         msg = await self._send(
             "did my deposit go through?", intent_of("deposit_status"), paxyo=fake
         )
@@ -6648,7 +7033,10 @@ class TestDepositStatus(unittest.IsolatedAsyncioTestCase):
         # help. (There is no "I paid" button any more — 17 Nov
         # 2026 — but the text recheck stays, and the credit watcher
         # tells the user without being asked at all.)
-        fake = FakePaxyo(deposits=[self._deposit("pending")])
+        fake = FakePaxyo(deposits=[self._deposit("pending")] + [
+            self._deposit("completed", dep_id=f"dep-old-{i}")
+            for i in range(1, 4)
+        ])
         await self._send(
             "let me deposit 10 br by teleirr and my phone number is 099387383",
             intent_of("deposit", amount=10, method="telebirr", phone="099387383"),
@@ -7494,7 +7882,7 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
                        phone="099387383")),
         ])
         query = await self._confirm(fake)
-        self.assertIn("100.00 ETB", query.edited[0])
+        self.assertIn("100.00 ETB", query.edited[-1])
         self.assertEqual(len(fake.deposits_created), 1)
         self.assertEqual(fake.deposits_created[0]["promo_code"], "PAXYO20")
         # The code is spent on this deposit: remembered no longer
@@ -7530,7 +7918,8 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
         dep.update({"id": "dep-1", "amount": 100, "status": "completed"})
         fake = FakePaxyo(
             promo_codes=self.VALID,
-            deposits=[dep],
+            deposits=[dep, dict(dep, id="dep-old-1"),
+                      dict(dep, id="dep-old-2")],
             promo_redeem_result={
                 "ok": True, "bonus_etb": 20.0, "percent": 20,
                 "code": "PAXYO20", "deposit_id": "dep-1",
@@ -7585,7 +7974,9 @@ class TestPromoCodes(unittest.IsolatedAsyncioTestCase):
         dep = dict(FakePaxyo.DEPOSIT)
         dep.update({"id": "dep-1", "amount": 100, "status": "completed"})
         fake = FakePaxyo(
-            promo_codes=self.VALID, deposits=[dep],
+            promo_codes=self.VALID,
+            deposits=[dep, dict(dep, id="dep-old-1"),
+                      dict(dep, id="dep-old-2")],
             promo_redeem_none=True,
         )
         msg, fake = await self._turns([
@@ -7959,7 +8350,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         self.assertIn("You're in!", msg.text_sent[0])
         self.assertEqual(msg.bot.sent, [(
             self.REFERRER,
-            "Someone joined Paxyo with your invite code! When they "
+            "Test (@testuser) joined Paxyo with your invite code! When they "
             "make their first deposit, you both get a 20% bonus.",
         )])
 
@@ -8008,9 +8399,45 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(msg.text_sent), 1)  # greeting only
         self.assertEqual(context.bot.sent, [(
             self.REFERRER,
-            "Someone joined Paxyo with your invite code! When they "
+            "Test (@testuser) joined Paxyo with your invite code! When they "
             "make their first deposit, you both get a 20% bonus.",
         )])
+
+    # --- invite message copy button ---
+
+    async def test_invite_message_carries_copy_code_button(self):
+        # One-tap copy for the invite CODE (19 Nov 2026): the link
+        # and the wording are exactly as before, with a copy button
+        # under the message that copies the code itself.
+        msg, _ = await self._turns(
+            [("my invite link", intent_of("invite"))])
+        idx = next(
+            i for i, text in enumerate(msg.text_sent)
+            if "Invite your friends" in text
+        )
+        code = bot.user_invite_code(1)
+        self.assertIn(
+            f"https://t.me/paxorder_bot?start={code}",
+            msg.text_sent[idx])
+        self.assertIn(
+            f"When your friend makes their first deposit with invite "
+            f"code {code}, they get a 20% bonus",
+            msg.text_sent[idx])
+        markup = msg.markups[idx]
+        self.assertIsNotNone(markup)
+        rows = markup.inline_keyboard
+        self.assertEqual(len(rows), 1)
+        button = rows[0][0]
+        self.assertEqual(button.text, "📋 Copy invite code")
+        self.assertIsNotNone(button.copy_text)
+        self.assertEqual(button.copy_text.text, code)
+        self.assertIsNone(button.callback_data)
+
+    def test_invite_copy_keyboard_amharic_label(self):
+        markup = bot.invite_link_keyboard("REF1AB", "am")
+        button = markup.inline_keyboard[0][0]
+        self.assertEqual(button.copy_text.text, "REF1AB")
+        self.assertIn("ቅዳ", button.text)
 
     async def test_deep_link_shared_code_notifies_nobody(self):
         fake = FakePaxyo()
@@ -8031,7 +8458,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
             'Your 20% referral bonus landed, 20.00 ETB added to your balance.', text)
         self.assertEqual(app.bot.sent, [(
             self.REFERRER,
-            "Your friend made their first deposit, your 20% bonus "
+            "Test (@testuser) made their first deposit, your 20% bonus "
             "landed: 20.00 ETB.",
         )])
         self.assertEqual(fake.referral_bonus_acks, [
@@ -8086,7 +8513,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
             'Your 20% referral bonus landed, 20.00 ETB added to your balance.', text)
         self.assertEqual(app.bot.sent, [(
             self.REFERRER,
-            "Your friend made their first deposit, your 20% bonus "
+            "Test (@testuser) made their first deposit, your 20% bonus "
             "landed: 20.00 ETB.",
         )])
         self.assertEqual(fake.referral_bonus_acks, [])
@@ -8099,7 +8526,7 @@ class TestReferralNotifications(unittest.IsolatedAsyncioTestCase):
         await self._recheck(fake, app=app)
         self.assertEqual(app.bot.sent, [(
             self.REFERRER,
-            "ጓደኛህ የመጀመሪያ depositውን አድርጓል, የ20% bonusህ "
+            "Test (@testuser) የመጀመሪያ depositውን አድርጓል, የ20% bonusህ "
             "ደርሷል: 20.00 ETB።",
         )])
 
@@ -27890,8 +28317,8 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         )
         query = await self._confirm_deposit(fake)
         self.assertTrue(query.answered)
-        self.assertEqual(len(query.edited), 1)
-        rows = query.edited_markups[0].inline_keyboard
+        self.assertEqual(len(query.edited), 2)
+        rows = query.edited_markups[-1].inline_keyboard
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1][0].callback_data, "retrydep")
         self.assertIn("Try again", rows[1][0].text)
@@ -27906,8 +28333,8 @@ class TestIdeasBatch(unittest.IsolatedAsyncioTestCase):
         fake = FakePaxyo()
         query = await self._run_callback("retrydep", paxyo=fake)
         self.assertTrue(query.answered)
-        self.assertEqual(len(query.edited), 1)
-        self.assertIn("10.00", query.edited[0])
+        self.assertEqual(len(query.edited), 2)
+        self.assertIn("10.00", query.edited[-1])
         self.assertEqual(len(fake.deposits_created), 1)
         self.assertEqual(fake.deposits_created[0]["amount"], 10)
         self.assertIsNone(fake.deposits_created[0]["method"])
@@ -33670,7 +34097,7 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
             await bot.on_callback(FakeCallbackUpdate(query2), None)
         self.assertEqual(len(paxyo.deposits_created), 1)
         self.assertEqual(paxyo.deposits_created[0]["amount"], 32.0)
-        self.assertIn("32.00 ETB", query2.edited[0])
+        self.assertIn("32.00 ETB", query2.edited[-1])
 
     async def test_confirm_still_places_after_warning(self):
         paxyo = FakePaxyo(balance=10.0, traits=self._usual_traits())
