@@ -12,6 +12,9 @@ primary_region = "iad"
 
 [processes]
   app = "python bot.py"
+  # The worker logs a truncated error body on a tick HTTP failure
+  # (20 Nov 2026 diagnostic: the hourly tick gets HTTP 403 from a
+  # layer in front of bot.php — the body tells which layer).
   worker = "python refill_worker.py --loop"
 
 [env]
