@@ -1593,6 +1593,64 @@ TEXT = {
         "am": "Quantity ተቀይሯል: {quantity}።",
         "en": "Quantity updated: {quantity}.",
     },
+    # Editable Confirm card (19 Nov 2026): after a Confirm card is
+    # shown, the user can change the link, quantity, amount, runs,
+    # interval or service by typing. A missing value is asked for
+    # in one short question; the reply to it is the new value.
+    "edit_ask_link": {
+        "am": "የትኛውን link ልጠቀም? አዲሱን link ይላኩ።",
+        "en": "Which link should I use instead? Send the new link.",
+    },
+    "edit_ask_quantity": {
+        "am": "ስንት ይሁን? አዲሱን ቁጥር ይላኩ።",
+        "en": "How many should it be? Send the new quantity.",
+    },
+    "edit_ask_per_run": {
+        "am": "በእያንዳንዱ ጊዜ ስንት ይሁን? የአንድ ጊዜውን ቁጥር ይላኩ።",
+        "en": "How many per run? Send the new amount for each drop.",
+    },
+    "edit_ask_runs": {
+        "am": "ስንት ጊዜ መድገም አለበት? አዲሱን ቁጥር ይላኩ።",
+        "en": "How many times should it repeat? Send the new number of runs.",
+    },
+    "edit_ask_interval": {
+        "am": "በየ ስንት ሰዓት? አዲሱን ጊዜ ይላኩ፣ ለምሳሌ በየ 2 ሰዓቱ።",
+        "en": "How often? Send the new gap, for example every 2 hours.",
+    },
+    "edit_ask_amount": {
+        "am": "በጠቅላላ ስንት ETB ይሁን? አዲሱን መጠን ይላኩ።",
+        "en": "How much should it cost in total? Send the new amount in ETB.",
+    },
+    "edit_ask_service": {
+        "am": "የትኛውን service ልጠቀም? የአገልግሎቱን ስም ወይም ቁጥር ይላኩ።",
+        "en": "Which service should I use instead? Send the service name or number.",
+    },
+    "edit_ask_delay": {
+        "am": "መቼ ይሰራ? አዲሱን ጊዜ ይላኩ፣ ለምሳሌ ከ 3 ሰዓት በኋላ።",
+        "en": "When should it run? Send the new delay, for example in 3 hours.",
+    },
+    "edit_note": {
+        "am": "ተቀይሯል: {what}።",
+        "en": "Updated: {what}.",
+    },
+    "edit_drip_split": {
+        "am": "ይህ ቁጥር ወደ {runs} እኩል ጊዜ አይከፈልም። እኩል የሚከፈል ቁጥር ይላኩ፣ ወይም በእያንዳንዱ ጊዜ ስንት እንደሆነ ይንገሩኝ።",
+        "en": "That total doesn't split evenly into {runs} equal runs. Send a total that divides evenly, or tell me how many per run.",
+    },
+    "edit_service_not_found": {
+        "am": "ይህን service አላገኘሁም። ስሙን ወይም ቁጥሩን እንደገና ይላኩ።",
+        "en": "I couldn't find that service. Send its name or number again.",
+    },
+    # A repeat field on a one-time order: there is nothing to edit,
+    # so say so and name the phrase that turns it into a repeat.
+    "edit_no_interval": {
+        "am": "ይህ አንድ ጊዜ የሚሰራ order ነው፣ ስለዚህ የሚደገምበት ጊዜ የለውም። እንዲደገም \"repeat it every 2 hours\" ይበሉ።",
+        "en": "This is a one-time order, so there's no repeat gap to change. Say \"repeat it every 2 hours\" to make it repeat instead.",
+    },
+    "edit_no_runs": {
+        "am": "ይህ አንድ ጊዜ የሚሰራ order ነው፣ ስለዚህ ጊዜ የለውም። እንዲደገም \"repeat it 10 times every 1 hour\" ይበሉ።",
+        "en": "This is a one-time order, so there are no runs to change. Say \"repeat it 10 times every 1 hour\" to make it repeat instead.",
+    },
     "already_placed": {
         "am": "Orderዎ አስቀድሞ ተልኳል — አሁን መቀየር አልችልም።",
         "en": "That order is already sent — I can't change it now.",
@@ -10313,6 +10371,13 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
 # for the offline self-test) never opens a network client.
 paxyo = None
 PENDING = {}  # confirm_id -> {user_id, service, link, quantity, total}
+# Editable Confirm card (19 Nov 2026): telegram_id -> {"field",
+# "confirm_id", "store"} while the bot is waiting for the new value
+# of one field ("change the link" with no URL yet). One-shot: the
+# very next message is read as the value, a cancel drops it, and a
+# stale entry (its card already confirmed or cancelled) is dropped
+# unread. In-memory only, like PENDING itself.
+CARD_EDIT_PENDING = {}
 # A named service that turned out unusable (not found / disabled /
 # blacklisted): token -> {"user_id", "merged"} of the order being
 # built, so the one-tap "Use the fastest one" button can resume it
@@ -14498,6 +14563,7 @@ def clear_order_state(user_id: int, cancelled=None):
     conversation history after the cancel."""
     PARTIAL.pop(user_id, None)
     PARTIAL_ACTIVITY.pop(user_id, None)
+    CARD_EDIT_PENDING.pop(user_id, None)
     FRIDAY_LINK.pop(user_id, None)
     BUDGET_OPTIONS.pop(user_id, None)
     for token in [
@@ -24263,19 +24329,13 @@ async def handle_delayed_order_text(update, text, intent, lang, voice=False):
         "run_at": run_at,
         "idempotency_key": "delay-" + uuid.uuid4().hex[:16],
     }
-    lines = [
-        t("confirm_title", lang),
-        "",
-        f"{short_service_name(service.get('name'))}",
-        f"🔢 {quantity}",
-        f"🧾 {format_money(total)} ETB",
-        f"🔗 {merged['link']}",
-        "",
-        t("delayed_confirm_note", lang, time=format_eat_run_at(run_at)),
-    ]
     # Confirm card: always text — it carries the Confirm buttons.
     await reply_message(
-        update.message, "\n".join(lines), lang,
+        update.message,
+        _delayed_confirm_text(
+            lang, service, quantity, total, merged["link"], run_at,
+        ),
+        lang,
         reply_markup=confirm_keyboard(confirm_id),
     )
 
@@ -27192,6 +27252,844 @@ async def try_story_post_correction(update, text, lang, voice=False):
     return False
 
 
+# ------------------------------------------------ editable Confirm card ----
+# 19 Nov 2026 (live case): after the bot showed a correct drip-feed
+# Confirm card, "Lets change the link" twice got "I did not
+# understand" — the classifier never called it change_order, and
+# handle_change_order only knew quantity. Edits are now caught
+# locally, before the classifier, whenever a Confirm card is
+# pending: the same pending entry is updated in place (same
+# confirm_id, never a second card), the price is re-derived from
+# the service rate, affordability is re-checked on the new total,
+# and the full updated card is re-shown with Confirm/Cancel.
+# Works on normal PENDING cards (drip plans live there too) and on
+# PENDING_DELAYED cards. PENDING_RECURRING holds no cards any more
+# (nothing creates one — the drip flow writes to PENDING), so edits
+# do not cover it. PENDING_BATCH / PENDING_BUNDLE / PENDING_REFILL
+# cards are not editable either: a batch, bundle or refill is a
+# different shape, and the user cancels it and starts again.
+
+_EDIT_VERBS = (
+    "change", "edit", "update", "switch", "make it", "set it",
+)
+_EDIT_VERBS_GEEZ = ("ቀይር", "ለውጥ")
+_EDIT_ASK_KEYS = {
+    "link": "edit_ask_link",
+    "quantity": "edit_ask_quantity",
+    "per_run": "edit_ask_per_run",
+    "runs": "edit_ask_runs",
+    "interval": "edit_ask_interval",
+    "amount": "edit_ask_amount",
+    "service": "edit_ask_service",
+    "delay": "edit_ask_delay",
+}
+_EDIT_FIELD_WORDS = {
+    "link": ("link", "ሊንክ"),
+    "runs": ("run", "runs", "times", "repeat"),
+    "interval": ("every", "each", "gap", "interval", "ሰዓት"),
+    "per_run": (
+        "per run", "per drop", "each time", "each run",
+        "every time", "per time",
+    ),
+    "amount": ("amount", "total", "cost", "price", "birr", "etb",
+               "spend", "ዋጋ", "መጠን", "ብር"),
+    "service": ("service", "አገልግሎት"),
+    "delay": ("delay", "schedule"),
+    "quantity": (
+        "quantity", "views", "followers", "likes", "comments",
+        "subscribers", "members", "shares", "reactions",
+        "ቁጥር", "ብዛት",
+    ),
+}
+
+
+def _edit_has_word(s: str, words) -> bool:
+    """True when any word/phrase in `words` appears in `s` as a
+    whole word (multi-word phrases by substring)."""
+    for word in words:
+        if " " in word:
+            if word in s:
+                return True
+        elif re.search(rf"\b{re.escape(word)}\b", s):
+            return True
+    return False
+
+
+def _edit_first_number(text):
+    """First plain number in the text, or the last number-word
+    value ("two thousand" -> 2000), or None."""
+    for match in re.finditer(r"\d[\d,]*", text or ""):
+        try:
+            return int(match.group(0).replace(",", ""))
+        except ValueError:
+            continue
+    values = _number_word_values(text)
+    return values[-1] if values else None
+
+
+def _edit_quantity_value(text):
+    """The new quantity in an edit message, or None. "change the
+    quantity from 5,000 to 2,000" means 2,000 (the last number),
+    not 5,000 — the first-number rule would take the old value."""
+    match = re.search(
+        r"\bfrom\b\s*\d[\d,]*\s*\bto\b\s*(\d[\d,]*)",
+        (text or "").lower(),
+    )
+    if match:
+        try:
+            return int(match.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    qty = quantity_from_text(text)
+    if qty is not None:
+        return qty
+    return _edit_first_number(text)
+
+
+def _edit_runs_value(text):
+    """The new run count in an edit message, or None. "make it 5
+    runs" and "change runs to 5" both read as 5."""
+    runs = parse_runs(text)
+    if runs is not None:
+        return runs
+    match = re.search(
+        r"(?:runs?|times|repeat)\D{0,12}(\d+)", (text or "").lower()
+    )
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def parse_card_edit(text, pending=None, intent=None, store="pending"):
+    """A Confirm-card edit in plain words, or None when the message
+    is not one. Returns {"field", "value"}: "value" is the new
+    value, or None when the field is named but the value is missing
+    (the caller then asks for it in one short question). Fields:
+    link, quantity, per_run, runs, interval, amount, service, and
+    delay (delayed cards only). Pure: no state, no network.
+
+    A bare link pasted on its own while a card is pending counts
+    as a link edit when it differs from the card's link. On a drip
+    card, a bare interval ("every 2 hours"), run count ("5 runs")
+    or per-run amount ("200 views each time") also counts — there
+    is nothing else those phrases can mean with a drip card open.
+    """
+    if not text:
+        return None
+    s = " ".join(str(text).strip().lower().split())
+    links = extract_links(text)
+    has_edit_word = (
+        any(w in s for w in _EDIT_VERBS)
+        or any(w in s for w in _EDIT_VERBS_GEEZ)
+        or (
+            "instead" in s
+            and (
+                re.search(r"\d", s)
+                or _edit_has_word(s, _EDIT_FIELD_WORDS["quantity"])
+                or _edit_has_word(s, _EDIT_FIELD_WORDS["link"])
+            )
+        )
+    )
+    if not has_edit_word:
+        # A bare new link, or a bare drip field, with a card open.
+        if pending is not None:
+            stripped = (text or "").strip().rstrip(".,!?")
+            if (
+                links
+                and re.fullmatch(r"https?://\S+|t\.me/\S+", stripped)
+                and links[0] != (pending.get("link") or "")
+            ):
+                return {"field": "link", "value": links[0]}
+            if pending.get("drip"):
+                interval = parse_interval_minutes(text)
+                if interval is not None and (
+                    "every" in s or "each" in s
+                    or "hourly" in s or "daily" in s
+                ):
+                    return {"field": "interval", "value": interval}
+                runs = parse_runs(text)
+                if runs is not None:
+                    return {"field": "runs", "value": runs}
+                if _edit_has_word(s, _EDIT_FIELD_WORDS["per_run"]):
+                    value = _edit_quantity_value(text)
+                    if value is not None:
+                        return {"field": "per_run", "value": value}
+        return None
+    intent = intent or {}
+
+    def _intent_value(key):
+        value = intent.get(key)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    if _edit_has_word(s, _EDIT_FIELD_WORDS["link"]) or (
+        links
+        and not any(
+            _edit_has_word(s, _EDIT_FIELD_WORDS[f])
+            for f in ("runs", "interval", "per_run", "amount",
+                      "service", "delay", "quantity")
+        )
+    ):
+        value = links[0] if links else None
+        if value is None and intent.get("link"):
+            value = intent.get("link")
+        return {"field": "link", "value": value}
+    if _edit_has_word(s, _EDIT_FIELD_WORDS["runs"]):
+        value = _edit_runs_value(text)
+        return {"field": "runs", "value": value}
+    if _edit_has_word(s, _EDIT_FIELD_WORDS["per_run"]):
+        value = _edit_quantity_value(text)
+        if value is None:
+            value = _intent_value("quantity")
+        return {"field": "per_run", "value": value}
+    if _edit_has_word(s, _EDIT_FIELD_WORDS["interval"]):
+        value = parse_interval_minutes(text)
+        return {"field": "interval", "value": value}
+    if _edit_has_word(s, _EDIT_FIELD_WORDS["amount"]):
+        value = parse_money_amount(text)
+        if value is None:
+            value = _edit_first_number(text)
+        if value is None:
+            value = _intent_value("amount")
+        return {"field": "amount", "value": value}
+    if _edit_has_word(s, _EDIT_FIELD_WORDS["service"]):
+        service_id = extract_service_id(text)
+        if service_id is None:
+            service_id = _intent_value("service_id")
+        if service_id is None:
+            # "change service to 1002": the id sits after "to",
+            # which extract_service_id does not read.
+            match = re.search(
+                r"service\s+(?:to\s+)?#?\s*(\d+)", s
+            )
+            if match:
+                try:
+                    service_id = int(match.group(1))
+                except ValueError:
+                    service_id = None
+        if service_id is not None:
+            return {"field": "service", "value": {"service_id": service_id}}
+        local = local_intent(text)
+        if local.get("platform") or local.get("service_hint"):
+            return {"field": "service", "value": {
+                "platform": local.get("platform"),
+                "service_hint": local.get("service_hint"),
+            }}
+        return {"field": "service", "value": None}
+    if store == "delayed" and _edit_has_word(s, _EDIT_FIELD_WORDS["delay"]):
+        value = parse_delay_minutes(text)
+        return {"field": "delay", "value": value}
+    if (
+        _edit_has_word(s, _EDIT_FIELD_WORDS["quantity"])
+        or "make it" in s or "change it" in s or "instead" in s
+    ):
+        value = _edit_quantity_value(text)
+        if value is None:
+            value = _intent_value("quantity")
+        return {"field": "quantity", "value": value}
+    return None
+
+
+def _card_edit_value_from_text(field, text, pending=None):
+    """The new value for `field` from a bare reply to the bot's
+    one-line ask ("Which link...?" -> the pasted link, "How
+    many...?" -> the number), or None when the reply carries no
+    value for that field. Pure."""
+    if field == "link":
+        links = extract_links(text)
+        if links:
+            return links[0]
+        return _validate_link((text or "").strip())
+    if field in ("quantity", "per_run"):
+        return _edit_quantity_value(text)
+    if field == "runs":
+        runs = parse_runs(text)
+        if runs is not None:
+            return runs
+        return _edit_first_number(text)
+    if field == "interval":
+        value = parse_interval_minutes(text)
+        if value is not None:
+            return value
+        return _parse_duration_minutes(text)
+    if field == "amount":
+        value = parse_money_amount(text)
+        if value is not None:
+            return value
+        return _edit_first_number(text)
+    if field == "service":
+        service_id = extract_service_id(text)
+        if service_id is None:
+            match = re.search(
+                r"service\s+(?:to\s+)?#?\s*(\d+)",
+                (text or "").strip().lower(),
+            )
+            if match:
+                try:
+                    service_id = int(match.group(1))
+                except ValueError:
+                    service_id = None
+        if service_id is not None:
+            return {"service_id": service_id}
+        local = local_intent(text)
+        if local.get("platform") or local.get("service_hint"):
+            return {
+                "platform": local.get("platform"),
+                "service_hint": local.get("service_hint"),
+            }
+        return None
+    if field == "delay":
+        return parse_delay_minutes(text)
+    return None
+
+
+def _pending_card_for_user(user_id: int):
+    """(confirm_id, pending, store) of the user's Confirm card, or
+    (None, None, None). A normal/drip card (PENDING) wins over a
+    delayed one when both are open — the normal card is the one
+    the user is most likely editing."""
+    confirm_id, pending = pending_for_user(user_id)
+    if pending is not None:
+        return confirm_id, pending, "pending"
+    delay_id, delayed = pending_delayed_for_user(user_id)
+    if delayed is not None:
+        return delay_id, delayed, "delayed"
+    return None, None, None
+
+
+def _stored_edit_card(user_id: int):
+    """(confirm_id, pending, store, field) of the card edit the bot
+    is waiting on a value for, or (None, None, None, None). A stale
+    entry (its card already confirmed or cancelled) is dropped
+    unread, so it can never eat a later message."""
+    entry = CARD_EDIT_PENDING.get(user_id)
+    if not entry:
+        return None, None, None, None
+    store = entry.get("store")
+    table = PENDING if store == "pending" else PENDING_DELAYED
+    pending = table.get(entry.get("confirm_id"))
+    if pending is None or pending.get("user_id") != user_id:
+        CARD_EDIT_PENDING.pop(user_id, None)
+        return None, None, None, None
+    return entry.get("confirm_id"), pending, store, entry.get("field")
+
+
+def _recompute_drip(pending, service=None, *, per_run=None, runs=None,
+                    interval=None, total=None):
+    """A drip plan after one edit, or (None, error). Error is one
+    of "bad_quantity" (per-run below the service minimum, above
+    its maximum, or not a multiple of 10), "bad_runs" (fewer than
+    2), "bad_interval" (shorter than 30 minutes), "bad_split" (a
+    total that does not split evenly into equal runs), or
+    "not_drip" (the card is not a drip plan). Returns
+    ({"per_run_qty", "runs", "interval", "quantity", "total"},
+    None). Pure: the pending dict is untouched."""
+    drip = dict((pending or {}).get("drip") or {})
+    if not drip:
+        return None, "not_drip"
+    service = service if service is not None else (pending or {}).get("service") or {}
+    try:
+        cur_per = int(drip.get("per_run_qty") or 0)
+        cur_runs = int(drip.get("runs") or 0)
+        cur_interval = int(drip.get("interval") or 0)
+    except (TypeError, ValueError):
+        return None, "bad_quantity"
+    if per_run is not None:
+        cur_per = int(per_run)
+    if runs is not None:
+        cur_runs = int(runs)
+    if interval is not None:
+        cur_interval = int(interval)
+    if total is not None:
+        total = int(total)
+        if total <= 0 or cur_runs < 1 or total % cur_runs != 0:
+            return None, "bad_split"
+        cur_per = total // cur_runs
+    if cur_runs < 2:
+        return None, "bad_runs"
+    if cur_interval < MIN_RECURRING_MINUTES:
+        return None, "bad_interval"
+    if validate_quantity(cur_per, service) is not None:
+        return None, "bad_quantity"
+    total_qty = cur_per * cur_runs
+    total_cost = estimated_total_etb(
+        float(service.get("rate_etb_per_1000") or 0), total_qty
+    )
+    return {
+        "per_run_qty": cur_per, "runs": cur_runs,
+        "interval": cur_interval, "quantity": total_qty,
+        "total": total_cost,
+    }, None
+
+
+def _drip_card_line(pending, lang):
+    """The drip line for a re-shown drip card, in the shape the
+    original card used: runs, per-run quantity, interval and the
+    last drop."""
+    drip = pending.get("drip") or {}
+    return (
+        f"Drip-feed: {drip.get('runs')} runs of "
+        f"{int(drip.get('per_run_qty') or 0):,} every "
+        f"{format_interval(drip.get('interval'))}. "
+        f"Last drop {_drip_end_text(drip.get('runs'), drip.get('interval'))}."
+    )
+
+
+def _delayed_confirm_text(lang, service, quantity, total, link, run_at,
+                          note=None):
+    """The Confirm card text for a delayed order, with an optional
+    one-line note on top. Same lines handle_delayed_order_text
+    builds, so an edited delayed card reads exactly like the
+    original one."""
+    lines = [t("confirm_title", lang), ""]
+    if note:
+        lines.append(note)
+        lines.append("")
+    lines.extend([
+        f"{short_service_name(service.get('name'))}",
+        f"🔢 {quantity}",
+        f"🧾 {format_money(total)} ETB",
+        f"🔗 {link}",
+        "",
+        t("delayed_confirm_note", lang, time=format_eat_run_at(run_at)),
+    ])
+    return _strip_dashes("\n".join(lines))
+
+
+async def _reshow_card(update, confirm_id, pending, store, lang, note=None,
+                       voice=False):
+    """Drop the stale card and re-show the (edited or unchanged)
+    Confirm card under the SAME confirm_id, with Confirm/Cancel.
+    A drip card always carries its drip line; a delayed card is
+    re-built in its own shape."""
+    await drop_pending_card(update, pending)
+    service = pending.get("service") or {}
+    if store == "delayed":
+        text = _delayed_confirm_text(
+            lang, service, pending["quantity"], pending["total"],
+            pending["link"], pending["run_at"], note=note,
+        )
+    else:
+        if pending.get("drip"):
+            line = _drip_card_line(pending, lang)
+            note = f"{note}\n{line}" if note else line
+        text = confirm_card_text(
+            lang, service, pending["quantity"], pending["total"],
+            pending["link"], note=note,
+            full_name=pending.get("full_name", False),
+        )
+    sent = await reply_message(
+        update.message, text, lang,
+        reply_markup=confirm_keyboard(confirm_id),
+    )
+    _remember_card_message(pending, update.message, sent)
+    return text
+
+
+async def apply_card_edit(update, user_id, confirm_id, pending, store,
+                          edit, lang, text="", voice=False):
+    """Apply one parsed edit to a pending Confirm card IN PLACE
+    (same confirm_id, same entry — never a second pending confirm)
+    and re-show the full updated card. Returns True when the edit
+    was handled with a reply. Nothing is placed: Confirm after an
+    edit places the UPDATED order, Cancel still cancels it. The
+    price is re-derived from the service rate, and affordability
+    is re-checked on the new total (a shortfall warns first, like
+    the original card, and the card is still shown). A refused
+    edit leaves the card unchanged."""
+    service = pending.get("service") or {}
+    field = edit["field"]
+    value = edit.get("value")
+    drip = dict(pending.get("drip") or {}) if store == "pending" else {}
+    note = None
+    if field == "link":
+        # Re-validated the same way the original order flow does:
+        # a link from another platform never reaches the card; a
+        # wrong link TYPE is the placement backstop's job
+        # (place_pending_order refuses it at Confirm with the
+        # right-link question), so it is not refused here.
+        error = validate_order_link(value, service)
+        if error == "platform":
+            platform, _hint = _platform_hint_of_service(service)
+            await reply_message(
+                update.message,
+                t(
+                    "platform_mismatch", lang,
+                    link_platform=platform_from_link(value),
+                    platform=(
+                        (pending.get("platform") or "").strip().lower()
+                        or platform or ""
+                    ),
+                ),
+                lang, voice=voice,
+            )
+            return True
+        pending["link"] = value
+        note = t("edit_note", lang, what="link")
+    elif field in ("quantity", "per_run", "amount"):
+        if field == "amount":
+            # What the amount buys, rounded DOWN to a multiple of
+            # 10. Rounded first: float division makes exactly
+            # 84 ETB at 42 ETB/1000 read as 1999.9999, which the
+            # floor would short-change to 1990.
+            rate = float(service.get("rate_etb_per_1000") or 0)
+            if rate <= 0:
+                new_qty = None
+            else:
+                new_qty = (int(round(float(value) / (rate / 1000))) // 10) * 10
+            if new_qty <= 0:
+                new_qty = None
+        else:
+            new_qty = int(value)
+        if new_qty is None:
+            await reply_message(
+                update.message,
+                t(
+                    "bad_quantity", lang,
+                    service=short_service_name(service.get("name")),
+                    min=service.get("min"), max=service.get("max"),
+                ),
+                lang, voice=voice,
+            )
+            return True
+        if drip:
+            if field == "per_run":
+                vals, err = _recompute_drip(pending, per_run=new_qty)
+            else:
+                vals, err = _recompute_drip(pending, total=new_qty)
+            if err == "bad_split":
+                await reply_message(
+                    update.message,
+                    t("edit_drip_split", lang, runs=drip.get("runs")),
+                    lang, voice=voice,
+                )
+                return True
+            if err is not None:
+                await reply_message(
+                    update.message,
+                    t(
+                        "bad_quantity", lang,
+                        service=short_service_name(service.get("name")),
+                        min=service.get("min"), max=service.get("max"),
+                    ),
+                    lang, voice=voice,
+                )
+                return True
+            pending["drip"].update({
+                "per_run_qty": vals["per_run_qty"],
+                "runs": vals["runs"],
+                "interval": vals["interval"],
+            })
+            pending["quantity"] = vals["quantity"]
+            pending["total"] = vals["total"]
+        else:
+            if validate_quantity(new_qty, service) is not None:
+                await reply_message(
+                    update.message,
+                    t(
+                        "bad_quantity", lang,
+                        service=short_service_name(service.get("name")),
+                        min=service.get("min"), max=service.get("max"),
+                    ),
+                    lang, voice=voice,
+                )
+                return True
+            pending["quantity"] = new_qty
+            pending["total"] = estimated_total_etb(
+                float(service.get("rate_etb_per_1000") or 0), new_qty
+            )
+        note = t("change_note", lang, quantity=pending["quantity"])
+    elif field == "runs":
+        if not drip:
+            await reply_message(
+                update.message, t("edit_no_runs", lang), lang, voice=voice,
+            )
+            return True
+        vals, err = _recompute_drip(pending, runs=int(value))
+        if err == "bad_runs":
+            CARD_EDIT_PENDING[user_id] = {
+                "field": "runs", "confirm_id": confirm_id, "store": store,
+            }
+            await reply_message(
+                update.message, t("ask_runs", lang), lang, voice=voice,
+            )
+            return True
+        if err is not None:
+            await reply_message(
+                update.message,
+                t(
+                    "bad_quantity", lang,
+                    service=short_service_name(service.get("name")),
+                    min=service.get("min"), max=service.get("max"),
+                ),
+                lang, voice=voice,
+            )
+            return True
+        pending["drip"].update({
+            "per_run_qty": vals["per_run_qty"],
+            "runs": vals["runs"],
+            "interval": vals["interval"],
+        })
+        pending["quantity"] = vals["quantity"]
+        pending["total"] = vals["total"]
+        note = t("edit_note", lang, what=f"{vals['runs']} runs")
+    elif field == "interval":
+        if not drip:
+            await reply_message(
+                update.message, t("edit_no_interval", lang),
+                lang, voice=voice,
+            )
+            return True
+        vals, err = _recompute_drip(pending, interval=int(value))
+        if err == "bad_interval":
+            CARD_EDIT_PENDING[user_id] = {
+                "field": "interval", "confirm_id": confirm_id,
+                "store": store,
+            }
+            await reply_message(
+                update.message, t("interval_too_short", lang),
+                lang, voice=voice,
+            )
+            return True
+        if err is not None:
+            await reply_message(
+                update.message,
+                t(
+                    "bad_quantity", lang,
+                    service=short_service_name(service.get("name")),
+                    min=service.get("min"), max=service.get("max"),
+                ),
+                lang, voice=voice,
+            )
+            return True
+        pending["drip"].update({
+            "per_run_qty": vals["per_run_qty"],
+            "runs": vals["runs"],
+            "interval": vals["interval"],
+        })
+        pending["quantity"] = vals["quantity"]
+        pending["total"] = vals["total"]
+        note = t(
+            "edit_note", lang,
+            what=f"every {format_interval(vals['interval'])}",
+        )
+    elif field == "service":
+        try:
+            services = await paxyo.services()
+        except Exception as exc:
+            log.warning("card edit services failed: %s", exc)
+            services = []
+        new_service = None
+        if isinstance(value, dict) and value.get("service_id") is not None:
+            new_service, svc_error = resolve_named_service(
+                services, value["service_id"]
+            )
+            if svc_error is not None:
+                await reply_message(
+                    update.message, t("edit_service_not_found", lang),
+                    lang, voice=voice,
+                )
+                return True
+        else:
+            picks = pick_services(
+                services or [],
+                platform=(value or {}).get("platform"),
+                service_hint=(value or {}).get("service_hint"),
+                limit=100,
+            )
+            if not picks:
+                await reply_message(
+                    update.message, t("edit_service_not_found", lang),
+                    lang, voice=voice,
+                )
+                return True
+            new_service = _prefer_pick(picks, user_id)
+        if drip and new_service.get("dripfeed") is False:
+            await reply_message(
+                update.message, t("drip_service_no_dripfeed", lang),
+                lang, voice=voice,
+            )
+            return True
+        link_error = validate_order_link(pending.get("link"), new_service)
+        if link_error == "platform":
+            platform, _hint = _platform_hint_of_service(new_service)
+            await reply_message(
+                update.message,
+                t(
+                    "platform_mismatch", lang,
+                    link_platform=platform_from_link(pending.get("link")),
+                    platform=platform or "",
+                ),
+                lang, voice=voice,
+            )
+            return True
+        if drip:
+            vals, err = _recompute_drip(pending, service=new_service)
+            if err is not None:
+                await reply_message(
+                    update.message,
+                    t(
+                        "bad_quantity", lang,
+                        service=short_service_name(new_service.get("name")),
+                        min=new_service.get("min"),
+                        max=new_service.get("max"),
+                    ),
+                    lang, voice=voice,
+                )
+                return True
+            pending["drip"].update({
+                "per_run_qty": vals["per_run_qty"],
+                "runs": vals["runs"],
+                "interval": vals["interval"],
+            })
+            pending["quantity"] = vals["quantity"]
+            pending["total"] = vals["total"]
+        else:
+            if validate_quantity(pending["quantity"], new_service) is not None:
+                await reply_message(
+                    update.message,
+                    t(
+                        "bad_quantity", lang,
+                        service=short_service_name(new_service.get("name")),
+                        min=new_service.get("min"),
+                        max=new_service.get("max"),
+                    ),
+                    lang, voice=voice,
+                )
+                return True
+            pending["total"] = estimated_total_etb(
+                float(new_service.get("rate_etb_per_1000") or 0),
+                pending["quantity"],
+            )
+        pending["service"] = new_service
+        platform, hint = _platform_hint_of_service(new_service)
+        pending["platform"] = platform
+        pending["service_hint"] = hint
+        note = t(
+            "edit_note", lang,
+            what=f"service {short_service_name(new_service.get('name'))}",
+        )
+    elif field == "delay":
+        if store != "delayed":
+            return False
+        pending["run_at"] = delayed_run_at_iso(int(value))
+        note = t(
+            "edit_note", lang,
+            what=f"runs {format_eat_run_at(pending['run_at'])}",
+        )
+    else:
+        return False
+    CARD_EDIT_PENDING.pop(user_id, None)
+    service = pending.get("service") or {}
+    shortfall = await _low_balance_shortfall(
+        user_id, service, pending["total"]
+    )
+    if shortfall is not None:
+        short_amount, balance = shortfall
+        await reply_message(
+            update.message,
+            t(
+                "low_balance_warning", lang,
+                balance=format_money(balance),
+                shortfall=format_money(short_amount),
+                total=format_money(pending["total"]),
+            ),
+            lang, voice=voice,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    t("deposit_webapp_button", lang,
+                      amount=format_money(short_amount)),
+                    callback_data=f"depshort:{short_amount:.2f}",
+                )
+            ]]),
+        )
+    # A successful edit is a correction to the pending order: log
+    # it like the old quantity-change path did, so the failure log
+    # still sees it.
+    card_text = await _reshow_card(
+        update, confirm_id, pending, store, lang, note=note, voice=voice,
+    )
+    log_confusion(user_id, text, card_text, "correction")
+    return True
+
+
+async def _run_card_edit(update, user_id, edit, lang, text="", voice=False):
+    """Run one parsed card edit: ask for the value when it is
+    missing (and wait for the next message), or apply it at once.
+    Returns True when the edit was handled with a reply."""
+    confirm_id, pending, store = _pending_card_for_user(user_id)
+    if pending is None:
+        return False
+    if edit.get("value") is None:
+        CARD_EDIT_PENDING[user_id] = {
+            "field": edit["field"], "confirm_id": confirm_id,
+            "store": store,
+        }
+        await reply_message(
+            update.message, t(_EDIT_ASK_KEYS[edit["field"]], lang),
+            lang, voice=voice,
+        )
+        return True
+    return await apply_card_edit(
+        update, user_id, confirm_id, pending, store, edit, lang,
+        text=text, voice=voice,
+    )
+
+
+async def handle_card_edit_text(update, text, lang, voice=False):
+    """A Confirm-card edit in this message, or False when the
+    message is not one. Runs before the classifier (see
+    handle_order_text): "Lets change the link" never reaches the
+    "I did not understand" fallback while a card is pending. A
+    value the bot asked for is read here too — the very next
+    message after "Which link...?" is the new link. A cancel while
+    the bot is waiting for a value drops just the edit question
+    and re-shows the unchanged card; the order itself is not
+    cancelled by it."""
+    user = update.effective_user
+    confirm_id, pending, store, field = _stored_edit_card(user.id)
+    if pending is not None:
+        if is_cancel_request(text):
+            CARD_EDIT_PENDING.pop(user.id, None)
+            await _reshow_card(
+                update, confirm_id, pending, store, lang, voice=voice,
+            )
+            return True
+        edit = parse_card_edit(text, pending, store=store)
+        if edit is not None and edit["field"] != field:
+            # The user switched to a different field mid-ask.
+            CARD_EDIT_PENDING.pop(user.id, None)
+            return await _run_card_edit(
+                update, user.id, edit, lang, text=text, voice=voice,
+            )
+        value = _card_edit_value_from_text(field, text, pending)
+        if value is None:
+            await reply_message(
+                update.message, t(_EDIT_ASK_KEYS[field], lang),
+                lang, voice=voice,
+            )
+            return True
+        return await apply_card_edit(
+            update, user.id, confirm_id, pending, store,
+            {"field": field, "value": value}, lang, text=text,
+            voice=voice,
+        )
+    confirm_id, pending, store = _pending_card_for_user(user.id)
+    if pending is None:
+        return False
+    edit = parse_card_edit(text, pending, store=store)
+    if edit is None:
+        return False
+    return await _run_card_edit(
+        update, user.id, edit, lang, text=text, voice=voice,
+    )
+
+
 async def handle_change_order(update, text, intent, lang, voice=False):
     """'Change the quantity from 5,000 to 2,000 before it starts.'
 
@@ -27200,6 +28098,28 @@ async def handle_change_order(update, text, intent, lang, voice=False):
     new quantity and continues. An order that is already placed
     cannot be changed — the live status is shown instead."""
     user = update.effective_user
+    # Editable Confirm card (19 Nov 2026): the classifier can also
+    # call a card edit "change_order" — link, runs, interval,
+    # amount or service, not just quantity. Those go through the
+    # same edit path as the local pre-classifier check, so the card
+    # is edited in place instead of falling through to the
+    # quantity-only code below.
+    _cid, _pending = pending_for_user(user.id)
+    if _pending is not None:
+        _edit = parse_card_edit(text, _pending, intent=intent, store="pending")
+        if _edit is not None:
+            await _run_card_edit(
+                update, user.id, _edit, lang, text=text, voice=voice,
+            )
+            return
+    _did, _delayed = pending_delayed_for_user(user.id)
+    if _delayed is not None:
+        _edit = parse_card_edit(text, _delayed, intent=intent, store="delayed")
+        if _edit is not None:
+            await _run_card_edit(
+                update, user.id, _edit, lang, text=text, voice=voice,
+            )
+            return
     new_qty = intent.get("quantity")
     try:
         new_qty = int(new_qty) if new_qty is not None else None
@@ -28571,6 +29491,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
         # No pending order: fall through; the normal flow answers
         # "not understood".
+
+    # Editable Confirm card (19 Nov 2026): "Lets change the link"
+    # while a card is pending is caught here, before the classifier
+    # — the classifier never called it change_order, so it fell
+    # through to "I did not understand". Only fires when a card is
+    # actually pending; anything else falls through untouched.
+    if await handle_card_edit_text(update, text, lang, voice=voice):
+        return
 
     # "I paid" / "I approved it" while a deposit is pending: the user
     # is asking whether the deposit went through — recheck it with

@@ -12137,6 +12137,478 @@ class TestMidOrderChanges(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.text_sent, ["You have no orders yet."])
 
 
+class TestEditableConfirmCard(unittest.IsolatedAsyncioTestCase):
+    """Editable Confirm card (19 Nov 2026): after a Confirm card is
+    shown, the user can change the link, quantity, amount, runs,
+    interval or service by typing, and the bot updates the SAME
+    card. Live case: "Lets change the link" twice got "I did not
+    understand" on a correct drip-feed card."""
+
+    TIKTOK_VIEWS = {
+        "service": 2001, "name": "TikTok Video Views | Fast",
+        "category": "TikTok Video Views", "type": "Default",
+        "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
+        "average_time": "5 minutes", "active": True,
+        "provider_service_id": 2001,
+    }
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.PENDING_DELAYED.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.CARD_EDIT_PENDING.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.PENDING_DELAYED.clear()
+        bot.DELAYED_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+        bot.CARD_EDIT_PENDING.clear()
+
+    async def _send(self, text, intent, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _callback(self, data, paxyo=None):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo()):
+            await bot.on_callback(update, None)
+        return query
+
+    async def _build_normal(self, paxyo=None):
+        await self._send(
+            "I want 1000 Instagram followers",
+            intent_of("order", platform="instagram",
+                      service_hint="followers",
+                      link="https://instagram.com/p/x", quantity=1000),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        return next(iter(bot.PENDING))
+
+    async def _build_drip(self, paxyo=None):
+        # The live case, 19 Nov 2026 19:24 EAT: 10 runs of 100
+        # every 1 hour, 18.90 ETB total, vt.tiktok.com link.
+        paxyo = paxyo or FakePaxyo(
+            dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)])
+        msg = await self._send(
+            "Can we order video of 1k and I want to place 100 views "
+            "10 times every 1 hr gap",
+            recurring_intent(
+                platform="tiktok", service_hint="views",
+                link="https://vt.tiktok.com/ZSp349gen/", quantity=100,
+                interval_minutes=60,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("10 runs of 100", msg.text_sent[0])
+        self.assertIn("18.90", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        return next(iter(bot.PENDING))
+
+    async def _build_delayed(self, paxyo=None):
+        msg = await self._send(
+            "order 1000 Instagram followers in 3 hours",
+            delayed_intent(
+                platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                delay_minutes=180,
+            ),
+            paxyo=paxyo,
+        )
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING_DELAYED), 1)
+        return next(iter(bot.PENDING_DELAYED))
+
+    def _pending(self):
+        return next(iter(bot.PENDING.values()))
+
+    # The live case ---------------------------------------------------
+
+    async def test_live_case_change_link_asks_then_accepts_new_link(self):
+        confirm_id = await self._build_drip()
+        msg = await self._send(
+            "Lets change the link", intent_of("unclear"),
+            paxyo=FakePaxyo(
+                dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)]),
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["Which link should I use instead? Send the new link."],
+        )
+        self.assertNotIn("I did not understand", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertEqual(
+            bot.CARD_EDIT_PENDING[1]["field"], "link")
+        self.assertEqual(
+            bot.CARD_EDIT_PENDING[1]["confirm_id"], confirm_id)
+        new_link = "https://www.tiktok.com/@paxyo251/video/7666462351436107015"
+        msg = await self._send(
+            new_link, intent_of("unclear"),
+            paxyo=FakePaxyo(
+                dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)]),
+        )
+        self.assertIn(new_link, msg.text_sent[0])
+        self.assertNotIn("ZSp349gen", msg.text_sent[0])
+        self.assertIn("10 runs of 100", msg.text_sent[0])
+        self.assertIn("18.90", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIn(confirm_id, bot.PENDING)
+        self.assertEqual(bot.CARD_EDIT_PENDING, {})
+        pending = self._pending()
+        self.assertEqual(pending["link"], new_link)
+        self.assertEqual(pending["quantity"], 1000)
+        self.assertEqual(pending["total"], 18.9)
+
+    async def test_change_link_with_url_in_one_message(self):
+        confirm_id = await self._build_normal()
+        msg = await self._send(
+            "change the link to https://instagram.com/p/y",
+            intent_of("unclear"),
+        )
+        self.assertIn("https://instagram.com/p/y", msg.text_sent[0])
+        self.assertNotIn("instagram.com/p/x", msg.text_sent[0])
+        self.assertIn("1000", msg.text_sent[0])
+        self.assertIn("42.00", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIn(confirm_id, bot.PENDING)
+        self.assertEqual(
+            self._pending()["link"], "https://instagram.com/p/y")
+
+    async def test_change_link_to_wrong_platform_is_refused(self):
+        await self._build_normal()
+        msg = await self._send(
+            "change the link to https://tiktok.com/@x/video/1",
+            intent_of("unclear"),
+        )
+        self.assertIn("That link is tiktok", msg.text_sent[0])
+        self.assertIn("instagram", msg.text_sent[0])
+        self.assertEqual(
+            self._pending()["link"], "https://instagram.com/p/x")
+        self.assertEqual(len(bot.PENDING), 1)
+
+    async def test_cancel_while_waiting_for_link_keeps_order(self):
+        await self._build_normal()
+        await self._send("change the link", intent_of("unclear"))
+        self.assertEqual(bot.CARD_EDIT_PENDING[1]["field"], "link")
+        msg = await self._send("cancel", intent_of("cancel"))
+        self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertEqual(bot.CARD_EDIT_PENDING, {})
+
+    # Quantity and amount ----------------------------------------------
+
+    async def test_change_quantity_reprices(self):
+        confirm_id = await self._build_normal()
+        msg = await self._send(
+            "change quantity to 2000", intent_of("unclear"))
+        self.assertIn("Quantity updated: 2000.", msg.text_sent[0])
+        self.assertIn("84.00", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        self.assertEqual(len(bot.PENDING), 1)
+        self.assertIn(confirm_id, bot.PENDING)
+        self.assertEqual(self._pending()["quantity"], 2000)
+        self.assertEqual(self._pending()["total"], 84.0)
+
+    async def test_change_quantity_without_value_asks(self):
+        # A value-less edit asks instead of trusting the
+        # classifier's carried-forward quantity (the 14 Nov 2026
+        # grounding bug): the local check runs before the
+        # classifier, so the intent's quantity never reaches it.
+        await self._build_normal()
+        msg = await self._send(
+            "change the quantity",
+            intent_of("change_order", quantity=2000),
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["How many should it be? Send the new quantity."],
+        )
+        msg = await self._send("2000", intent_of("unclear"))
+        self.assertIn("Quantity updated: 2000.", msg.text_sent[0])
+        self.assertIn("84.00", msg.text_sent[0])
+
+    async def test_change_amount_derives_quantity(self):
+        await self._build_normal()
+        msg = await self._send(
+            "change the amount to 84", intent_of("unclear"))
+        self.assertIn("Quantity updated: 2000.", msg.text_sent[0])
+        self.assertIn("84.00", msg.text_sent[0])
+        self.assertEqual(self._pending()["quantity"], 2000)
+        self.assertEqual(self._pending()["total"], 84.0)
+
+    async def test_change_amount_asks_when_missing(self):
+        await self._build_normal()
+        msg = await self._send(
+            "change the amount", intent_of("unclear"))
+        self.assertEqual(
+            msg.text_sent,
+            ["How much should it cost in total? "
+             "Send the new amount in ETB."],
+        )
+        self.assertEqual(self._pending()["quantity"], 1000)
+        msg = await self._send("84", intent_of("unclear"))
+        self.assertIn("Quantity updated: 2000.", msg.text_sent[0])
+        self.assertEqual(self._pending()["quantity"], 2000)
+
+    async def test_change_service_reprices(self):
+        await self._build_normal()
+        msg = await self._send(
+            "change service to 1002", intent_of("unclear"))
+        self.assertIn("Updated: service", msg.text_sent[0])
+        self.assertIn("21.00", msg.text_sent[0])
+        self.assertEqual(self._pending()["service"]["service"], 1002)
+        self.assertEqual(self._pending()["total"], 21.0)
+
+    # Drip-feed edits ----------------------------------------------------
+
+    async def test_drip_quantity_change_rederives_total(self):
+        confirm_id = await self._build_drip()
+        msg = await self._send(
+            "change quantity to 2000", intent_of("unclear"),
+            paxyo=FakePaxyo(
+                dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)]),
+        )
+        self.assertIn("Quantity updated: 2000.", msg.text_sent[0])
+        self.assertIn("10 runs of 200", msg.text_sent[0])
+        self.assertIn("37.80", msg.text_sent[0])
+        self.assertIn(confirm_id, bot.PENDING)
+        pending = self._pending()
+        self.assertEqual(pending["quantity"], 2000)
+        self.assertEqual(pending["total"], 37.8)
+        self.assertEqual(
+            pending["drip"],
+            {"runs": 10, "interval": 60, "per_run_qty": 200},
+        )
+
+    async def test_drip_per_run_change(self):
+        await self._build_drip()
+        msg = await self._send(
+            "make it 200 views each time", intent_of("unclear"),
+            paxyo=FakePaxyo(
+                dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)]),
+        )
+        self.assertIn("10 runs of 200", msg.text_sent[0])
+        self.assertIn("37.80", msg.text_sent[0])
+        pending = self._pending()
+        self.assertEqual(pending["quantity"], 2000)
+        self.assertEqual(pending["drip"]["per_run_qty"], 200)
+
+    async def test_drip_runs_change(self):
+        await self._build_drip()
+        msg = await self._send(
+            "make it 5 runs", intent_of("unclear"),
+            paxyo=FakePaxyo(
+                dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)]),
+        )
+        self.assertIn("5 runs of 100", msg.text_sent[0])
+        self.assertIn("9.45", msg.text_sent[0])
+        pending = self._pending()
+        self.assertEqual(pending["quantity"], 500)
+        self.assertEqual(pending["total"], 9.45)
+        self.assertEqual(pending["drip"]["runs"], 5)
+
+    async def test_drip_interval_change(self):
+        await self._build_drip()
+        msg = await self._send(
+            "every 2 hours", intent_of("unclear"),
+            paxyo=FakePaxyo(
+                dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)]),
+        )
+        self.assertIn("every 2 hours", msg.text_sent[0])
+        self.assertIn("10 runs of 100", msg.text_sent[0])
+        self.assertIn("18.90", msg.text_sent[0])
+        pending = self._pending()
+        self.assertEqual(pending["drip"]["interval"], 120)
+        self.assertEqual(pending["quantity"], 1000)
+
+    async def test_drip_total_must_split_evenly(self):
+        await self._build_drip()
+        msg = await self._send(
+            "change quantity to 1505", intent_of("unclear"),
+            paxyo=FakePaxyo(
+                dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)]),
+        )
+        self.assertIn("doesn't split evenly", msg.text_sent[0])
+        self.assertIn("10 equal runs", msg.text_sent[0])
+        pending = self._pending()
+        self.assertEqual(pending["quantity"], 1000)
+        self.assertEqual(pending["total"], 18.9)
+
+    # Confirm / Cancel after an edit --------------------------------------
+
+    async def test_confirm_after_edit_places_updated_order(self):
+        paxyo = FakePaxyo(
+            dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)])
+        confirm_id = await self._build_drip(paxyo=paxyo)
+        await self._send(
+            "change quantity to 2000", intent_of("unclear"), paxyo=paxyo,
+        )
+        self.assertEqual(len(bot.PENDING), 1)
+        msg = await self._send("yes", intent_of("unclear"), paxyo=paxyo)
+        self.assertIn("Order placed!", msg.text_sent[0])
+        self.assertIn("Drip-feed: 10 runs", msg.text_sent[0])
+        self.assertEqual(
+            paxyo.orders_created,
+            [(2001, "https://vt.tiktok.com/ZSp349gen/", 200)],
+        )
+        self.assertEqual(
+            paxyo.order_split_kwargs, [{"runs": 10, "interval": 60}])
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_cancel_after_edit_cancels(self):
+        paxyo = FakePaxyo()
+        confirm_id = await self._build_normal(paxyo=paxyo)
+        await self._send(
+            "change quantity to 2000", intent_of("unclear"), paxyo=paxyo,
+        )
+        self.assertEqual(self._pending()["quantity"], 2000)
+        query = await self._callback(f"cancel:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(query.edited, ["Order cancelled."])
+        self.assertEqual(bot.PENDING, {})
+
+    # Affordability ---------------------------------------------------------
+
+    async def test_affordability_rechecked_on_raised_total(self):
+        paxyo = FakePaxyo(
+            dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)])
+        await self._build_drip(paxyo=paxyo)
+        poor = FakePaxyo(
+            balance=10.0, dripfeed_live=True,
+            services=[dict(self.TIKTOK_VIEWS)])
+        msg = await self._send(
+            "change quantity to 2000", intent_of("unclear"), paxyo=poor,
+        )
+        self.assertIn("short", msg.text_sent[0])
+        self.assertIn("27.80", msg.text_sent[0])
+        self.assertIn("37.80", msg.text_sent[1])
+        self.assertIn("10 runs of 200", msg.text_sent[1])
+        self.assertIsNotNone(msg.markups[1])
+        self.assertEqual(self._pending()["total"], 37.8)
+        self.assertEqual(poor.orders_created, [])
+
+    # Delayed cards -----------------------------------------------------------
+
+    async def test_delayed_card_quantity_edit(self):
+        confirm_id = await self._build_delayed()
+        run_at = next(iter(bot.PENDING_DELAYED.values()))["run_at"]
+        msg = await self._send(
+            "change quantity to 2000", intent_of("unclear"))
+        self.assertIn("2000", msg.text_sent[0])
+        self.assertIn("84.00", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        self.assertEqual(len(bot.PENDING_DELAYED), 1)
+        self.assertIn(confirm_id, bot.PENDING_DELAYED)
+        delayed = next(iter(bot.PENDING_DELAYED.values()))
+        self.assertEqual(delayed["quantity"], 2000)
+        self.assertEqual(delayed["total"], 84.0)
+        self.assertEqual(delayed["run_at"], run_at)
+
+    # No card, no edit ---------------------------------------------------------
+
+    async def test_edit_with_no_pending_card_falls_through(self):
+        msg = await self._send(
+            "Lets change the link", intent_of("unclear"))
+        self.assertIn("I did not understand", msg.text_sent[0])
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(bot.CARD_EDIT_PENDING, {})
+
+    # Pure parser ---------------------------------------------------------------
+
+    def test_parse_card_edit_phrases(self):
+        svc = {
+            "service": 2001, "name": "TikTok Video Views | Fast",
+            "category": "TikTok Video Views",
+            "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
+        }
+        drip = {
+            "user_id": 1, "service": svc,
+            "link": "https://vt.tiktok.com/ZSp349gen/",
+            "quantity": 1000, "total": 18.9,
+            "drip": {"runs": 10, "interval": 60, "per_run_qty": 100},
+        }
+        cases = [
+            ("Lets change the link", {"field": "link", "value": None}),
+            ("change the link to https://tiktok.com/@x/video/1",
+             {"field": "link",
+              "value": "https://tiktok.com/@x/video/1"}),
+            ("change quantity to 500",
+             {"field": "quantity", "value": 500}),
+            ("make it 2000 views",
+             {"field": "quantity", "value": 2000}),
+            ("change the amount",
+             {"field": "amount", "value": None}),
+            ("change the amount to 50",
+             {"field": "amount", "value": 50}),
+            ("every 2 hours",
+             {"field": "interval", "value": 120}),
+            ("5 runs", {"field": "runs", "value": 5}),
+            ("100 views each time",
+             {"field": "per_run", "value": 100}),
+            ("change service", {"field": "service", "value": None}),
+            ("change service to 1002",
+             {"field": "service", "value": {"service_id": 1002}}),
+            ("change the quantity from 5,000 to 2,000",
+             {"field": "quantity", "value": 2000}),
+            ("200", None),
+            ("I want 500 Instagram followers", None),
+            ("how fast can you deliver it?", None),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    bot.parse_card_edit(text, drip), expected)
+        # The classifier path fills a missing value from the
+        # intent (handle_change_order): "change the quantity" with
+        # a classifier quantity of 2000 is a 2000 edit.
+        self.assertEqual(
+            bot.parse_card_edit(
+                "change the quantity", drip,
+                intent={"quantity": 2000},
+            ),
+            {"field": "quantity", "value": 2000},
+        )
+
+
 class TestPaymentEdgeCases(unittest.IsolatedAsyncioTestCase):
     """Split payments and reverse-calculating quantity from balance."""
 
