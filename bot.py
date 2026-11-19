@@ -327,6 +327,16 @@ DRIPFEED_LIVE_CACHE_SECONDS = 300  # 5 minutes: the drip-feed probe
 # the probe cached False forever per process, so installing
 # api-order-dripfeed.php on paxyo.et changed nothing until the
 # next Fly deploy).
+# Auto-refill / keep-above-target (19 Nov 2026): the bot checks a
+# live count once an hour and tops it back up to the target from
+# the user's balance. Guards: a drop smaller than the minimum
+# never orders (providers have minimum quantities anyway), and a
+# daily spend cap stops refills for the day. Both are plain
+# constants so the owner can change them in one place.
+AUTO_REFILL_MIN_DROP_ABSOLUTE = 100  # never order for a drop under 100
+AUTO_REFILL_MIN_DROP_PCT = 0.02  # ... or under 2% of the target
+AUTO_REFILL_DAILY_CAP_ETB = 1000.0  # most the bot may spend on refills per user per day
+AUTO_REFILL_CHECK_INTERVAL_MINUTES = 60  # hourly checks (owner, 19 Nov 2026)
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
 
 # ------------------------------------------------------- Gemini prompt ----
@@ -347,6 +357,9 @@ Rules:
 - intent, one of:
   - "order": wants to order a service (followers, likes, views, members...). Fill platform / service_hint / link / quantity when given; null otherwise.
   - "recurring": the same order repeated on a schedule ("1k views every 3 hours"). Fill platform / service_hint / link / quantity / interval_minutes (3 hours = 180, 1 day = 1440). A drip-feed ("100 views every 30 minutes") is also "recurring": quantity is the amount per drop, interval_minutes the gap.
+  - "auto_refill": keep a count above a target, topped up from the user's balance when it drops ("keep my followers above 15k"). Fill platform / service_hint / link / target. NOT a one-time order — the trigger is the live count, not the clock.
+  - "auto_refill_status": asks what auto-refills are running ("my auto refills").
+  - "auto_refill_stop": stop an auto-refill ("stop auto refill").
   - "delayed_order": a one-time order placed later ("order 10k views after 3 hrs"). Fill platform / service_hint / link / quantity / delay_minutes (3 hours = 180). Places once, not repeatedly.
   - "schedules": asks what is repeating.
   - "stop_schedule": wants to stop or cancel a repeating order.
@@ -392,7 +405,7 @@ Rules:
 - service_hint: short phrase for the service ("followers", "likes", "views", "members"); null when unclear. "cheapest instagram followers" goes here too (the bot picks the cheapest match for "cheapest"). "likes" is likes on a video; "comment likes" is likes on a comment; "comments" is comments on a video — three different services, never mix them up. Copy the metric the user named as-is — any catalogue type (followers, likes, views, live viewers, story views/likes/comments/poll votes/link click/slider, saves, plays, reposts, retweets, reshares, quotes, quote tweets, bookmarks, statistics, mentions, impressions, reach, listeners, monthly listeners, downloads, coins, tokens, wishes, watchlist, emotions, traffic, reviews, tweets, connections, endorsements, recommendations, poll votes, contest votes, profile visits, comment likes/replies/reactions, comment reply likes, bot start, channel boost, server boost, friend requests, direct messages, growth/engagement package, auto likes/views/comments/reactions, premium/online members, tag a person, room visitors, linkedin sends, pk battle points, ai chatbot, hype boost, pr service, reels sound use, template pack, watch hours). Never normalise it to a shorter word: "live viewers" is not "views", "story views" is not "views", "comment likes" is not "likes".
 - service_id: the ID of the service asked for, or null. "use service 6139" -> 6139; "service #5535" -> 5535; "use that service again" -> null (resolved from the last order); "the cheapest Instagram followers" -> null (a description, not an ID).
 - link: the full link the order is for; null when not given. "that link", "the same link", "that one" -> put "that" in link (resolved from the last order).
-- quantity: whole number, or null. interval_minutes: whole minutes, or null (recurring only). delay_minutes: whole minutes from now, or null (delayed_order only). amount: ETB number, or null (deposit only). method: "telebirr" or "cbe", or null. phone: payment phone number as written, or null.
+- quantity: whole number, or null. interval_minutes: whole minutes, or null (recurring only). delay_minutes: whole minutes from now, or null (delayed_order only). amount: ETB number, or null (deposit only). method: "telebirr" or "cbe", or null. phone: payment phone number as written, or null. target: the count to keep above, or null (auto_refill only).
 - quantity_multiplier: how many times the usual order ("double it" -> 2, "triple it" -> 3). Null otherwise.
 - orders: list of {"platform", "service_hint", "link", "quantity"} — one per order; a bare @handle goes in "link". Null otherwise.
 - split: {"quantity": 5000, "count": 5, "platform": "instagram", "service_hint": "likes"} for splitting one quantity across posts. Null otherwise.
@@ -1953,6 +1966,48 @@ TEXT = {
     "plan_failed": {
         "am": "Repeating order መጀመር አልቻልኩም። እባክዎ እንደገና ይሞክሩ።",
         "en": "I couldn't start the repeating order. Please try again.",
+    },
+    # Auto-refill / keep-above-target (19 Nov 2026): the bot checks
+    # a live count every hour and tops it back up to the target
+    # from the user's balance. First-pass Amharic wording —
+    # unreviewed by a native speaker.
+    "ask_auto_refill_target": {
+        "am": "ከስንት በታች እንዳይወርድ ነው? (ለምሳሌ: 15000)",
+        "en": "What should I keep it above? (for example: 15000)",
+    },
+    "auto_refill_target_too_small": {
+        "am": "ዒላማው በጣም ትንሽ ነው, {service} ቢያንስ {min} ያስፈልገዋል። ከዛ በላይ ቁጥር ይስጡ።",
+        "en": "That target is too small, {service} needs at least {min}. Give me a bigger number.",
+    },
+    "auto_refill_count_unsupported": {
+        "am": "{platform} ቁጥር ማረጋገጥ አልችልም። TikTok, YouTube እና Telegram ብቻ ነው።",
+        "en": "I can't check {platform} counts yet. I can check TikTok, YouTube and Telegram.",
+    },
+    "auto_refill_started": {
+        "am": (
+            "Auto-refill ጀምሯል! {service} ከ {target} በታች ሲወርድ "
+            "በየሰዓቱ እፈትሻለሁ እና balanceዎን እጠቅማለሁ። በቀን እስከ {cap} ETB። "
+            "Server ላይ ሰዓታዊ ምርመራው ገና አልተጫነም, ስለዚህ እስኪጫን ድረስ "
+            "ምንም order አይዘዝም።"
+        ),
+        "en": (
+            "Auto-refill is on! I'll check {service} every hour and top it "
+            "up from your balance whenever it drops below {target}. "
+            "At most {cap} ETB a day. The hourly check on the server is "
+            "not installed yet, so nothing will order until that is live."
+        ),
+    },
+    "auto_refill_none": {
+        "am": "Auto-refill የለዎትም።",
+        "en": "You have no auto-refill running.",
+    },
+    "auto_refill_stopped": {
+        "am": "Auto-refill ({service}) ቆሟል።",
+        "en": "Stopped the auto-refill for {service}.",
+    },
+    "auto_refill_none_to_stop": {
+        "am": "ሊያቆሙት የሚችሉት auto-refill የለም።",
+        "en": "There is no auto-refill to stop.",
     },
     "no_schedules": {
         "am": "Repeating order የለዎትም።",
@@ -9636,7 +9691,7 @@ def local_intent(text: str) -> dict:
         "service_id": None, "link": None, "quantity": None,
         "interval_minutes": None, "amount": None, "method": None,
         "phone": None, "quantity_multiplier": None, "orders": None,
-        "split": None, "gemini_failed": True,
+        "split": None, "target": None, "gemini_failed": True,
     }
     s = normalize_text(text)
     words = set(re.findall(r"[a-z]+", s.lower()))
@@ -9674,6 +9729,19 @@ def local_intent(text: str) -> dict:
         )
     ):
         intent["intent"] = "deposit_status"
+    elif is_auto_refill_stop_request(text):
+        # "stop auto refill" — before the plain "cancel" branch
+        # below, which would eat it, and before "deposit" ("top
+        # up" is in some auto-refill phrasings).
+        intent["intent"] = "auto_refill_stop"
+    elif is_auto_refill_status_request(text):
+        intent["intent"] = "auto_refill_status"
+    elif is_auto_refill_request(text):
+        # Before "deposit": "top up my views when they drop"
+        # contains "top up", but it is an auto-refill setup, not
+        # a deposit. The target rides along when given.
+        intent["intent"] = "auto_refill"
+        intent["target"] = parse_auto_refill_target(s)
     elif parse_pref_command(text) is not None:
         # Settings (customizations, 15 Nov 2026): the agreement
         # invariant with the AI classifier — a message the
@@ -9920,6 +9988,7 @@ def simple_chat_intent(text: str):
 # only hardens what the AI hands over.
 VALID_INTENTS = frozenset((
     "order", "recurring", "schedules", "stop_schedule", "balance",
+    "auto_refill", "auto_refill_status", "auto_refill_stop",
     "delayed_order", "delayed_orders", "cancel_delayed",
     "orders", "deposit", "deposit_status", "help", "how_to_order",
     "how_to", "miniapp", "social", "greeting", "paxyo_info",
@@ -10074,6 +10143,7 @@ async def extract_intent(text: str, user_id: int = None,
     quantity = _coerce_positive_int(intent.get("quantity"))
     interval_minutes = _coerce_positive_int(intent.get("interval_minutes"))
     delay_minutes = _coerce_positive_int(intent.get("delay_minutes"))
+    target = _coerce_positive_int(intent.get("target"))
     # "Double it" on the usual order: how many times the last order.
     multiplier = intent.get("quantity_multiplier")
     try:
@@ -10129,6 +10199,7 @@ async def extract_intent(text: str, user_id: int = None,
         "quantity_multiplier": multiplier,
         "orders": clean_orders,
         "split": split,
+        "target": target,
     }
 
 
@@ -10537,6 +10608,23 @@ RECURRING_DRAFT = {}  # telegram_id -> {"platform", "service_hint", "link", "qua
 # "quantity", "interval_minutes", "total"}. No recurring plan is
 # created on the server until the user taps Confirm (or says yes).
 PENDING_RECURRING = {}
+# Auto-refill being built, same shape plus "target" (the count to
+# stay above). Cleared when the preview Confirm card is created
+# (the setup then lives in PENDING_AUTO_REFILL), when the user
+# cancels, or when a different platform starts a new setup.
+AUTO_REFILL_DRAFT = {}  # telegram_id -> {"platform", "service_hint", "link", "target"}
+# Auto-refill awaiting Confirm: confirm_id -> {"user_id",
+# "service", "link", "target", "metric", "platform"}. Nothing is
+# switched on until the user taps Confirm (or says yes).
+PENDING_AUTO_REFILL = {}
+# Confirmed auto-refills, in memory for now: telegram_id -> [refill,
+# ...], each {"id", "user_id", "service", "link", "target",
+# "metric", "platform", "spent_today", "last_count",
+# "last_check", "count_usage", "created_at"}. IN-MEMORY ONLY until
+# the server bot_refills table lands (see auto_refill_check): a
+# restart or redeploy drops these, exactly like the half-built
+# drip plans. The status text says so plainly.
+AUTO_REFILL_ACTIVE = {}
 # One-time delayed order being built, same shape plus
 # "delay_minutes". Cleared when the Confirm card is created (the
 # order then lives in PENDING_DELAYED), when the user cancels, or
@@ -12259,6 +12347,1057 @@ def drip_plan(quantity, service, span_min):
             continue
         return (runs, interval, per_run)
     return None
+
+
+# --- auto-refill / keep-above-target: count checks ------------------
+# The bot checks a live count every hour and tops it back up to
+# the target from the user's balance (19 Nov 2026). The count
+# comes from a FALLBACK CHAIN of free providers, cheapest first,
+# so no single free allowance decides whether refills work:
+#
+#   0. own scraper — fetch the public page directly and read the
+#      count out of it (TikTok, YouTube, Telegram). No allowance
+#      at all, but a page can block us, so it falls through.
+#   1. EnsembleData — 50 units/day free trial (trial ends 26 Nov
+#      2026; after that unknown). TikTok video 2 units, TikTok
+#      user 1 unit. Token from ENSEMBLEDATA_API_TOKEN only.
+#   2. SocialHolmes — DISABLED until verified (see below).
+#   3. Scrape Everything — 100 credits one-time on signup (the
+#      account exists already). Its TikTok lookup FAILED 8 times
+#      on 19 Nov (PROXY_CONNECT_FAILED / PARSE_ERROR: TikTok
+#      blocked it), so it is a fallback only, never first.
+#   4. YouTube Data API v3 — official, free 10,000 quota units a
+#      day; a video/channel lookup costs 1 unit.
+#   5. Telegram Bot API getChatMemberCount — free, no quota, for
+#      Telegram channel members (the bot must be able to see the
+#      channel; a channel it cannot see answers with an error and
+#      the chain moves on).
+#
+# Instagram stays on the API providers: its public pages mostly
+# need a login now, so the own scraper does not cover it.
+#
+# Rules the chain keeps: a failed call never consumes budget
+# (providers refund failures too); a 429 parks that provider for
+# an hour; a count fetched in the last 30 minutes is reused
+# instead of spending units again; per-provider daily usage lives
+# in the refill record itself (count_usage), so it survives a
+# restart when the server persists the record in bot_refills.
+# No token or key is ever hard-coded here — every provider reads
+# its credential from the environment, and a provider with no
+# credential configured is simply skipped.
+COUNT_CACHE_TTL_SECONDS = 1800  # 30 minutes: reuse a fresh count
+_COUNT_CACHE = {}  # (platform, metric, link) -> (count, provider, at)
+COUNT_SCRAPER_TIMEOUT_SECONDS = 10.0  # short: a slow page must not stall the check
+COUNT_SCRAPER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+# Per-provider daily budgets the code enforces. None means no
+# daily cap is tracked here: Scrape Everything's 100 credits are
+# one-time (its own balance is the limit), Telegram has no quota,
+# and SocialHolmes is disabled (its pricing page says the first
+# 1,000 results are free, one-time — NOT 100 requests/day, which
+# is what the earlier research claimed and is unverified).
+COUNT_PROVIDERS = {
+    "own_scraper": {"daily_budget": None, "cost": 0, "enabled": True},
+    "ensembledata": {"daily_budget": 50, "cost": 2, "enabled": True},
+    "socialholmes": {"daily_budget": None, "cost": 1, "enabled": False},
+    "scrapeeverything": {"daily_budget": None, "cost": 1, "enabled": True},
+    "youtube": {"daily_budget": 10000, "cost": 1, "enabled": True},
+    "telegram": {"daily_budget": None, "cost": 0, "enabled": True},
+}
+# (platform, metric) -> providers in try order. SocialHolmes sits
+# second for TikTok but is disabled (see its note below), so the
+# chain skips it until its shape is verified; enabling it is one
+# flag flip. Instagram has no chain yet: no free provider is
+# wired for it, so setup refuses it honestly.
+COUNT_CHAIN = {
+    ("tiktok", "views"): [
+        "own_scraper", "ensembledata", "socialholmes", "scrapeeverything",
+    ],
+    ("tiktok", "followers"): [
+        "own_scraper", "ensembledata", "socialholmes", "scrapeeverything",
+    ],
+    ("youtube", "views"): ["own_scraper", "youtube"],
+    ("youtube", "subscribers"): ["own_scraper", "youtube"],
+    ("telegram", "members"): ["own_scraper", "telegram"],
+}
+# SocialHolmes (tik.socialholmes.com) — NOT WIRED, 19 Nov 2026.
+# What its pricing page actually says: POST
+# $SOCIALHOLMES_BASE_URL/api/public/v1/scrape/tiktok/video with
+# "Authorization: Bearer <token>" and body
+# {"parameters": {"video_id": "..."}} returns a RUN ID at once,
+# and the record comes back later by webhook, polling or a
+# dashboard download — it is ASYNC, not a synchronous count.
+# The page never names the polling endpoint or the base URL, and
+# its free allowance is "your first 1,000 TikTok results are on
+# us" (one-time), not 100 requests/day. Until the polling
+# endpoint, the base URL and the free allowance are confirmed
+# with a live test, this provider stays disabled and the chain
+# skips it. A sample record does carry "play_count", so the
+# parser below already knows the field.
+SOCIALHOLMES_NOTE = "async run API, polling endpoint unconfirmed"
+
+
+def count_tokens_from_env():
+    """Provider credentials from the environment only. A missing
+    var means that provider is skipped, never faked. No token is
+    logged anywhere."""
+    return {
+        "ensembledata": (os.environ.get("ENSEMBLEDATA_API_TOKEN") or "").strip() or None,
+        "socialholmes": (os.environ.get("SOCIALHOLMES_API_TOKEN") or "").strip() or None,
+        "scrapeeverything": (os.environ.get("SCRAPEEVERYTHING_API_KEY") or "").strip() or None,
+        "youtube": (os.environ.get("YOUTUBE_API_KEY") or "").strip() or None,
+        "telegram": (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip() or None,
+    }
+
+
+def count_proxy_from_env():
+    """Residential proxy for the own scraper, from COUNT_PROXY_URL
+    (full URL with credentials, e.g.
+    http://user:pass@gate.decodo.com:7000 — the user's Decodo
+    residential proxy). Nothing is hard-coded: no proxy is
+    configured when the var is empty, and the scraper then runs
+    direct only."""
+    return (os.environ.get("COUNT_PROXY_URL") or "").strip() or None
+
+
+def count_chain_supports(platform, metric):
+    """True when at least one provider is wired for this
+    platform+metric (disabled providers do not count)."""
+    chain = COUNT_CHAIN.get((platform or "", metric or "")) or []
+    return any(
+        (COUNT_PROVIDERS.get(name) or {}).get("enabled")
+        for name in chain
+    )
+
+
+def is_auto_refill_request(text):
+    """True when the message sets up keeping a count above a
+    target: "keep my followers above 15k", "auto refill my views
+    when they drop", "don't let my views fall under 5000". A
+    panel refill ("it stopped at 800 out of 1000, send the rest")
+    has none of these phrases and stays a plain "refill"."""
+    s = " ".join(str(text or "").strip().lower().split())
+    if not s:
+        return False
+    words = set(re.findall(r"[a-z]+", s))
+    has_metric = kind_from_text(s) is not None or bool(
+        words & {"followers", "views", "likes", "members", "subscribers"}
+    )
+    if "auto refill" in s or "auto-refill" in s or "autorefill" in s:
+        return True
+    if "refill automatically" in s or "top up automatically" in s:
+        return True
+    if "keep" in words and has_metric and any(
+        p in s for p in ("above", "at least", "not below", "over")
+    ):
+        return True
+    if "stay above" in s and has_metric:
+        return True
+    if has_metric and any(
+        p in s for p in (
+            "when it drops", "when they drop", "whenever it drops",
+            "whenever they drop", "if it drops", "if they drop",
+            "when it falls", "never drop below", "keep it up",
+            "top up when", "fall under", "fall below", "drop below",
+            "go below", "goes below", "don't let", "dont let",
+        )
+    ):
+        return True
+    if "maintain" in words and has_metric and any(
+        p in s for p in ("above", "at least", "not below")
+    ):
+        return True
+    return False
+
+
+def is_auto_refill_status_request(text):
+    """"my auto refills", "auto refill status" — what is being
+    kept up. A bare "refill status" is NOT this: it can mean a
+    panel refill of a stopped order."""
+    s = " ".join(str(text or "").strip().lower().split())
+    return any(
+        p in s for p in (
+            "auto refill status", "auto-refill status",
+            "my auto refills", "my auto-refills", "auto refills",
+            "what are you keeping", "what are you topping up",
+        )
+    )
+
+
+def is_auto_refill_stop_request(text):
+    """\"stop auto refill\", \"turn off auto refill\" — before the
+    plain "cancel" branch, which would eat it."""
+    s = " ".join(str(text or "").strip().lower().split())
+    return any(
+        p in s for p in (
+            "stop auto refill", "stop auto-refill",
+            "turn off auto refill", "turn off auto-refill",
+            "cancel auto refill", "cancel auto-refill",
+            "stop refilling", "stop keeping", "stop topping up",
+        )
+    )
+
+
+def parse_auto_refill_target(text):
+    """The count to stay above, or None. "keep my followers above
+    15k" -> 15000 (the text is already normalised, so "15k"
+    reads as 15000). The number must sit right after a trigger
+    word ("above", "at least", "target", "keep it at"), so a
+    stray number elsewhere ("my balance is 100") never counts."""
+    s = " ".join(str(text or "").strip().lower().split())
+    if not s:
+        return None
+    for match in re.finditer(
+        r"(above|at least|minimum|not below|stay above|target"
+        r"|keep(?: it)? at|keep(?: it)? above|fall below|fall under"
+        r"|drop below|below|under|at)\s*:?\s*(\d[\d,]*)\s*([km]?)",
+        s,
+    ):
+        try:
+            value = float(match.group(2).replace(",", ""))
+        except ValueError:
+            continue
+        if match.group(3) == "k":
+            value *= 1000
+        elif match.group(3) == "m":
+            value *= 1000000
+        value = int(value)
+        if 10 <= value <= 1000000:
+            return value
+    return None
+
+
+def auto_refill_min_drop(target):
+    """The smallest drop worth ordering for: the larger of 100 or
+    2% of the target. A 50-drop on a 15k target never orders —
+    providers have minimum quantities anyway, and tiny orders
+    churn the balance."""
+    try:
+        value = int(target)
+    except (TypeError, ValueError):
+        return AUTO_REFILL_MIN_DROP_ABSOLUTE
+    if value <= 0:
+        return AUTO_REFILL_MIN_DROP_ABSOLUTE
+    two_pct = (value + 49) // 50  # ceil(2% of target)
+    return max(AUTO_REFILL_MIN_DROP_ABSOLUTE, two_pct)
+
+
+def auto_refill_top_up_qty(current, target, service):
+    """How many to order to get back to the target, or None when
+    no order is needed. Rounded up to a multiple of 10 and at
+    least the service minimum (an order below the minimum would
+    be refused by the provider)."""
+    try:
+        now = int(current)
+        goal = int(target)
+    except (TypeError, ValueError):
+        return None
+    drop = goal - now
+    if drop <= 0 or drop < auto_refill_min_drop(goal):
+        return None
+    qty = _ceil_to_10(drop)
+    return max(qty, _ceil_to_10(_service_min_qty(service)))
+
+
+def auto_refill_decide(current, target, service, spent_today,
+                       cap=AUTO_REFILL_DAILY_CAP_ETB):
+    """Pure top-up decision, no network. Returns {"action",
+    "quantity", "cost", "reason"}: "top_up" (order this many),
+    "skip" (at target, or the drop is too small to bother),
+    "cap" (the daily spend cap would be passed), "unavailable"
+    (no count to judge from). The caller places nothing — the
+    server worker does that, after this decision."""
+    if current is None:
+        return {"action": "unavailable", "quantity": None,
+                "cost": None, "reason": "no_count"}
+    try:
+        now = int(current)
+        goal = int(target)
+    except (TypeError, ValueError):
+        return {"action": "unavailable", "quantity": None,
+                "cost": None, "reason": "no_count"}
+    if now >= goal:
+        return {"action": "skip", "quantity": None, "cost": None,
+                "reason": "at_target"}
+    qty = auto_refill_top_up_qty(now, goal, service)
+    if qty is None:
+        return {"action": "skip", "quantity": None, "cost": None,
+                "reason": "drop_too_small"}
+    rate = float((service or {}).get("rate_etb_per_1000", 0) or 0)
+    cost = estimated_total_etb(rate, qty)
+    try:
+        spent = float(spent_today or 0)
+    except (TypeError, ValueError):
+        spent = 0.0
+    if spent + cost > float(cap):
+        return {"action": "cap", "quantity": qty, "cost": cost,
+                "reason": "daily_cap"}
+    return {"action": "top_up", "quantity": qty, "cost": cost,
+            "reason": "below_target"}
+
+
+# --- count parsing: one deep search, every provider ---------------
+def _coerce_count(value):
+    """A count in any shape the providers use: an int, a digit
+    string ("5178"), a compact string ("12.3K subscribers",
+    "5,178 views"), or {"simpleText": "5,178 views"} (YouTube).
+    Returns the int, or None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value >= 0 else None
+    if isinstance(value, dict):
+        for key in ("simpleText", "text", "count"):
+            if key in value:
+                return _coerce_count(value[key])
+        return None
+    if isinstance(value, str):
+        return parse_compact_count(value)
+    return None
+
+
+def parse_compact_count(text):
+    """\"5,178 views\" -> 5178, \"12.3K\" -> 12300, \"1.2M\" ->
+    1200000, \"5178\" -> 5178. None when no number is there."""
+    if text is None:
+        return None
+    match = re.search(r"([\d,\.]+)\s*([KMB]?)", str(text).strip(), re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        number = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    suffix = (match.group(2) or "").upper()
+    multiplier = {"K": 1000, "M": 1000000, "B": 1000000000}.get(suffix, 1)
+    return int(number * multiplier)
+
+
+def _deep_find_count(data, field_names, _depth=0):
+    """First int found under any of the field names, anywhere in
+    a JSON payload. Providers nest the same count differently
+    (data.play_count, data.stats.playCount, statistics.viewCount),
+    so the search walks the whole payload instead of trusting
+    one path. Depth-capped so a hostile payload cannot recurse
+    forever."""
+    if data is None or _depth > 12:
+        return None
+    if isinstance(data, dict):
+        for key in field_names:
+            if key in data:
+                found = _coerce_count(data[key])
+                if found is not None:
+                    return found
+        for value in data.values():
+            found = _deep_find_count(value, field_names, _depth + 1)
+            if found is not None:
+                return found
+        return None
+    if isinstance(data, list):
+        for item in data:
+            found = _deep_find_count(item, field_names, _depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def parse_ensembledata_count(payload, field):
+    """The count out of an EnsembleData response, or None. The
+    live shape (verified 19 Nov 2026 on video
+    7666462351436107015) is {"success": true, "data":
+    {"play_count": 5178, "digg_count": 7, ...}}; the search also
+    accepts the camelCase variants the raw TikTok payload uses."""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("success") is False:
+        return None
+    variants = {field, field.replace("_", ""), field.replace("_count", "Count")}
+    if field == "play_count":
+        variants |= {"playCount"}
+    if field == "follower_count":
+        variants |= {"followerCount", "followers"}
+    if field == "view_count":
+        variants |= {"viewCount"}
+    return _deep_find_count(payload, sorted(variants))
+
+
+# --- own scraper: provider 0 ---------------------------------------
+def _extract_json_blob(html, marker, terminator=None):
+    """The JSON object that follows `marker` in a page, or None.
+    With a terminator (e.g. "</script>") the slice is cut there;
+    without one the braces are balanced from the first "{"."""
+    if not html or marker not in html:
+        return None
+    start = html.index(marker) + len(marker)
+    if terminator is not None:
+        end = html.find(terminator, start)
+        if end < 0:
+            return None
+        snippet = html[start:end].strip().rstrip(";").strip()
+    else:
+        brace = html.find("{", start)
+        if brace < 0:
+            return None
+        depth = 0
+        end = None
+        for pos in range(brace, len(html)):
+            char = html[pos]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = pos + 1
+                    break
+        if end is None:
+            return None
+        snippet = html[brace:end]
+    try:
+        parsed = json.loads(snippet)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def parse_tiktok_page_count(html, metric):
+    """The count out of a TikTok video or profile page, or None.
+    play_count lives in the SIGI_STATE JSON (ItemModule.<id>.
+    stats.playCount); follower_count in the same blob
+    (UserModule...stats.followerCount). The rehydration JSON is
+    tried second; a bare "playCount":5178 regex is the last
+    resort for pages that serve a cut-down shell."""
+    if not html:
+        return None
+    field = "playCount" if metric == "views" else "followerCount"
+    for marker in (
+        '<script id="SIGI_STATE" type="application/json">',
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">',
+    ):
+        blob = _extract_json_blob(html, marker, "</script>")
+        if blob is not None:
+            found = _deep_find_count(blob, [field])
+            if found is not None:
+                return found
+    match = re.search(rf'"{field}"\s*:\s*(\d+)', html)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def parse_youtube_page_count(html, metric):
+    """The count out of a YouTube video or channel page, or None.
+    Views come from ytInitialData's viewCount ("5,178 views"),
+    subscribers from subscriberCountText ("12.3K subscribers").
+    The JSON is balanced out of the page; a bare regex on the
+    subscriber text is the fallback."""
+    if not html:
+        return None
+    field = "viewCount" if metric == "views" else "subscriberCount"
+    blob = _extract_json_blob(html, "var ytInitialData = ")
+    if blob is not None:
+        found = _deep_find_count(blob, [field])
+        if found is not None:
+            return found
+    if metric == "subscribers":
+        match = re.search(
+            r'"subscriberCountText"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"',
+            html,
+        )
+        if match:
+            return parse_compact_count(match.group(1))
+    else:
+        match = re.search(
+            r'"viewCount"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"',
+            html,
+        )
+        if match:
+            return parse_compact_count(match.group(1))
+    return None
+
+
+def parse_telegram_page_count(html):
+    """The subscriber count out of a public channel page
+    (t.me/s/<channel>), or None. The page carries it in plain
+    text: <div class="tgme_page_extra">1,234 subscribers</div>."""
+    if not html:
+        return None
+    match = re.search(
+        r"tgme_page_extra[^>]*>\s*([\d,\.]+[KM]?)\s+subscribers",
+        html, re.IGNORECASE,
+    )
+    if match:
+        return parse_compact_count(match.group(1))
+    match = re.search(r"([\d,\.]+[KM]?)\s+subscribers", html, re.IGNORECASE)
+    if match:
+        return parse_compact_count(match.group(1))
+    return None
+
+
+def _own_scraper_url(platform, metric, link):
+    """The public page to fetch for this count, or None when the
+    link cannot be used. TikTok and YouTube links are fetched
+    as-is (short links follow redirects); a Telegram link is
+    rewritten to its public preview page t.me/s/<channel>."""
+    raw = (link or "").strip()
+    if not raw:
+        return None
+    if platform == "telegram":
+        match = re.search(r"t\.me/(?:s/)?([A-Za-z0-9_]+)", raw)
+        if not match or match.group(1) in ("c", "s"):
+            return None
+        return f"https://t.me/s/{match.group(1)}"
+    if platform in ("tiktok", "youtube"):
+        if not raw.startswith("http"):
+            return None
+        return raw
+    return None
+
+
+def _parse_own_scraper_page(platform, metric, html):
+    if platform == "tiktok":
+        return parse_tiktok_page_count(html, metric)
+    if platform == "youtube":
+        return parse_youtube_page_count(html, metric)
+    if platform == "telegram":
+        return parse_telegram_page_count(html)
+    return None
+
+
+async def _count_http_get(http_get, method, url, params=None,
+                         json_body=None, headers=None, proxy=None,
+                         timeout=10.0):
+    """One HTTP call. Tests inject `http_get` (an async callable
+    returning (status, body_text)); live code uses httpx with
+    redirects followed and an optional proxy. Returns
+    (status, body_text)."""
+    if http_get is not None:
+        return await http_get(
+            method, url, params=params, json_body=json_body,
+            headers=headers, proxy=proxy, timeout=timeout,
+        )
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=True, proxy=proxy,
+    ) as client:
+        response = await client.request(
+            method, url, params=params, json=json_body, headers=headers,
+        )
+        return response.status_code, response.text
+
+
+async def fetch_own_scraper(platform, metric, link, http_get=None,
+                            proxy=None, timeout=COUNT_SCRAPER_TIMEOUT_SECONDS):
+    """Provider 0: fetch the public page and read the count out
+    of it. Returns (count, error_key): error_key is None on
+    success, else "unsupported" (no page for this platform or
+    metric), "blocked" (403/429/5xx — the page refused us),
+    "unavailable" (network error, non-200, empty page) or
+    "parse_failed" (the page loaded but the count is not in it).
+    Defensive by design: short timeout, one retry, and the retry
+    goes through the residential proxy when one is configured —
+    a direct fetch that gets blocked is retried via the proxy,
+    and any failure here only means "try the next provider"."""
+    if (platform, metric) not in (
+        ("tiktok", "views"), ("tiktok", "followers"),
+        ("youtube", "views"), ("youtube", "subscribers"),
+        ("telegram", "members"),
+    ):
+        return None, "unsupported"
+    url = _own_scraper_url(platform, metric, link)
+    if url is None:
+        return None, "unsupported"
+    attempts = [(url, None)]
+    if proxy:
+        attempts.append((url, proxy))
+    last_error = "unavailable"
+    for attempt_url, attempt_proxy in attempts:
+        try:
+            status, body = await _count_http_get(
+                http_get, "GET", attempt_url,
+                headers={"User-Agent": COUNT_SCRAPER_USER_AGENT},
+                proxy=attempt_proxy, timeout=timeout,
+            )
+        except Exception:
+            last_error = "unavailable"
+            continue
+        if status in (403, 429, 451) or status >= 500:
+            last_error = "blocked"
+            continue
+        if status != 200 or not body:
+            last_error = "unavailable"
+            continue
+        count = _parse_own_scraper_page(platform, metric, body)
+        if count is None:
+            last_error = "parse_failed"
+            continue
+        return count, None
+    return None, last_error
+
+
+# --- provider fetchers: one per API in the chain -------------------
+def _tiktok_username_from_link(link):
+    match = re.search(r"tiktok\.com/@([A-Za-z0-9_.]+)", link or "")
+    return match.group(1) if match else None
+
+
+def _youtube_id_from_link(link):
+    """("video", id) / ("channel", id) / ("handle", name) / None.
+    A @handle cannot be resolved without a search call (100
+    quota units), so subscribers for a @handle link is
+    unsupported — the setup asks for the channel link instead."""
+    raw = (link or "").strip()
+    match = re.search(r"[?&]v=([A-Za-z0-9_-]{6,})", raw)
+    if match:
+        return ("video", match.group(1))
+    match = re.search(r"youtu\.be/([A-Za-z0-9_-]{6,})", raw)
+    if match:
+        return ("video", match.group(1))
+    match = re.search(r"youtube\.com/(?:shorts|embed)/([A-Za-z0-9_-]{6,})", raw)
+    if match:
+        return ("video", match.group(1))
+    match = re.search(r"youtube\.com/channel/(UC[A-Za-z0-9_-]{6,})", raw)
+    if match:
+        return ("channel", match.group(1))
+    match = re.search(r"youtube\.com/@([A-Za-z0-9_.-]+)", raw)
+    if match:
+        return ("handle", match.group(1))
+    return None
+
+
+def _telegram_chat_from_link(link):
+    """The chat id for getChatMemberCount: "@name" for a public
+    channel, "-100<digits>" for a t.me/c/<digits> link. An invite
+    link (t.me/+...) names no public chat and is unsupported."""
+    raw = (link or "").strip()
+    match = re.search(r"t\.me/c/(\d+)", raw)
+    if match:
+        return f"-100{match.group(1)}"
+    match = re.search(r"t\.me/([A-Za-z0-9_]+)", raw)
+    if match and match.group(1) not in ("s", "c"):
+        return f"@{match.group(1)}"
+    return None
+
+
+async def _fetch_ensembledata(platform, metric, link, token, http_get):
+    """EnsembleData: GET /apis/tt/post/info?url&token (2 units)
+    for views, /apis/tt/user/info?username&token (1 unit) for
+    followers. Returns (count, error_key, cost)."""
+    if not token:
+        return None, "not_configured", 0
+    if platform != "tiktok":
+        return None, "unsupported", 0
+    if metric == "views":
+        url = "https://ensembledata.com/apis/tt/post/info"
+        params = {"url": link, "token": token}
+        cost, field = 2, "play_count"
+    elif metric == "followers":
+        username = _tiktok_username_from_link(link)
+        if not username:
+            return None, "unsupported", 0
+        url = "https://ensembledata.com/apis/tt/user/info"
+        params = {"username": username, "token": token}
+        cost, field = 1, "follower_count"
+    else:
+        return None, "unsupported", 0
+    try:
+        status, body = await _count_http_get(http_get, "GET", url, params=params)
+    except Exception:
+        return None, "unavailable", 0
+    if status == 429:
+        return None, "rate_limited", 0
+    if status != 200 or not body:
+        return None, "unavailable", 0
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return None, "unavailable", 0
+    count = parse_ensembledata_count(payload, field)
+    if count is None:
+        return None, "unavailable", 0
+    return count, None, cost
+
+
+async def _fetch_scrapeeverything(platform, metric, link, key, http_get):
+    """Scrape Everything: POST /v1/tiktok/video {"url": ...} (1
+    credit) for views, POST /v1/tiktok/profile {"username": ...}
+    for followers. Bearer key. Known to fail on TikTok (8
+    failures on 19 Nov: PROXY_CONNECT_FAILED / PARSE_ERROR), so
+    a failure here is routine — the chain just moves on. Failed
+    calls are refunded by the provider, so they cost 0."""
+    if not key:
+        return None, "not_configured", 0
+    if platform != "tiktok":
+        return None, "unsupported", 0
+    if metric == "views":
+        url = "https://api.scrapeeverything.com/v1/tiktok/video"
+        body = {"url": link}
+        field = "play_count"
+    elif metric == "followers":
+        username = _tiktok_username_from_link(link)
+        if not username:
+            return None, "unsupported", 0
+        url = "https://api.scrapeeverything.com/v1/tiktok/profile"
+        body = {"username": username}
+        field = "follower_count"
+    else:
+        return None, "unsupported", 0
+    try:
+        status, text = await _count_http_get(
+            http_get, "POST", url, json_body=body,
+            headers={"Authorization": f"Bearer {key}"},
+        )
+    except Exception:
+        return None, "unavailable", 0
+    if status == 429:
+        return None, "rate_limited", 0
+    if status != 200 or not text:
+        return None, "unavailable", 0
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return None, "unavailable", 0
+    if isinstance(payload, dict) and payload.get("success") is False:
+        return None, "unavailable", 0
+    count = _deep_find_count(payload, [field, field.replace("_count", "Count")])
+    if count is None:
+        return None, "unavailable", 0
+    return count, None, 1
+
+
+async def _fetch_youtube(platform, metric, link, key, http_get):
+    """YouTube Data API v3 (official): videos.list
+    ?part=statistics&id=... for views, channels.list
+    ?part=statistics&id=... for subscribers. 1 quota unit each
+    out of the free 10,000/day. A @handle link cannot be
+    resolved without a search call (100 units), so it is
+    unsupported — the channel link is needed instead."""
+    if not key:
+        return None, "not_configured", 0
+    if platform != "youtube":
+        return None, "unsupported", 0
+    kind = _youtube_id_from_link(link)
+    if metric == "views":
+        if kind is None or kind[0] != "video":
+            return None, "unsupported", 0
+        url = "https://www.googleapis.com/youtube/v3/videos"
+        params = {"part": "statistics", "id": kind[1], "key": key}
+        field = "viewCount"
+    elif metric == "subscribers":
+        if kind is None or kind[0] != "channel":
+            return None, "unsupported", 0
+        url = "https://www.googleapis.com/youtube/v3/channels"
+        params = {"part": "statistics", "id": kind[1], "key": key}
+        field = "subscriberCount"
+    else:
+        return None, "unsupported", 0
+    try:
+        status, text = await _count_http_get(http_get, "GET", url, params=params)
+    except Exception:
+        return None, "unavailable", 0
+    if status == 429:
+        return None, "rate_limited", 0
+    if status == 403:
+        # Quota exceeded (or the key is bad): treat as a limit,
+        # not a crash — the chain parks this provider for an hour.
+        return None, "rate_limited", 0
+    if status != 200 or not text:
+        return None, "unavailable", 0
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return None, "unavailable", 0
+    count = _deep_find_count(payload, [field])
+    if count is None:
+        return None, "unavailable", 0
+    return count, None, 1
+
+
+async def _fetch_telegram(platform, metric, link, token, http_get):
+    """Telegram Bot API getChatMemberCount: free, no quota. The
+    bot's own token (TELEGRAM_BOT_TOKEN) is used. A channel the
+    bot cannot see answers ok:false, which is "unavailable" —
+    the chain moves on, nothing crashes."""
+    if not token:
+        return None, "not_configured", 0
+    if platform != "telegram" or metric != "members":
+        return None, "unsupported", 0
+    chat = _telegram_chat_from_link(link)
+    if chat is None:
+        return None, "unsupported", 0
+    url = f"https://api.telegram.org/bot{token}/getChatMemberCount"
+    try:
+        status, text = await _count_http_get(
+            http_get, "GET", url, params={"chat_id": chat},
+        )
+    except Exception:
+        return None, "unavailable", 0
+    if status == 429:
+        return None, "rate_limited", 0
+    if status != 200 or not text:
+        return None, "unavailable", 0
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return None, "unavailable", 0
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return None, "unavailable", 0
+    count = _coerce_count(payload.get("result"))
+    if count is None:
+        return None, "unavailable", 0
+    return count, None, 0
+
+
+# --- the chain -------------------------------------------------------
+class CountUsage:
+    """Per-provider daily usage, kept in the refill record itself
+    (refill["count_usage"]) so it survives restarts: the server
+    persists the record in bot_refills, and the worker passes it
+    back on every check. Shape: {provider: {"date":
+    "2026-11-19", "used": 4, "backoff_until": 0}}. A new day
+    resets the count; a 429 parks the provider for an hour.
+    Providers with no daily budget (own scraper, Telegram, Scrape
+    Everything's one-time credits) are never blocked by budget —
+    their own balance or quota is the limit."""
+
+    def __init__(self, raw=None):
+        self.data = {}
+        for name, entry in (raw or {}).items():
+            if isinstance(entry, dict):
+                self.data[str(name)] = {
+                    "date": entry.get("date"),
+                    "used": int(entry.get("used") or 0),
+                    "backoff_until": float(entry.get("backoff_until") or 0),
+                }
+
+    def _today(self, now=None):
+        stamp = now if now is not None else time.time()
+        return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    def used_today(self, provider, now=None):
+        entry = self.data.get(provider) or {}
+        if entry.get("date") != self._today(now):
+            return 0
+        return int(entry.get("used") or 0)
+
+    def is_parked(self, provider, now=None):
+        stamp = now if now is not None else time.time()
+        entry = self.data.get(provider) or {}
+        return float(entry.get("backoff_until") or 0) > stamp
+
+    def can_use(self, provider, cost, now=None):
+        if self.is_parked(provider, now):
+            return False
+        budget = (COUNT_PROVIDERS.get(provider) or {}).get("daily_budget")
+        if budget is None:
+            return True
+        return self.used_today(provider, now) + int(cost) <= int(budget)
+
+    def record(self, provider, cost, now=None):
+        today = self._today(now)
+        entry = self.data.get(provider) or {}
+        if entry.get("date") != today:
+            entry = {"date": today, "used": 0, "backoff_until": 0}
+        entry["used"] = int(entry.get("used") or 0) + int(cost)
+        self.data[provider] = entry
+
+    def park(self, provider, seconds=3600, now=None):
+        stamp = now if now is not None else time.time()
+        today = self._today(now)
+        entry = self.data.get(provider) or {}
+        if entry.get("date") != today:
+            entry = {"date": today, "used": 0, "backoff_until": 0}
+        entry["backoff_until"] = stamp + seconds
+        self.data[provider] = entry
+
+    def to_dict(self):
+        return {name: dict(entry) for name, entry in self.data.items()}
+
+
+def count_cache_get(platform, metric, link, now=None):
+    """A count fetched in the last COUNT_CACHE_TTL_SECONDS, or
+    None. Reusing it spends no units at all."""
+    stamp = now if now is not None else time.time()
+    entry = _COUNT_CACHE.get((platform, metric, link))
+    if entry is None:
+        return None
+    count, _provider, at = entry
+    if stamp - at > COUNT_CACHE_TTL_SECONDS:
+        _COUNT_CACHE.pop((platform, metric, link), None)
+        return None
+    return count
+
+
+def count_cache_put(platform, metric, link, count, provider, now=None):
+    stamp = now if now is not None else time.time()
+    _COUNT_CACHE[(platform, metric, link)] = (count, provider, stamp)
+
+
+async def fetch_live_count(platform, metric, link, usage=None,
+                          tokens=None, http_get=None, proxy=None,
+                          now=None):
+    """The fallback chain: try each provider for this
+    platform+metric in COUNT_CHAIN order until one returns a
+    count. Returns (count, provider, cost, usage_dict) on
+    success, or (None, error_key, 0, usage_dict) when none did.
+    error_key: "unsupported" (nothing is wired for this
+    platform+metric), "no_provider" (wired but nothing is
+    configured, budgeted or unparked), "rate_limited" (every
+    tried provider answered 429), "all_failed" (the rest).
+    `usage` is the refill record's CountUsage dict (plain dict);
+    it is updated in place and returned, so the caller can
+    persist it. Failed calls never consume budget; a 429 parks
+    that provider for an hour."""
+    stamp = now if now is not None else time.time()
+    tracker = CountUsage(usage)
+    tokens = tokens if tokens is not None else count_tokens_from_env()
+    chain = COUNT_CHAIN.get((platform or "", metric or "")) or []
+    if not chain:
+        return None, "unsupported", 0, tracker.to_dict()
+    cached = count_cache_get(platform, metric, link, now=stamp)
+    if cached is not None:
+        return cached, "cache", 0, tracker.to_dict()
+    saw_rate_limit = False
+    tried_any = False
+    for name in chain:
+        info = COUNT_PROVIDERS.get(name) or {}
+        if not info.get("enabled"):
+            continue
+        # Budget first: a provider over its daily allowance is
+        # never called — calling it would spend units on the
+        # provider's side even though the answer is thrown away.
+        if name == "ensembledata":
+            _cost = 2 if metric == "views" else 1
+        elif name in ("scrapeeverything", "youtube"):
+            _cost = 1
+        else:
+            _cost = 0
+        if not tracker.can_use(name, _cost, now=stamp):
+            continue
+        if name == "own_scraper":
+            count, error = await fetch_own_scraper(
+                platform, metric, link, http_get=http_get, proxy=proxy,
+            )
+            cost = 0
+        elif name == "ensembledata":
+            count, error, cost = await _fetch_ensembledata(
+                platform, metric, link, tokens.get("ensembledata"), http_get,
+            )
+        elif name == "socialholmes":
+            # Disabled until verified (see SOCIALHOLMES_NOTE): the
+            # chain never reaches a live call here.
+            continue
+        elif name == "scrapeeverything":
+            count, error, cost = await _fetch_scrapeeverything(
+                platform, metric, link, tokens.get("scrapeeverything"), http_get,
+            )
+        elif name == "youtube":
+            count, error, cost = await _fetch_youtube(
+                platform, metric, link, tokens.get("youtube"), http_get,
+            )
+        elif name == "telegram":
+            count, error, cost = await _fetch_telegram(
+                platform, metric, link, tokens.get("telegram"), http_get,
+            )
+        else:
+            continue
+        if error == "not_configured" or error == "unsupported":
+            continue
+        if error == "rate_limited":
+            saw_rate_limit = True
+            tracker.park(name, now=stamp)
+            continue
+        tried_any = True
+        if error is not None:
+            log.info("count check: %s failed for %s %s (%s)", name, platform, metric, error)
+            continue
+        if count is None:
+            continue
+        if cost:
+            # A zero-cost hit (own scraper, Telegram) records
+            # nothing: the usage record only tracks providers with
+            # a daily allowance to protect.
+            tracker.record(name, cost, now=stamp)
+        count_cache_put(platform, metric, link, count, name, now=stamp)
+        return count, name, cost, tracker.to_dict()
+    if saw_rate_limit and not tried_any:
+        return None, "rate_limited", 0, tracker.to_dict()
+    if not tried_any:
+        return None, "no_provider", 0, tracker.to_dict()
+    return None, "all_failed", 0, tracker.to_dict()
+
+
+async def auto_refill_check(refill, tokens=None, http_get=None,
+                            proxy=None, now=None):
+    """One hourly check for one refill record. The record carries
+    everything the check needs and everything it updates, so the
+    server worker can persist it in bot_refills and the check
+    survives restarts:
+      in:  {"telegram_id", "service", "link", "target",
+            "spent_today", "last_count", "last_check",
+            "count_usage"}
+      out: {"action", "current", "quantity", "cost", "provider",
+            "reason", "count_usage", "last_count", "last_check"}
+    The record's own last_count is the durable cache: when it is
+    fresher than COUNT_CACHE_TTL_SECONDS the chain is not called
+    at all. The caller places the top-up order for a "top_up"
+    decision — this function never orders and never moves money."""
+    stamp = now if now is not None else time.time()
+    service = refill.get("service") or {}
+    platform = (refill.get("platform") or "").strip().lower()
+    metric = (refill.get("metric") or "").strip().lower()
+    link = refill.get("link") or ""
+    target = refill.get("target")
+    spent_today = refill.get("spent_today") or 0
+    usage = dict(refill.get("count_usage") or {})
+    last_count = refill.get("last_count")
+    last_check = refill.get("last_check")
+    current = None
+    provider = None
+    if last_count is not None and last_check is not None:
+        try:
+            if stamp - float(last_check) <= COUNT_CACHE_TTL_SECONDS:
+                current = int(last_count)
+                provider = "cache"
+        except (TypeError, ValueError):
+            current = None
+    error_key = None
+    if current is None:
+        current, provider, _cost, usage = await fetch_live_count(
+            platform, metric, link, usage=usage, tokens=tokens,
+            http_get=http_get, proxy=proxy, now=stamp,
+        )
+        if current is None:
+            # fetch_live_count returns its error key in the
+            # provider slot when it finds no count.
+            error_key = provider
+            provider = None
+        else:
+            last_count = current
+            last_check = stamp
+    if current is None:
+        return {
+            "action": "unavailable", "current": None, "quantity": None,
+            "cost": None, "provider": None, "reason": error_key,
+            "count_usage": usage, "last_count": last_count,
+            "last_check": last_check,
+        }
+    decision = auto_refill_decide(
+        current, target, service, spent_today,
+    )
+    decision["current"] = current
+    decision["provider"] = provider
+    decision["count_usage"] = usage
+    decision["last_count"] = last_count
+    decision["last_check"] = last_check
+    return decision
 
 
 # --- settings in plain words (the "what are my settings" chat) -----
@@ -21289,6 +22428,22 @@ def pending_for_user(user_id: int):
     return None, None
 
 
+def drop_pending_confirms_for_user(user_id: int):
+    """Drop every pending normal Confirm for a user. PENDING is
+    keyed by confirm id, not by user, so this scans the values —
+    a bare PENDING.pop(user_id) would pop nothing. Used when a
+    delayed order is saved (19 Nov 2026, Order ID 1881): a stale
+    normal Confirm must not survive to be placed by a later bare
+    "Ok". Only normal confirms live in PENDING; delayed, recurring
+    and auto-refill setups live in their own dicts and are never
+    touched here."""
+    for confirm_id in [
+        cid for cid, entry in PENDING.items()
+        if entry.get("user_id") == user_id
+    ]:
+        PENDING.pop(confirm_id, None)
+
+
 async def create_order_for_service(client, user_id: int, service, link: str,
                                    quantity: int, idempotency_key: str,
                                    split=None, drip=None):
@@ -21768,6 +22923,67 @@ def pending_recurring_for_user(user_id: int):
     return None, None
 
 
+def pending_auto_refill_for_user(user_id: int):
+    """(confirm_id, setup) of the user's most recent auto-refill
+    awaiting Confirm, or (None, None)."""
+    for confirm_id, setup in reversed(list(PENDING_AUTO_REFILL.items())):
+        if setup["user_id"] == user_id:
+            return confirm_id, setup
+    return None, None
+
+
+def list_auto_refills(user_id: int):
+    """The user's confirmed auto-refills (in-memory registry), or []."""
+    return list(AUTO_REFILL_ACTIVE.get(user_id) or [])
+
+
+def register_auto_refill(setup, user_id: int):
+    """Switch an auto-refill on from a confirmed setup. Returns
+    the stored refill record. IN-MEMORY ONLY until the server
+    bot_refills table lands (see AUTO_REFILL_ACTIVE): the record
+    carries count_usage and last_count/last_check so the hourly
+    check can run from it, and the server worker will persist
+    the same shape in bot_refills."""
+    refill = {
+        "id": f"mem-{uuid.uuid4().hex[:12]}",
+        "user_id": user_id,
+        "service": setup.get("service"),
+        "link": setup.get("link"),
+        "target": setup.get("target"),
+        "metric": setup.get("metric"),
+        "platform": setup.get("platform"),
+        "spent_today": 0,
+        "spent_date": None,
+        "last_count": None,
+        "last_check": None,
+        "count_usage": {},
+        "created_at": time.time(),
+    }
+    AUTO_REFILL_ACTIVE.setdefault(user_id, []).append(refill)
+    return refill
+
+
+def _auto_refill_metric(service_hint, service):
+    """The countable metric for a refill: the kind the user named
+    ("followers", "views", "likes", "members", "subscribers"), or
+    the service's own kind. Only views/followers (TikTok),
+    views/subscribers (YouTube) and members (Telegram) have a
+    count chain — anything else refuses at setup."""
+    hint = (service_hint or "").strip().lower()
+    for metric in ("followers", "views", "likes", "members", "subscribers"):
+        if metric in hint:
+            return metric
+    name = str((service or {}).get("name") or "").lower()
+    for metric in ("followers", "views", "likes", "members", "subscribers"):
+        if metric in name:
+            return metric
+    category = str((service or {}).get("category") or "").lower()
+    for metric in ("followers", "views", "likes", "members", "subscribers"):
+        if metric in category:
+            return metric
+    return None
+
+
 async def start_recurring_plan(draft, user_id: int):
     """Create a repeating order on the server from a confirmed draft.
 
@@ -21886,6 +23102,15 @@ async def delayed_store_create(draft, user_id: int):
             "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         })
         DELAYED_MEMORY[record["id"]] = record
+        # Stale Confirm (19 Nov 2026, Order ID 1881): a normal
+        # order's Confirm card left unconfirmed, then a delayed
+        # order scheduled, then a bare "Ok" placed the OLD order.
+        # Saving the delayed order retires any pending normal
+        # Confirm for this user, so a later bare acceptance has
+        # nothing stale to place. The delayed order itself lives
+        # in DELAYED_MEMORY / on the server, never in PENDING,
+        # so this cannot touch it.
+        drop_pending_confirms_for_user(user_id)
         return record, None
     record = result.get("delayed_order", result) if isinstance(result, dict) else {}
     if not record or record.get("id") is None:
@@ -21906,6 +23131,10 @@ async def delayed_store_create(draft, user_id: int):
             "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         })
         DELAYED_MEMORY[record["id"]] = record
+    # Stale Confirm (19 Nov 2026, Order ID 1881): see the memory
+    # path above — a successfully saved delayed order retires any
+    # pending normal Confirm for this user.
+    drop_pending_confirms_for_user(user_id)
     return _delayed_record_fields(record), None
 
 
@@ -24190,6 +25419,285 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
         reply_markup=confirm_keyboard(confirm_id),
     )
     _remember_card_message(PENDING[confirm_id], update.message, _sent)
+
+async def handle_auto_refill_text(update, text, intent, lang, voice=False):
+    """Build an auto-refill (keep-above-target) setup over several
+    turns, then show the preview with a Confirm card. Nothing is
+    switched on until the user taps Confirm (or says yes): a
+    setup that spends the user's balance by itself must never
+    start on a misunderstood message.
+
+    Missing pieces are asked in order: platform -> link ->
+    target. The link is NEVER taken from the user's last order:
+    a stale link here would top up the wrong post, every hour,
+    until someone notices. Only a link sent in THIS conversation
+    (the message, the draft being built, or the plain card still
+    waiting) is used. The preview says plainly that the bot will
+    use the user's balance every time the count drops below the
+    target, and names the daily limit — that warning is the
+    point of the Confirm card, not fine print.
+    """
+    user = update.effective_user
+    stored = AUTO_REFILL_DRAFT.get(user.id) or {}
+    new_platform = (intent.get("platform") or "").strip().lower()
+    stored_platform = (stored.get("platform") or "").strip().lower()
+    if new_platform and stored_platform and new_platform != stored_platform:
+        stored = {}
+    merged = {}
+    for key in ("platform", "service_hint", "link", "target"):
+        value = intent.get(key)
+        merged[key] = value if value is not None else stored.get(key)
+    if merged.get("target") is None:
+        merged["target"] = parse_auto_refill_target(text)
+    if merged.get("target") is None and (text or "").strip().isdigit():
+        # A bare number while the setup waits for its target.
+        merged["target"] = int((text or "").strip())
+    try:
+        target = int(merged["target"]) if merged.get("target") is not None else None
+    except (TypeError, ValueError):
+        target = None
+    if target is not None and target < 10:
+        target = None
+    merged["target"] = target
+    if not merged.get("link"):
+        _raw_links = extract_links(text)
+        if _raw_links:
+            merged["link"] = _raw_links[0]
+    if not merged.get("link"):
+        # The link from the CURRENT conversation only: the draft
+        # being built, the parked draft, or the plain Confirm
+        # card still waiting. Never the last placed order.
+        _current = _current_conversation_order(user.id)
+        if _current is not None and _current.get("link"):
+            merged["link"] = _current.get("link")
+            if not merged.get("platform") and _current.get("platform"):
+                merged["platform"] = _current.get("platform")
+            if not merged.get("service_hint") and _current.get("service_hint"):
+                merged["service_hint"] = _current.get("service_hint")
+    if not merged.get("platform") and not merged.get("service_hint"):
+        AUTO_REFILL_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(update.message, t("ask_platform", lang), lang, voice=voice)
+        return
+    if not merged.get("link"):
+        AUTO_REFILL_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(
+            update.message,
+            ask_link_text(merged.get("platform"), merged.get("service_hint"), lang),
+            lang, voice=voice,
+        )
+        return
+    if merged.get("target") is None:
+        AUTO_REFILL_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(
+            update.message, t("ask_auto_refill_target", lang), lang, voice=voice,
+        )
+        return
+
+    # Complete setup: pick the service, then check the count can
+    # actually be read for it. A platform+metric with no count
+    # chain (Instagram today) is refused honestly here, before
+    # any Confirm card promises it.
+    try:
+        services = await paxyo.services()
+    except Exception as exc:
+        log.warning("services fetch failed: %s", exc)
+        await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
+        return
+    picks = pick_services(
+        services, platform=merged.get("platform"),
+        service_hint=merged.get("service_hint"),
+        reaction_emoji=reaction_emoji(text),
+    )
+    if not picks:
+        await reply_message(
+            update.message,
+            no_service_reply(
+                merged.get("platform"), merged.get("service_hint"),
+                text, lang,
+            ) or t("no_service", lang),
+            lang, voice=voice,
+        )
+        return
+    service = picks[0]
+    metric = _auto_refill_metric(merged.get("service_hint"), service)
+    platform = (merged.get("platform") or "").strip().lower()
+    if not platform:
+        platform = (platform_from_link(merged["link"]) or "").strip().lower()
+    if metric is None or not count_chain_supports(platform, metric):
+        AUTO_REFILL_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(
+            update.message,
+            t("auto_refill_count_unsupported", lang, platform=platform or "this"),
+            lang, voice=voice,
+        )
+        return
+    minimum = _service_min_qty(service)
+    if target < minimum:
+        AUTO_REFILL_DRAFT[user.id] = {k: v for k, v in merged.items() if v is not None}
+        await reply_message(
+            update.message,
+            t(
+                "auto_refill_target_too_small", lang,
+                service=short_service_name(service.get("name")),
+                min=minimum,
+            ),
+            lang, voice=voice,
+        )
+        return
+    # The link must fit the service, same backstop as the normal
+    # order flow: a Telegram link on a TikTok refill never
+    # reaches the Confirm card.
+    if await _refuse_mismatched_link(
+        update, AUTO_REFILL_DRAFT, user.id, merged, service, lang, voice=voice
+    ):
+        return
+    confirm_id = uuid.uuid4().hex[:12]
+    AUTO_REFILL_DRAFT.pop(user.id, None)
+    PENDING_AUTO_REFILL[confirm_id] = {
+        "user_id": user.id,
+        "service": service,
+        "link": merged["link"],
+        "target": target,
+        "metric": metric,
+        "platform": platform,
+    }
+    # A dedicated preview, not confirm_card_text: there is no
+    # single order here, so no quantity and no total — showing
+    # "0.00 ETB" would be a lie, the top-ups cost later. The
+    # balance warning is the note on top, in plain words.
+    _note = (
+        f"Auto-refill: keep {metric} above {target:,} — checked every hour. "
+        f"I will use your balance every time it drops below {target:,}, "
+        f"only the missing amount, at most {format_money(AUTO_REFILL_DAILY_CAP_ETB)} "
+        "ETB a day."
+    )
+    _preview = _strip_dashes("\n".join([
+        t("confirm_title", lang), "",
+        _note, "",
+        f"{short_service_name(service.get('name'))} (#{service.get('service')})",
+        f"⏱ {service.get('average_time') or 'n/a'}",
+        f"💰 {format_money(service.get('rate_etb_per_1000', 0))} ETB / 1000",
+        f"🔗 {merged['link']}",
+        "",
+        t("public_reminder", lang),
+    ]))
+    _sent = await reply_message(
+        update.message,
+        _preview,
+        lang,
+        reply_markup=confirm_keyboard(confirm_id),
+    )
+    _remember_card_message(PENDING_AUTO_REFILL[confirm_id], update.message, _sent)
+
+
+def _is_auto_refill_followup(text, user_id):
+    """True when a message only answers the open auto-refill
+    setup's question: a bare link, or a bare number while the
+    setup waits for its target. A fuller message (a fresh order,
+    a balance question, a deposit) is not a follow-up and goes
+    through the normal dispatch."""
+    draft = AUTO_REFILL_DRAFT.get(user_id) or {}
+    if not draft:
+        return False
+    links = extract_links(text or "")
+    rest = text or ""
+    for link in links:
+        rest = rest.replace(link, " ")
+    rest = " ".join(rest.strip().lower().split())
+    if links and not rest:
+        return not PARTIAL.get(user_id)
+    if draft.get("target") is None and rest.isdigit():
+        partial = PARTIAL.get(user_id) or {}
+        return not (partial.get("link") and not partial.get("quantity"))
+    return False
+
+
+async def handle_auto_refill_status(update, lang, voice=False):
+    """List the user's confirmed auto-refills, or say there are
+    none. The line is honest about the server: until the hourly
+    worker is installed, a listed refill is set up but not yet
+    checking."""
+    user = update.effective_user
+    refills = list_auto_refills(user.id)
+    if not refills:
+        await reply_message(
+            update.message, t("auto_refill_none", lang), lang, voice=voice,
+        )
+        return
+    lines = []
+    for refill in refills:
+        service = refill.get("service") or {}
+        lines.append(
+            f"{short_service_name(service.get('name'))}: "
+            f"keep {refill.get('metric')} above {refill.get('target'):,} — "
+            f"{refill.get('link')}"
+        )
+    lines.append(
+        "The hourly check on the server is not installed yet, "
+        "so no top-up will happen until that is live."
+    )
+    await reply_message(
+        update.message, "\n".join(lines), lang, voice=voice,
+    )
+
+
+async def handle_auto_refill_stop(update, text, lang, voice=False):
+    """Stop the user's auto-refill(s). One refill stops itself;
+    several ask which one (the same shape as stop_schedule)."""
+    user = update.effective_user
+    refills = list_auto_refills(user.id)
+    if not refills:
+        await reply_message(
+            update.message, t("auto_refill_none_to_stop", lang), lang, voice=voice,
+        )
+        return
+    if len(refills) == 1:
+        stopped = refills[0]
+        AUTO_REFILL_ACTIVE[user.id] = []
+        await reply_message(
+            update.message,
+            t(
+                "auto_refill_stopped", lang,
+                service=short_service_name((stopped.get("service") or {}).get("name")),
+            ),
+            lang, voice=voice,
+        )
+        return
+    # Several: stop the one the message names, or ask.
+    named = None
+    low = (text or "").lower()
+    for refill in refills:
+        service = refill.get("service") or {}
+        name = short_service_name(service.get("name")).lower()
+        if name and name in low:
+            named = refill
+            break
+        if (refill.get("link") or "") in (text or ""):
+            named = refill
+            break
+    if named is not None:
+        AUTO_REFILL_ACTIVE[user.id] = [
+            r for r in refills if r is not named
+        ]
+        await reply_message(
+            update.message,
+            t(
+                "auto_refill_stopped", lang,
+                service=short_service_name((named.get("service") or {}).get("name")),
+            ),
+            lang, voice=voice,
+        )
+        return
+    await reply_message(
+        update.message,
+        t("stop_which", lang) + "\n" + "\n".join(
+            f"- {short_service_name((r.get('service') or {}).get('name'))}: "
+            f"keep {r.get('metric')} above {r.get('target'):,}"
+            for r in refills
+        ),
+        lang, voice=voice,
+    )
+
 
 async def handle_delayed_order_text(update, text, intent, lang, voice=False):
     """Build a one-time delayed order over several turns, then show
@@ -28770,6 +30278,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
       is pending places that order — no new intent is extracted.
     - Gemini first classifies the message (order, recurring, schedules,
       stop_schedule, balance, orders, deposit, deposit_status,
+      auto_refill, auto_refill_status, auto_refill_stop,
       how_to_order, how_to, miniapp, social, help, greeting,
       paxyo_info, source_question, reseller, contact, paused_services, usual, goal,
       budget, batch, change_order, refill, split_payment,
@@ -29323,6 +30832,25 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             )
             return
+        # A "yes" can also confirm an auto-refill setup awaiting
+        # Confirm: switch it on (in-memory until the server table
+        # lands) and answer with a short text confirmation.
+        auto_id, auto_setup = pending_auto_refill_for_user(user.id)
+        if auto_setup is not None:
+            PENDING_AUTO_REFILL.pop(auto_id, None)
+            register_auto_refill(auto_setup, user.id)
+            await update.message.reply_text(
+                t(
+                    "auto_refill_started",
+                    lang,
+                    service=short_service_name(
+                        (auto_setup.get("service") or {}).get("name")
+                    ),
+                    target=f"{auto_setup.get('target'):,}",
+                    cap=format_money(AUTO_REFILL_DAILY_CAP_ETB),
+                )
+            )
+            return
         # A "yes" can also confirm a one-time delayed order awaiting
         # Confirm: schedule it and answer with a short text
         # confirmation (a scheduled order is always text).
@@ -29718,6 +31246,26 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         intent["intent"] = "order"
         intent_type = "order"
 
+    # Auto-refill guard (19 Nov 2026): the mirror of the order
+    # override above. The AI is the primary classifier and
+    # local_intent only runs when it is unreachable, so a "keep
+    # my followers above 15k" misread as a plain "order" would
+    # build a one-time 15k order for real money. When the message
+    # deterministically asks to keep a count above a target, it
+    # is an auto-refill setup whatever the classifier called it
+    # ("order", "unclear", "safety"...) — the target rides along
+    # and the quantity is dropped, so the order flow never sees
+    # it. The auto-refill intents themselves are not in
+    # _ORDER_OVERRIDABLE, so a stop/status can never be rewritten
+    # by this guard.
+    if intent_type in ("order",) + _ORDER_OVERRIDABLE and (
+        is_auto_refill_request(text)
+    ):
+        intent["intent"] = "auto_refill"
+        intent_type = "auto_refill"
+        intent["target"] = parse_auto_refill_target(text)
+        intent["quantity"] = None
+
     # Friday pattern (feature 5, 15 Nov 2026): a light message —
     # greeting, small talk, or an unclear message — on the weekday
     # the user usually orders on gets the one-per-week offer
@@ -29958,6 +31506,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
             log_confusion(user.id, text, t("cancelled", lang), "abandoned")
             return
+        auto_id, auto_setup = pending_auto_refill_for_user(user.id)
+        if auto_setup is not None and pending is None and rec_draft is None:
+            PENDING_AUTO_REFILL.pop(auto_id, None)
+            AUTO_REFILL_DRAFT.pop(user.id, None)
+            await reply_message(update.message, t("cancelled", lang), lang, voice=voice)
+            log_confusion(user.id, text, t("cancelled", lang), "abandoned")
+            return
         dep_id, dep_draft = pending_deposit_for_user(user.id)
         if dep_draft is not None and pending is None and rec_draft is None:
             PENDING_DEPOSIT.pop(dep_id, None)
@@ -30042,12 +31597,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         had_something = bool(
             PARTIAL.get(user.id)
             or RECURRING_DRAFT.get(user.id)
+            or AUTO_REFILL_DRAFT.get(user.id)
             or DELAYED_DRAFT.get(user.id)
             or DEPOSIT_DRAFT.get(user.id)
             or SPLIT_DRAFT.get(user.id)
         )
         clear_order_state(user.id)
         RECURRING_DRAFT.pop(user.id, None)
+        AUTO_REFILL_DRAFT.pop(user.id, None)
         DELAYED_DRAFT.pop(user.id, None)
         DEPOSIT_DRAFT.pop(user.id, None)
         SPLIT_DRAFT.pop(user.id, None)
@@ -30073,6 +31630,15 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     if intent_type == "recurring":
         await handle_recurring_text(update, text, intent, lang, voice=voice)
+        return
+    if intent_type == "auto_refill":
+        await handle_auto_refill_text(update, text, intent, lang, voice=voice)
+        return
+    if intent_type == "auto_refill_status":
+        await handle_auto_refill_status(update, lang, voice=voice)
+        return
+    if intent_type == "auto_refill_stop":
+        await handle_auto_refill_stop(update, text, lang, voice=voice)
         return
     if intent_type == "delayed_orders":
         await reply_message(
@@ -30511,6 +32077,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
         if _new_platform and _stored_platform and _new_platform != _stored_platform:
             RECURRING_DRAFT.pop(user.id, None)
+
+    # An auto-refill setup being built keeps routing here on
+    # follow-up turns (a bare link, or the target number),
+    # unless the message names a different platform: that starts
+    # a new order and drops the setup, the same rule the
+    # recurring flow uses.
+    if user.id in AUTO_REFILL_DRAFT and intent_type in ("order", "unclear", "auto_refill"):
+        _stored_auto = AUTO_REFILL_DRAFT[user.id]
+        _new_platform = (intent.get("platform") or "").strip().lower()
+        _stored_platform = (_stored_auto.get("platform") or "").strip().lower()
+        if _is_auto_refill_followup(text, user.id) and not (
+            _new_platform and _stored_platform and _new_platform != _stored_platform
+        ):
+            await handle_auto_refill_text(update, text, intent, lang, voice=voice)
+            return
+        if _new_platform and _stored_platform and _new_platform != _stored_platform:
+            AUTO_REFILL_DRAFT.pop(user.id, None)
 
     # --- order flow: multi-turn state ---
     # A bundle draft is dropped here (ideas batch 1 #3): reaching
@@ -33098,6 +34681,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 quantity=rec_draft["quantity"],
                 service=short_service_name(rec_draft["service"].get("name")),
                 interval=format_interval(rec_draft["interval_minutes"]),
+            )
+        )
+        return
+
+    auto_setup = PENDING_AUTO_REFILL.pop(arg, None)
+    if auto_setup is not None:
+        if auto_setup["user_id"] != user.id:
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        if action == "cancel":
+            await query.edit_message_text(t("cancelled", lang))
+            return
+        # Confirm tap: switch the auto-refill on (in-memory until
+        # the server bot_refills table lands) and replace the
+        # preview with a short confirmation (text).
+        register_auto_refill(auto_setup, user.id)
+        await query.edit_message_text(
+            t(
+                "auto_refill_started",
+                lang,
+                service=short_service_name(
+                    (auto_setup.get("service") or {}).get("name")
+                ),
+                target=f"{auto_setup.get('target'):,}",
+                cap=format_money(AUTO_REFILL_DAILY_CAP_ETB),
             )
         )
         return
