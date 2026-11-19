@@ -34104,9 +34104,10 @@ async def _edit_callback_message(query, text, reply_markup=None):
     caption, and Telegram refuses editMessageText on a photo
     ("there is no text in the message to edit"), so tapping
     Deposit now did nothing live. Try the text edit first, then
-    the caption edit; a message that accepts neither keeps its
-    old content, and the failure is logged instead of crashing
-    the callback."""
+    the caption edit, then a fresh message as a last resort (a
+    caption over 1024 chars is refused too); the user always sees
+    the result, and a failure is logged instead of crashing the
+    callback."""
     try:
         await query.edit_message_text(text, reply_markup=reply_markup)
         return
@@ -34116,8 +34117,13 @@ async def _edit_callback_message(query, text, reply_markup=None):
         await query.edit_message_caption(
             caption=text, reply_markup=reply_markup
         )
+        return
     except Exception as exc:
-        log.warning("callback caption edit failed: %s", exc)
+        log.warning("callback caption edit failed, sending anew: %s", exc)
+    try:
+        await query.message.reply_text(text, reply_markup=reply_markup)
+    except Exception as exc:
+        log.warning("callback reply failed: %s", exc)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -34436,23 +34442,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # never "Order cancelled".
         retry_key = f"retry:{user.id}"
         if DEPOSIT_CONFIRM_IN_FLIGHT.get(retry_key) == user.id:
-            await query.edit_message_text(
-                t("deposit_confirm_processing", lang)
+            await _edit_callback_message(
+                query, t("deposit_confirm_processing", lang)
             )
             return
         draft = FAILED_DEPOSIT.pop(user.id, None)
         if draft is None:
-            await query.edit_message_text(t("cancelled", lang))
+            await _edit_callback_message(query, t("cancelled", lang))
             return
         DEPOSIT_CONFIRM_IN_FLIGHT[retry_key] = user.id
         try:
-            await query.edit_message_text(
-                t("deposit_confirm_processing", lang)
+            await _edit_callback_message(
+                query, t("deposit_confirm_processing", lang)
             )
             result, error = await start_deposit(draft, user.id)
             # Ban (19 Nov 2026): a banned user deposits nothing.
             if error == "banned":
-                await query.edit_message_text(t("banned", lang))
+                await _edit_callback_message(query, t("banned", lang))
                 return
             if error:
                 if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
@@ -34461,11 +34467,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         draft["amount"], lang,
                         allow_retry=True, user_id=user.id,
                     )
-                    await query.edit_message_text(text, reply_markup=markup)
+                    await _edit_callback_message(
+                        query, text, reply_markup=markup
+                    )
                 else:
-                    await query.edit_message_text(_strip_dashes(error))
+                    await _edit_callback_message(
+                        query, _strip_dashes(error)
+                    )
                 return
-            await query.edit_message_text(
+            await _edit_callback_message(
+                query,
                 t(
                     "deposit_popup_ready", lang,
                     amount=format_money(draft["amount"]),
@@ -35166,26 +35177,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # the deposit — the draft is already popped, but the deposit
         # is NOT cancelled. Say it is starting instead of falling
         # through to "Order cancelled" below.
-        await query.edit_message_text(t("deposit_confirm_processing", lang))
+        await _edit_callback_message(
+            query, t("deposit_confirm_processing", lang)
+        )
         return
     dep_draft = PENDING_DEPOSIT.pop(arg, None)
     if dep_draft is not None:
         if dep_draft["user_id"] != user.id:
-            await query.edit_message_text(t("cancelled", lang))
+            await _edit_callback_message(query, t("cancelled", lang))
             return
         if action == "cancel":
-            await query.edit_message_text(t("cancelled", lang))
+            await _edit_callback_message(query, t("cancelled", lang))
             return
         # Confirm tap: mark it in flight BEFORE the slow
         # start_deposit calls, and tell the user at once that it
         # is starting — the card used to sit unchanged until the
         # server answered, which read as lag and invited a second
         # tap. The finally clears the flag whatever happens, so a
-        # later tap is never stuck on "processing".
+        # later tap is never stuck on "processing". The card can
+        # sit on the guide photo (20 Nov 2026), so every edit here
+        # goes through _edit_callback_message — a plain
+        # edit_message_text is refused on a photo and the Confirm
+        # tap does nothing.
         DEPOSIT_CONFIRM_IN_FLIGHT[arg] = user.id
         try:
-            await query.edit_message_text(
-                t("deposit_confirm_processing", lang)
+            await _edit_callback_message(
+                query, t("deposit_confirm_processing", lang)
             )
             # Start the deposit and replace the summary with the
             # payment instructions (text — they carry a link/code
@@ -35193,7 +35210,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result, error = await start_deposit(dep_draft, user.id)
             # Ban (19 Nov 2026): a banned user deposits nothing.
             if error == "banned":
-                await query.edit_message_text(t("banned", lang))
+                await _edit_callback_message(query, t("banned", lang))
                 return
             if error:
                 if error in ("deposit_not_ready", "deposit_failed", "deposit_unavailable"):
@@ -35206,11 +35223,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         dep_draft["amount"], lang,
                         allow_retry=True, user_id=user.id,
                     )
-                    await query.edit_message_text(text, reply_markup=markup)
+                    await _edit_callback_message(
+                        query, text, reply_markup=markup
+                    )
                 else:
-                    await query.edit_message_text(_strip_dashes(error))
+                    await _edit_callback_message(
+                        query, _strip_dashes(error)
+                    )
                 return
-            await query.edit_message_text(
+            await _edit_callback_message(
+                query,
                 t(
                     "deposit_popup_ready", lang,
                     amount=format_money(dep_draft["amount"]),
