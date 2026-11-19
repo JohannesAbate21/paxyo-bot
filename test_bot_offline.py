@@ -4311,6 +4311,88 @@ class TestDelayedOrders(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Scheduled!", msg.text_sent[0])
         self.assertIn("EAT", msg.text_sent[0])
 
+    # (3b) Stale Confirm retired by scheduling (19 Nov 2026) -------
+    # Live bug, 18:26 EAT (Order ID 1881): the user left a normal
+    # Confirm card unconfirmed (100 TikTok views, 1.89 ETB), then
+    # scheduled a different order (200 views in 3 hours) — the
+    # scheduling itself worked — then typed "Ok" and the bot
+    # placed the OLD 100-view order immediately. Saving the
+    # delayed order must retire the pending normal Confirm, so a
+    # later bare acceptance has nothing stale to place, while the
+    # delayed order itself stays scheduled.
+
+    TIKTOK_VIEWS_SERVICE = {
+        "service": 2001, "name": "TikTok Video Views | Fast",
+        "category": "TikTok Video Views", "type": "Default",
+        "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
+        "average_time": "5 minutes", "active": True,
+        "provider_service_id": 2001,
+    }
+    TIKTOK_LINK = (
+        "https://www.tiktok.com/@paxyo251/video/7666462351436107015"
+    )
+
+    def _seed_stale_normal_confirm(self):
+        # The unconfirmed 100-view card from the live incident.
+        bot.PENDING["stale-100"] = {
+            "user_id": 1,
+            "service": self.TIKTOK_VIEWS_SERVICE,
+            "link": self.TIKTOK_LINK,
+            "quantity": 100,
+            "total": 1.89,
+        }
+
+    def _delayed_200_intent(self):
+        return delayed_intent(
+            platform="tiktok", service_hint="tiktok views",
+            link=self.TIKTOK_LINK, quantity=200, delay_minutes=180,
+        )
+
+    async def _schedule_200_views(self, paxyo):
+        msg = await self._send(
+            "I want place order after 3 hrs of tiktok views 200",
+            self._delayed_200_intent(), paxyo=paxyo,
+        )
+        self.assertEqual(len(bot.PENDING_DELAYED), 1)
+        confirm_id = next(iter(bot.PENDING_DELAYED))
+        query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertIn("Scheduled!", query.edited[0])
+        return query
+
+    async def test_scheduling_clears_stale_normal_confirm(self):
+        paxyo = FakePaxyo(services=[self.TIKTOK_VIEWS_SERVICE])
+        self._seed_stale_normal_confirm()
+        await self._schedule_200_views(paxyo)
+        # The delayed order saved on the server...
+        self.assertEqual(len(paxyo.delayed_created), 1)
+        self.assertEqual(paxyo.delayed_created[0]["quantity"], 200)
+        # ...and the stale 100-view Confirm is gone.
+        self.assertEqual(bot.PENDING, {})
+        # A bare "Ok" afterwards places nothing.
+        msg = await self._send("Ok", intent_of("unclear"), paxyo=paxyo)
+        self.assertEqual(paxyo.orders_created, [])
+        # The delayed 200-view order is still scheduled.
+        self.assertEqual(len(paxyo.delayed_created), 1)
+        self.assertEqual(paxyo.delayed_created[0]["quantity"], 200)
+
+    async def test_scheduling_clears_stale_confirm_on_memory_fallback(self):
+        # Same scenario, but the server endpoint is not live yet
+        # (404 -> memory fallback): the stale Confirm must still
+        # be retired when the delayed order is saved in memory.
+        paxyo = FakePaxyo(
+            services=[self.TIKTOK_VIEWS_SERVICE], delayed_none=True)
+        self._seed_stale_normal_confirm()
+        await self._schedule_200_views(paxyo)
+        self.assertEqual(paxyo.delayed_created, [])
+        self.assertEqual(len(bot.DELAYED_MEMORY), 1)
+        saved = next(iter(bot.DELAYED_MEMORY.values()))
+        self.assertEqual(saved["quantity"], 200)
+        self.assertEqual(saved["status"], "scheduled")
+        self.assertEqual(bot.PENDING, {})
+        msg = await self._send("Ok", intent_of("unclear"), paxyo=paxyo)
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(len(bot.DELAYED_MEMORY), 1)
+
     async def test_cancel_button_schedules_nothing(self):
         paxyo = FakePaxyo()
         await self._send(
@@ -21202,12 +21284,20 @@ class TestPromptShrink(unittest.IsolatedAsyncioTestCase):
         # new types before the deterministic code ever sees them,
         # so the list earns its tokens; the deterministic fallback
         # is still the safety net.
-        self.assertLess(len(bot.SYSTEM_PROMPT), 11500)
-        self.assertLess(len(bot.SYSTEM_PROMPT.split()) * 1.33, 2400)
+        # Auto-refill (19 Nov 2026) re-grew it to ~11,870 /
+        # ~2,470: three intents + the target field, each bullet
+        # kept to one short line. The AI is the primary
+        # classifier — local_intent only runs when it is
+        # unreachable — so the intents stay in the prompt; the
+        # caps move to 12,000 chars / 2,500 words instead of
+        # cutting a bullet the classifier needs.
+        self.assertLess(len(bot.SYSTEM_PROMPT), 12000)
+        self.assertLess(len(bot.SYSTEM_PROMPT.split()) * 1.33, 2500)
         # Every intent the code switches on is still listed.
         for intent in (
             "order", "recurring", "schedules", "stop_schedule",
             "delayed_order", "delayed_orders", "cancel_delayed",
+            "auto_refill", "auto_refill_status", "auto_refill_stop",
             "balance", "orders", "deposit", "deposit_status", "help",
             "how_to_order", "miniapp", "social", "greeting",
             "paxyo_info", "source_question", "reseller", "contact",
@@ -38830,6 +38920,946 @@ class TestBanEnforcement(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.recurring_ran, [])
         self.assertEqual(len(app.bot.sent), 1)
         self.assertIn("blocked", app.bot.sent[0][1])
+
+
+class TestAutoRefillParsing(unittest.TestCase):
+    """Auto-refill request detection and target parsing (19 Nov 2026)."""
+
+    def test_target_above_k(self):
+        self.assertEqual(
+            bot.parse_auto_refill_target("keep my followers above 15k"), 15000)
+
+    def test_target_plain_number(self):
+        self.assertEqual(
+            bot.parse_auto_refill_target("keep it above 15000"), 15000)
+
+    def test_target_at_least(self):
+        self.assertEqual(
+            bot.parse_auto_refill_target("keep my views at least 10k"), 10000)
+
+    def test_target_word(self):
+        self.assertEqual(
+            bot.parse_auto_refill_target("target 10k views"), 10000)
+
+    def test_target_none_without_trigger(self):
+        self.assertIsNone(bot.parse_auto_refill_target("order 1000 views"))
+        self.assertIsNone(bot.parse_auto_refill_target("my balance is 100"))
+        self.assertIsNone(bot.parse_auto_refill_target(""))
+
+    def test_is_request_keep_above(self):
+        self.assertTrue(
+            bot.is_auto_refill_request("keep my followers above 15k"))
+        self.assertTrue(
+            bot.is_auto_refill_request("keep my tiktok views above 10k"))
+        self.assertTrue(
+            bot.is_auto_refill_request("don't let my views fall under 5000"))
+        self.assertTrue(
+            bot.is_auto_refill_request("auto refill my TikTok views"))
+        self.assertTrue(
+            bot.is_auto_refill_request(
+                "top up my views when they drop below 10k"))
+
+    def test_is_request_rejects_panel_refill_and_orders(self):
+        # A panel refill ("it stopped at 800 out of 1000, send the
+        # rest") must stay a plain "refill", never an auto-refill.
+        self.assertFalse(
+            bot.is_auto_refill_request(
+                "it stopped at 800 out of 1000, send the rest"))
+        self.assertFalse(bot.is_auto_refill_request("order 1000 views"))
+        self.assertFalse(bot.is_auto_refill_request("how much is 10k views"))
+
+    def test_status_and_stop_detection(self):
+        self.assertTrue(
+            bot.is_auto_refill_status_request("my auto refills"))
+        self.assertTrue(
+            bot.is_auto_refill_status_request("auto refill status"))
+        self.assertFalse(
+            bot.is_auto_refill_status_request("refill status"))
+        self.assertTrue(
+            bot.is_auto_refill_stop_request("stop auto refill"))
+        self.assertTrue(
+            bot.is_auto_refill_stop_request("turn off auto refill"))
+        self.assertFalse(
+            bot.is_auto_refill_stop_request("stop my repeating order"))
+
+    def test_local_intent_detects_auto_refill(self):
+        intent = bot.local_intent("keep my followers above 15k")
+        self.assertEqual(intent["intent"], "auto_refill")
+        self.assertEqual(intent["target"], 15000)
+        intent = bot.local_intent("top up my views when they drop below 10k")
+        self.assertEqual(intent["intent"], "auto_refill")
+        self.assertEqual(intent["target"], 10000)
+
+
+class TestAutoRefillGuards(unittest.TestCase):
+    """Minimum drop and daily cap (19 Nov 2026)."""
+
+    SERVICE = {
+        "service": 2001, "name": "TikTok Video Views | Fast",
+        "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
+    }
+
+    def test_min_drop_absolute_floor(self):
+        self.assertEqual(bot.auto_refill_min_drop(1000), 100)
+        self.assertEqual(bot.auto_refill_min_drop(4000), 100)
+
+    def test_min_drop_two_percent(self):
+        self.assertEqual(bot.auto_refill_min_drop(15000), 300)
+        self.assertEqual(bot.auto_refill_min_drop(1000000), 20000)
+
+    def test_min_drop_bad_input(self):
+        self.assertEqual(bot.auto_refill_min_drop(None), 100)
+        self.assertEqual(bot.auto_refill_min_drop(0), 100)
+
+    def test_top_up_quantity(self):
+        self.assertEqual(
+            bot.auto_refill_top_up_qty(14000, 15000, self.SERVICE), 1000)
+
+    def test_top_up_rounds_up_to_ten(self):
+        self.assertEqual(
+            bot.auto_refill_top_up_qty(14650, 15000, self.SERVICE), 350)
+
+    def test_top_up_none_when_drop_too_small(self):
+        self.assertIsNone(
+            bot.auto_refill_top_up_qty(14950, 15000, self.SERVICE))
+
+    def test_top_up_none_when_at_or_above_target(self):
+        self.assertIsNone(
+            bot.auto_refill_top_up_qty(15000, 15000, self.SERVICE))
+        self.assertIsNone(
+            bot.auto_refill_top_up_qty(16000, 15000, self.SERVICE))
+
+    def test_top_up_never_below_service_minimum(self):
+        service = dict(self.SERVICE, min=500)
+        self.assertEqual(
+            bot.auto_refill_top_up_qty(14700, 15000, service), 500)
+
+    def test_decide_top_up_with_cost(self):
+        decision = bot.auto_refill_decide(
+            14000, 15000, self.SERVICE, spent_today=0)
+        self.assertEqual(decision["action"], "top_up")
+        self.assertEqual(decision["quantity"], 1000)
+        self.assertEqual(decision["cost"], 18.9)
+
+    def test_decide_cap(self):
+        decision = bot.auto_refill_decide(
+            14000, 15000, self.SERVICE, spent_today=990.0)
+        self.assertEqual(decision["action"], "cap")
+        self.assertEqual(decision["quantity"], 1000)
+
+    def test_decide_skip_at_target_and_small_drop(self):
+        self.assertEqual(
+            bot.auto_refill_decide(
+                15000, 15000, self.SERVICE, spent_today=0)["action"],
+            "skip")
+        self.assertEqual(
+            bot.auto_refill_decide(
+                14950, 15000, self.SERVICE, spent_today=0)["reason"],
+            "drop_too_small")
+
+    def test_decide_unavailable_without_count(self):
+        self.assertEqual(
+            bot.auto_refill_decide(
+                None, 15000, self.SERVICE, spent_today=0)["action"],
+            "unavailable")
+
+
+class TestCountParsing(unittest.TestCase):
+    """Count parsing: compact numbers, provider payloads, and the
+    recorded sample pages (no live fetches)."""
+
+    def test_compact_count(self):
+        self.assertEqual(bot.parse_compact_count("5,178 views"), 5178)
+        self.assertEqual(bot.parse_compact_count("12.3K subscribers"), 12300)
+        self.assertEqual(bot.parse_compact_count("1.2M"), 1200000)
+        self.assertEqual(bot.parse_compact_count("5178"), 5178)
+        self.assertIsNone(bot.parse_compact_count("no number here"))
+        self.assertIsNone(bot.parse_compact_count(None))
+
+    def test_deep_find_count(self):
+        payload = {"data": {"statistics": {"play_count": 5178}}}
+        self.assertEqual(
+            bot._deep_find_count(payload, ["play_count"]), 5178)
+        self.assertEqual(
+            bot._deep_find_count({"play_count": 42}, ["play_count"]), 42)
+        self.assertIsNone(
+            bot._deep_find_count({"data": {}}, ["play_count"]))
+
+    def test_ensembledata_count_nested_and_flat(self):
+        # Recorded shape, verified live 19 Nov 2026 on video
+        # 7666462351436107015: 5,178 views, 7 likes, 0 comments,
+        # 1 share.
+        nested = {
+            "success": True,
+            "data": {
+                "aweme_id": "7666462351436107015",
+                "statistics": {
+                    "play_count": 5178, "digg_count": 7,
+                    "comment_count": 0, "share_count": 1,
+                },
+            },
+        }
+        self.assertEqual(
+            bot.parse_ensembledata_count(nested, "play_count"), 5178)
+        flat = {"success": True, "data": {"play_count": 5178}}
+        self.assertEqual(
+            bot.parse_ensembledata_count(flat, "play_count"), 5178)
+        self.assertIsNone(
+            bot.parse_ensembledata_count({"success": False}, "play_count"))
+        self.assertIsNone(
+            bot.parse_ensembledata_count("not a dict", "play_count"))
+
+    def test_tiktok_page_video_and_profile(self):
+        video_page = (
+            "<html><body>"
+            '<script id="SIGI_STATE" type="application/json">'
+            '{"ItemModule":{"7666462351436107015":'
+            '{"stats":{"playCount":5178,"diggCount":7},'
+            '"author":"paxyo251"}}}</script>'
+            "</body></html>"
+        )
+        self.assertEqual(
+            bot.parse_tiktok_page_count(video_page, "views"), 5178)
+        profile_page = (
+            "<html><body>"
+            '<script id="SIGI_STATE" type="application/json">'
+            '{"UserModule":{"users":{"paxyo251":'
+            '{"stats":{"followerCount":12345}}}}}</script>'
+            "</body></html>"
+        )
+        self.assertEqual(
+            bot.parse_tiktok_page_count(profile_page, "followers"), 12345)
+        self.assertIsNone(
+            bot.parse_tiktok_page_count("<html></html>", "views"))
+
+    def test_youtube_page_video_and_channel(self):
+        video_data = {
+            "contents": {"twoColumnWatchNextResults": {"results": {"results": {
+                "contents": [{"videoPrimaryInfoRenderer": {"viewCount": {
+                    "videoViewCountRenderer": {"viewCount": {
+                        "simpleText": "5,178 views"}}}}}]}}}}},
+        video_page = (
+            "<html><body><script>"
+            f"var ytInitialData = {json.dumps(video_data)};"
+            "</script></body></html>"
+        )
+        self.assertEqual(
+            bot.parse_youtube_page_count(video_page, "views"), 5178)
+        channel_data = {
+            "header": {"c4TabbedHeaderRenderer": {"subscriberCountText": {
+                "simpleText": "12.3K subscribers"}}},
+        }
+        channel_page = (
+            "<html><body><script>"
+            f"var ytInitialData = {json.dumps(channel_data)};"
+            "</script></body></html>"
+        )
+        self.assertEqual(
+            bot.parse_youtube_page_count(channel_page, "subscribers"), 12300)
+        self.assertIsNone(
+            bot.parse_youtube_page_count("<html></html>", "views"))
+
+    def test_telegram_page(self):
+        page = (
+            '<div class="tgme_page">'
+            '<div class="tgme_page_extra">1,234 subscribers</div>'
+            "</div>"
+        )
+        self.assertEqual(bot.parse_telegram_page_count(page), 1234)
+        page_k = '<div class="tgme_page_extra">12.3K subscribers</div>'
+        self.assertEqual(bot.parse_telegram_page_count(page_k), 12300)
+        self.assertIsNone(bot.parse_telegram_page_count("<html></html>"))
+
+    def test_youtube_id_from_link(self):
+        self.assertEqual(
+            bot._youtube_id_from_link(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            ("video", "dQw4w9WgXcQ"))
+        self.assertEqual(
+            bot._youtube_id_from_link("https://youtu.be/dQw4w9WgXcQ"),
+            ("video", "dQw4w9WgXcQ"))
+        self.assertEqual(
+            bot._youtube_id_from_link(
+                "https://www.youtube.com/channel/UC1234567890abcdef"),
+            ("channel", "UC1234567890abcdef"))
+        self.assertEqual(
+            bot._youtube_id_from_link("https://www.youtube.com/@paxyo251"),
+            ("handle", "paxyo251"))
+        self.assertIsNone(
+            bot._youtube_id_from_link("https://example.com/not-youtube"))
+
+    def test_telegram_chat_from_link(self):
+        self.assertEqual(
+            bot._telegram_chat_from_link("https://t.me/paxyo251"), "@paxyo251")
+        self.assertEqual(
+            bot._telegram_chat_from_link("https://t.me/c/123456"),
+            "-100123456")
+        self.assertIsNone(
+            bot._telegram_chat_from_link("https://t.me/+abcdef"))
+
+
+class TestCountUsage(unittest.TestCase):
+    """Per-provider daily usage tracking (lives in the refill record)."""
+
+    DAY = 1760000000  # a fixed UTC day; +86400 is the next day
+
+    def test_budget_enforced(self):
+        usage = bot.CountUsage()
+        self.assertTrue(usage.can_use("ensembledata", 2, now=self.DAY))
+        usage.record("ensembledata", 48, now=self.DAY)
+        self.assertTrue(usage.can_use("ensembledata", 2, now=self.DAY))
+        self.assertFalse(usage.can_use("ensembledata", 3, now=self.DAY))
+        usage.record("ensembledata", 2, now=self.DAY)
+        self.assertEqual(usage.used_today("ensembledata", now=self.DAY), 50)
+        self.assertFalse(usage.can_use("ensembledata", 1, now=self.DAY))
+
+    def test_daily_reset(self):
+        usage = bot.CountUsage()
+        usage.record("ensembledata", 50, now=self.DAY)
+        self.assertEqual(
+            usage.used_today("ensembledata", now=self.DAY + 86400), 0)
+        self.assertTrue(
+            usage.can_use("ensembledata", 2, now=self.DAY + 86400))
+
+    def test_park_after_rate_limit(self):
+        usage = bot.CountUsage()
+        usage.park("ensembledata", seconds=3600, now=self.DAY)
+        self.assertTrue(usage.is_parked("ensembledata", now=self.DAY))
+        self.assertFalse(usage.can_use("ensembledata", 1, now=self.DAY))
+        self.assertFalse(
+            usage.is_parked("ensembledata", now=self.DAY + 3601))
+
+    def test_no_budget_providers_never_blocked(self):
+        usage = bot.CountUsage()
+        self.assertTrue(usage.can_use("own_scraper", 0, now=self.DAY))
+        self.assertTrue(usage.can_use("telegram", 0, now=self.DAY))
+
+    def test_round_trip(self):
+        usage = bot.CountUsage()
+        usage.record("ensembledata", 4, now=self.DAY)
+        restored = bot.CountUsage(usage.to_dict())
+        self.assertEqual(
+            restored.used_today("ensembledata", now=self.DAY), 4)
+
+
+class TestCountChain(unittest.IsolatedAsyncioTestCase):
+    """The fallback chain: own scraper first, then the free APIs.
+    No live calls — every provider answers from canned replies."""
+
+    ENSEMBLEDATA_VIDEO = json.dumps({
+        "success": True,
+        "data": {
+            "aweme_id": "7666462351436107015",
+            "statistics": {
+                "play_count": 5178, "digg_count": 7,
+                "comment_count": 0, "share_count": 1,
+            },
+        },
+    })
+    SCRAPEEVERYTHING_VIDEO = json.dumps({
+        "success": True,
+        "data": {
+            "id": "7666462351436107015",
+            "play_count": 6000, "like_count": 9,
+        },
+        "meta": {"credits_charged": 1, "credits_remaining": 99},
+    })
+    YOUTUBE_VIDEO = json.dumps({
+        "items": [{"statistics": {
+            "viewCount": "5178", "likeCount": "7"}}],
+    })
+    TELEGRAM_COUNT = json.dumps({"ok": True, "result": 12345})
+    TIKTOK_PAGE = (
+        "<html><body>"
+        '<script id="SIGI_STATE" type="application/json">'
+        '{"ItemModule":{"7666462351436107015":'
+        '{"stats":{"playCount":5178}}}}'
+        "</script></body></html>"
+    )
+    EMPTY_PAGE = "<html><body>nothing here</body></html>"
+
+    LINK = "https://www.tiktok.com/@paxyo251/video/7666462351436107015"
+    TOKENS = {
+        "ensembledata": "test-ensemble-token",
+        "socialholmes": "test-holmes-token",
+        "scrapeeverything": "test-scrape-key",
+        "youtube": "test-yt-key",
+        "telegram": "test-bot-token",
+    }
+
+    def setUp(self):
+        bot._COUNT_CACHE.clear()
+
+    def tearDown(self):
+        bot._COUNT_CACHE.clear()
+
+    def _fake_http(self, mapping):
+        """{(method, url-needle): (status, body)} — raises on any
+        call the test did not plan, so a provider the chain should
+        not reach is caught, not silently served."""
+        calls = []
+
+        async def fake_http(method, url, params=None, json_body=None,
+                            headers=None, proxy=None, timeout=10.0):
+            calls.append((method, url, proxy))
+            for (m, needle), (status, body) in mapping.items():
+                if m == method and needle in url:
+                    return status, body
+            raise AssertionError(f"unexpected count call {method} {url}")
+
+        fake_http.calls = calls
+        return fake_http
+
+    async def test_own_scraper_wins_and_costs_nothing(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.TIKTOK_PAGE),
+        })
+        count, provider, cost, usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost), (5178, "own_scraper", 0))
+        self.assertEqual(usage, {})
+        self.assertEqual(len(http_get.calls), 1)
+
+    async def test_scraper_blocked_falls_to_ensembledata(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (403, "blocked"),
+            ("GET", "ensembledata.com"): (200, self.ENSEMBLEDATA_VIDEO),
+        })
+        count, provider, cost, usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost), (5178, "ensembledata", 2))
+        self.assertEqual(usage["ensembledata"]["used"], 2)
+
+    async def test_scraper_parse_failure_falls_through(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.EMPTY_PAGE),
+            ("GET", "ensembledata.com"): (200, self.ENSEMBLEDATA_VIDEO),
+        })
+        count, provider, _cost, _usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual((count, provider), (5178, "ensembledata"))
+
+    async def test_ensembledata_over_budget_skips_to_scrapeeverything(self):
+        usage = {"ensembledata": {"date": "2026-11-19", "used": 49,
+                                  "backoff_until": 0}}
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.EMPTY_PAGE),
+            ("POST", "api.scrapeeverything.com"): (
+                200, self.SCRAPEEVERYTHING_VIDEO),
+        })
+        # The date must be "today" for the budget to bind: use the
+        # tracker's own today for the seeded entry.
+        today = bot.CountUsage()._today()
+        usage = {"ensembledata": {"date": today, "used": 49,
+                                  "backoff_until": 0}}
+        count, provider, cost, out = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, usage=usage,
+            tokens=dict(self.TOKENS), http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost),
+                         (6000, "scrapeeverything", 1))
+        self.assertEqual(out["ensembledata"]["used"], 49)
+
+    async def test_rate_limit_parks_provider_and_falls_through(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.EMPTY_PAGE),
+            ("GET", "ensembledata.com"): (429, "too many requests"),
+            ("POST", "api.scrapeeverything.com"): (
+                200, self.SCRAPEEVERYTHING_VIDEO),
+        })
+        count, provider, _cost, usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual((count, provider), (6000, "scrapeeverything"))
+        self.assertGreater(
+            usage["ensembledata"]["backoff_until"], 0)
+
+    async def test_socialholmes_skipped_even_with_token(self):
+        # Disabled until verified: the chain never calls it, even
+        # with a token configured.
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.EMPTY_PAGE),
+            ("GET", "ensembledata.com"): (200, self.ENSEMBLEDATA_VIDEO),
+        })
+        count, provider, _cost, _usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual(provider, "ensembledata")
+        self.assertFalse(
+            any("socialholmes" in url for _m, url, _p in http_get.calls))
+
+    async def test_no_tokens_and_failed_scraper_is_all_failed(self):
+        # The scraper ran (it needs no token) and failed to parse,
+        # and every API is unconfigured, so the chain reports
+        # all_failed, not no_provider.
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.EMPTY_PAGE),
+        })
+        count, provider, _cost, _usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens={
+                "ensembledata": None, "socialholmes": None,
+                "scrapeeverything": None, "youtube": None,
+                "telegram": None,
+            }, http_get=http_get,
+        )
+        self.assertEqual((count, provider), (None, "all_failed"))
+
+    async def test_nothing_wired_is_no_provider(self):
+        # A Telegram invite link: the scraper cannot run on it
+        # (no public channel page) and no bot token is set, so
+        # nothing was even attempted.
+        count, provider, _cost, _usage = await bot.fetch_live_count(
+            "telegram", "members", "https://t.me/+abcdef", tokens={
+                "ensembledata": None, "socialholmes": None,
+                "scrapeeverything": None, "youtube": None,
+                "telegram": None,
+            }, http_get=self._fake_http({}),
+        )
+        self.assertEqual((count, provider), (None, "no_provider"))
+
+    async def test_unsupported_platform(self):
+        count, provider, _cost, _usage = await bot.fetch_live_count(
+            "instagram", "views", "https://instagram.com/p/x",
+            tokens=dict(self.TOKENS), http_get=self._fake_http({}),
+        )
+        self.assertEqual((count, provider), (None, "unsupported"))
+
+    async def test_cache_reuses_recent_count(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.TIKTOK_PAGE),
+        })
+        first = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        second = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual(first[0], 5178)
+        self.assertEqual(second[1], "cache")
+        self.assertEqual(len(http_get.calls), 1)
+
+    async def test_youtube_chain(self):
+        link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        http_get = self._fake_http({
+            ("GET", "youtube.com/watch"): (200, self.EMPTY_PAGE),
+            ("GET", "googleapis.com/youtube"): (200, self.YOUTUBE_VIDEO),
+        })
+        count, provider, cost, usage = await bot.fetch_live_count(
+            "youtube", "views", link, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost), (5178, "youtube", 1))
+        self.assertEqual(usage["youtube"]["used"], 1)
+
+    async def test_telegram_chain(self):
+        link = "https://t.me/paxyo251"
+        http_get = self._fake_http({
+            ("GET", "t.me/s/"): (200, self.EMPTY_PAGE),
+            ("GET", "api.telegram.org"): (200, self.TELEGRAM_COUNT),
+        })
+        count, provider, cost, _usage = await bot.fetch_live_count(
+            "telegram", "members", link, tokens=dict(self.TOKENS),
+            http_get=http_get,
+        )
+        self.assertEqual((count, provider, cost), (12345, "telegram", 0))
+
+    async def test_scraper_retries_through_proxy_when_blocked(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (403, "blocked"),
+        })
+
+        async def proxy_http(method, url, params=None, json_body=None,
+                             headers=None, proxy=None, timeout=10.0):
+            if proxy:
+                return 200, self.TIKTOK_PAGE
+            return await http_get(
+                method, url, params=params, json_body=json_body,
+                headers=headers, proxy=proxy, timeout=timeout,
+            )
+
+        count, provider, _cost, _usage = await bot.fetch_live_count(
+            "tiktok", "views", self.LINK, tokens=dict(self.TOKENS),
+            http_get=proxy_http, proxy="http://user:pass@gate.decodo.com:7000",
+        )
+        self.assertEqual((count, provider), (5178, "own_scraper"))
+
+    async def test_auto_refill_check_uses_cached_last_count(self):
+        refill = {
+            "telegram_id": 1,
+            "service": {"rate_etb_per_1000": 18.9, "min": 10},
+            "platform": "tiktok", "metric": "views",
+            "link": self.LINK, "target": 15000, "spent_today": 0,
+            "last_count": 14000, "last_check": 1760000000,
+            "count_usage": {},
+        }
+        http_get = self._fake_http({})
+
+        async def no_calls(*args, **kwargs):
+            raise AssertionError("chain must not be called for a fresh cache")
+
+        result = await bot.auto_refill_check(
+            refill, tokens=dict(self.TOKENS), http_get=no_calls,
+            now=1760000000 + 60,
+        )
+        self.assertEqual(result["action"], "top_up")
+        self.assertEqual(result["current"], 14000)
+        self.assertEqual(result["provider"], "cache")
+        self.assertEqual(result["quantity"], 1000)
+
+    async def test_auto_refill_check_top_up_then_cap(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.TIKTOK_PAGE),
+        })
+        refill = {
+            "telegram_id": 1,
+            "service": {"rate_etb_per_1000": 18.9, "min": 10},
+            "platform": "tiktok", "metric": "views",
+            "link": self.LINK, "target": 15000, "spent_today": 0,
+            "last_count": None, "last_check": None,
+            "count_usage": {},
+        }
+        result = await bot.auto_refill_check(
+            refill, tokens=dict(self.TOKENS), http_get=http_get,
+            now=1760000000,
+        )
+        self.assertEqual(result["action"], "top_up")
+        self.assertEqual(result["current"], 5178)
+        # 15,000 - 5,178 = 9,822, rounded up to a multiple of 10.
+        self.assertEqual(result["quantity"], 9830)
+        refill["spent_today"] = 990.0
+        refill["last_count"] = 5178
+        refill["last_check"] = 1760000000
+        result = await bot.auto_refill_check(
+            refill, tokens=dict(self.TOKENS), http_get=http_get,
+            now=1760000000 + 60,
+        )
+        self.assertEqual(result["action"], "cap")
+
+    async def test_auto_refill_check_unavailable_when_all_fail(self):
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.EMPTY_PAGE),
+            ("GET", "ensembledata.com"): (503, "down"),
+            ("POST", "api.scrapeeverything.com"): (503, "down"),
+        })
+        refill = {
+            "telegram_id": 1,
+            "service": {"rate_etb_per_1000": 18.9, "min": 10},
+            "platform": "tiktok", "metric": "views",
+            "link": self.LINK, "target": 15000, "spent_today": 0,
+            "last_count": None, "last_check": None,
+            "count_usage": {},
+        }
+        result = await bot.auto_refill_check(
+            refill, tokens={"ensembledata": "x", "socialholmes": None,
+                            "scrapeeverything": "y", "youtube": None,
+                            "telegram": None},
+            http_get=http_get, now=1760000000,
+        )
+        self.assertEqual(result["action"], "unavailable")
+        self.assertIsNone(result["current"])
+
+
+class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
+    """The setup conversation: ask one piece at a time, preview
+    with the balance warning, Confirm switches it on. No orders,
+    no money, no server calls."""
+
+    SERVICES = [
+        {
+            "service": 2001, "name": "TikTok Video Views | Fast",
+            "category": "TikTok Video Views", "type": "Default",
+            "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
+            "average_time": "5 minutes", "active": True,
+            "provider_service_id": 2001,
+        },
+        {
+            "service": 2002, "name": "TikTok Followers | Fast",
+            "category": "TikTok Followers", "type": "Default",
+            "rate_etb_per_1000": 42.0, "min": 10, "max": 100000,
+            "average_time": "12 minutes", "active": True,
+            "provider_service_id": 2002,
+        },
+        {
+            "service": 2003, "name": "YouTube Views | Fast",
+            "category": "YouTube Views", "type": "Default",
+            "rate_etb_per_1000": 12.0, "min": 10, "max": 1000000,
+            "average_time": "5 minutes", "active": True,
+            "provider_service_id": 2003,
+        },
+        {
+            "service": 2004, "name": "Telegram Members | Fast",
+            "category": "Telegram Members", "type": "Default",
+            "rate_etb_per_1000": 25.0, "min": 10, "max": 100000,
+            "average_time": "10 minutes", "active": True,
+            "provider_service_id": 2004,
+        },
+        {
+            "service": 2005, "name": "Instagram Followers | Fast",
+            "category": "Instagram Followers", "type": "Default",
+            "rate_etb_per_1000": 35.0, "min": 10, "max": 100000,
+            "average_time": "8 minutes", "active": True,
+            "provider_service_id": 2005,
+        },
+    ]
+
+    TELEGRAM_RECENT = {
+        "id": 999, "service_id": 3001,
+        "service_name": "Telegram Members | Fast",
+        "link": "https://t.me/Getmodpcs/17396", "quantity": 1000,
+        "charge": 10.0, "status": "pending",
+        "created_at": "2026-11-19T03:20:00Z",
+    }
+
+    LINK = "https://www.tiktok.com/@paxyo251/video/7666462351436107015"
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.PENDING_AUTO_REFILL.clear()
+        bot.AUTO_REFILL_DRAFT.clear()
+        bot.AUTO_REFILL_ACTIVE.clear()
+        bot._COUNT_CACHE.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.PENDING_AUTO_REFILL.clear()
+        bot.AUTO_REFILL_DRAFT.clear()
+        bot.AUTO_REFILL_ACTIVE.clear()
+        bot._COUNT_CACHE.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    async def _send(self, text, intent, paxyo=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo(services=self.SERVICES)), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        return msg
+
+    async def _callback(self, data, paxyo=None):
+        query = FakeQuery(data)
+        update = FakeCallbackUpdate(query)
+        with mock.patch("bot.paxyo", paxyo or FakePaxyo(services=self.SERVICES)):
+            await bot.on_callback(update, None)
+        return query
+
+    def _setup_intent(self, **fields):
+        intent = intent_of("auto_refill", platform="tiktok",
+                           service_hint="tiktok views", link=self.LINK,
+                           target=10000)
+        intent.update(fields)
+        return intent
+
+    async def _build_preview(self, paxyo=None):
+        msg = await self._send(
+            "keep my tiktok views above 10k", self._setup_intent(),
+            paxyo=paxyo,
+        )
+        self.assertEqual(len(bot.PENDING_AUTO_REFILL), 1)
+        return msg
+
+    async def test_setup_asks_each_missing_piece_in_turn(self):
+        # No platform and no service hint yet: the bot asks for
+        # the platform first.
+        msg = await self._send(
+            "keep it above 10k",
+            intent_of("auto_refill", target=10000),
+        )
+        self.assertIn("platform", msg.text_sent[0].lower())
+        self.assertEqual(bot.AUTO_REFILL_DRAFT[1]["target"], 10000)
+        msg = await self._send(
+            "tiktok",
+            intent_of("auto_refill", platform="tiktok",
+                      service_hint="tiktok views", target=10000),
+        )
+        self.assertIn("link", msg.text_sent[0].lower())
+        # The target was already given in the first message, so
+        # the link completes the setup and the preview shows.
+        msg = await self._send(
+            self.LINK,
+            intent_of("unclear", link=self.LINK),
+        )
+        self.assertIn("Auto-refill", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING_AUTO_REFILL), 1)
+
+    async def test_setup_asks_target_last_when_it_was_not_given(self):
+        msg = await self._send(
+            "keep my tiktok views up",
+            intent_of("auto_refill", platform="tiktok",
+                      service_hint="tiktok views"),
+        )
+        self.assertIn("link", msg.text_sent[0].lower())
+        msg = await self._send(
+            self.LINK,
+            intent_of("unclear", link=self.LINK),
+        )
+        self.assertIn("above", msg.text_sent[0].lower())
+        msg = await self._send("10000", intent_of("unclear"))
+        self.assertIn("Auto-refill", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING_AUTO_REFILL), 1)
+
+    async def test_preview_names_balance_warning_and_confirm(self):
+        paxyo = FakePaxyo(services=self.SERVICES)
+        msg = await self._build_preview(paxyo=paxyo)
+        self.assertIn("Auto-refill", msg.text_sent[0])
+        self.assertIn("I will use your balance", msg.text_sent[0])
+        self.assertIn("10,000", msg.text_sent[0])
+        self.assertIn("1,000.00", msg.text_sent[0])
+        self.assertIn(self.LINK, msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])  # Confirm/Cancel buttons
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(bot.AUTO_REFILL_ACTIVE, {})
+
+    async def test_confirm_button_switches_it_on(self):
+        paxyo = FakePaxyo(services=self.SERVICES)
+        await self._build_preview(paxyo=paxyo)
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertIn("Auto-refill is on", query.edited[0])
+        self.assertIn("not installed yet", query.edited[0])
+        self.assertEqual(len(bot.AUTO_REFILL_ACTIVE[1]), 1)
+        self.assertEqual(bot.AUTO_REFILL_ACTIVE[1][0]["target"], 10000)
+        self.assertEqual(bot.PENDING_AUTO_REFILL, {})
+        self.assertEqual(paxyo.orders_created, [])
+
+    async def test_cancel_button_switches_nothing_on(self):
+        await self._build_preview()
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        query = await self._callback(f"cancel:{confirm_id}")
+        self.assertEqual(query.edited, ["Order cancelled."])
+        self.assertEqual(bot.AUTO_REFILL_ACTIVE, {})
+        self.assertEqual(bot.PENDING_AUTO_REFILL, {})
+
+    async def test_yes_acceptance_switches_it_on(self):
+        await self._build_preview()
+        msg = await self._send("yes", intent_of("unclear"))
+        self.assertIn("Auto-refill is on", msg.text_sent[0])
+        self.assertEqual(len(bot.AUTO_REFILL_ACTIVE[1]), 1)
+
+    async def test_status_lists_refill_and_none(self):
+        msg = await self._send(
+            "my auto refills", intent_of("auto_refill_status"))
+        self.assertEqual(msg.text_sent, ["You have no auto-refill running."])
+        await self._build_preview()
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}")
+        msg = await self._send(
+            "my auto refills", intent_of("auto_refill_status"))
+        self.assertIn("TikTok Video Views", msg.text_sent[0])
+        self.assertIn("10,000", msg.text_sent[0])
+        self.assertIn("not installed yet", msg.text_sent[0])
+
+    async def test_stop_removes_refill_and_none(self):
+        msg = await self._send(
+            "stop auto refill", intent_of("auto_refill_stop"))
+        self.assertEqual(
+            msg.text_sent, ["There is no auto-refill to stop."])
+        await self._build_preview()
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}")
+        msg = await self._send(
+            "stop auto refill", intent_of("auto_refill_stop"))
+        self.assertIn("Stopped the auto-refill", msg.text_sent[0])
+        self.assertEqual(bot.AUTO_REFILL_ACTIVE[1], [])
+
+    async def test_instagram_refused_honestly(self):
+        msg = await self._send(
+            "keep my instagram followers above 15k",
+            intent_of("auto_refill", platform="instagram",
+                      service_hint="instagram followers",
+                      link="https://instagram.com/paxyo", target=15000),
+            paxyo=FakePaxyo(services=self.SERVICES),
+        )
+        self.assertIn("can't check instagram counts yet", msg.text_sent[0])
+        self.assertEqual(bot.PENDING_AUTO_REFILL, {})
+
+    async def test_no_link_means_ask_not_stale_last_order(self):
+        # The user's last order was a Telegram link. An auto-refill
+        # with no link must ASK, never silently top up that old
+        # Telegram post every hour.
+        paxyo = FakePaxyo(
+            recent=[self.TELEGRAM_RECENT], services=self.SERVICES)
+        msg = await self._send(
+            "keep my tiktok views above 10k",
+            intent_of("auto_refill", platform="tiktok",
+                      service_hint="tiktok views", target=10000),
+            paxyo=paxyo,
+        )
+        self.assertIn("link", msg.text_sent[0].lower())
+        self.assertNotIn("t.me", msg.text_sent[0])
+        self.assertEqual(bot.PENDING_AUTO_REFILL, {})
+
+    async def test_target_below_service_minimum_refused(self):
+        services = [dict(self.SERVICES[0], min=1000)]
+        msg = await self._send(
+            "keep my tiktok views above 500",
+            intent_of("auto_refill", platform="tiktok",
+                      service_hint="tiktok views", link=self.LINK,
+                      target=500),
+            paxyo=FakePaxyo(services=services),
+        )
+        self.assertIn("too small", msg.text_sent[0])
+        self.assertEqual(bot.PENDING_AUTO_REFILL, {})
+
+    async def test_misclassified_order_is_rerouted_to_auto_refill(self):
+        # The AI is the primary classifier; if it misreads "keep
+        # my followers above 15k" as a plain order with quantity
+        # 15000, the bot must still set up an auto-refill — never
+        # build a one-time 15k order for real money.
+        paxyo = FakePaxyo(services=self.SERVICES)
+        msg = await self._send(
+            "keep my followers above 15k",
+            {"intent": "order", "platform": "tiktok",
+             "service_hint": "tiktok followers", "link": None,
+             "quantity": 15000, "interval_minutes": None,
+             "delay_minutes": None, "amount": None, "method": None,
+             "phone": None, "quantity_multiplier": None,
+             "orders": None, "split": None},
+            paxyo=paxyo,
+        )
+        self.assertIn("link", msg.text_sent[0].lower())
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(bot.AUTO_REFILL_DRAFT[1]["target"], 15000)
 
 
 if __name__ == "__main__":
