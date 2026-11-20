@@ -2518,6 +2518,12 @@ TEXT = {
         "am": "እስካሁን {platform} order የለዎትም።",
         "en": "You have no {platform} orders yet.",
     },
+    # Owner, 20 Nov 2026: under the order list, point to the Mini
+    # App for more details.
+    "orders_history_miniapp": {
+        "am": "ለበለጠ መረጃ Mini App ይክፈቱ: t.me/paxyo_bot",
+        "en": "For more details, open the Mini App: t.me/paxyo_bot",
+    },
     # Ideas batch (owner, 15 Nov 2026): proactive delivery updates,
     # cross-sell after delivery, stuck-order watch, invite link,
     # one-tap reorder, first-order nudge, deposit retry, daily
@@ -17657,6 +17663,10 @@ async def orders_history_text(user_id: int, lang: str,
             f"×{int(o.get('quantity') or 0)}, {icon} {status}, "
             f"{format_money(o.get('charge', 0) or 0)} ETB"
         )
+    # Owner, 20 Nov 2026: under the list, point to the Mini App
+    # for more details.
+    lines.append("")
+    lines.append(t("orders_history_miniapp", lang))
     return "\n".join(lines)
 
 

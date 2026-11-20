@@ -16680,7 +16680,12 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         # Owner, 14 Nov 2026: last 5 only, one line per order, no
         # monospace block that wraps badly on a phone.
         self.assertNotIn("```", table)
-        self.assertEqual(len(table.strip().split("\n")), 3)
+        self.assertEqual(len(table.strip().split("\n")), 5)
+        # Owner, 20 Nov 2026: blank line + Mini App footer under
+        # the list.
+        self.assertIn(
+            "For more details, open the Mini App: t.me/paxyo_bot", table
+        )
         self.assertIn("1827", table)
         self.assertIn("1826", table)
         self.assertLess(table.index("1827"), table.index("1826"))
@@ -24589,14 +24594,18 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
         self.assertIn("Your orders:", table)
         self.assertNotIn("```", table)
         lines = table.strip().split("\n")
-        self.assertEqual(len(lines), 6)  # title + 5 orders
+        self.assertEqual(len(lines), 8)  # title + 5 orders + blank + footer
         for order_id in ("1830", "1829", "1828", "1827", "1826"):
             self.assertIn(order_id, table)
         for order_id in ("1825", "1824", "1823"):
             self.assertNotIn(order_id, table)
-        for line in lines[1:]:
+        for line in lines[1:6]:
             self.assertIn("Instagram Followers", line)
             self.assertIn("42.00", line)
+        self.assertEqual(lines[6], "")
+        self.assertEqual(
+            lines[7], "For more details, open the Mini App: t.me/paxyo_bot"
+        )
         self.assertIn("pending", table)
         self.assertIn("completed", table)
 
@@ -24605,7 +24614,22 @@ class TestOwnerFixRound14Nov(_LanguageRoundBase):
             ("show my orders", intent_of("orders")),
         ], paxyo=FakePaxyo(recent=self._history_orders(2)))
         lines = msg.text_sent[0].strip().split("\n")
-        self.assertEqual(len(lines), 3)  # title + 2 orders
+        self.assertEqual(len(lines), 5)  # title + 2 orders + blank + footer
+
+    async def test_history_footer_points_to_miniapp(self):
+        # Owner, 20 Nov 2026: under the order list, a footer line
+        # points to the Mini App — English and Amharic (Ge'ez).
+        fake = FakePaxyo(recent=self._history_orders(2))
+        with mock.patch("bot.paxyo", fake):
+            table = await bot.orders_history_text(1, "en")
+        lines = table.strip().split("\n")
+        self.assertEqual(lines[-2], "")
+        self.assertEqual(
+            lines[-1], "For more details, open the Mini App: t.me/paxyo_bot"
+        )
+        with mock.patch("bot.paxyo", fake):
+            table_am = await bot.orders_history_text(1, "am")
+        self.assertIn("ለበለጠ መረጃ Mini App ይክፈቱ: t.me/paxyo_bot", table_am)
 
     # (5a) no stray order-state line on info answers --------------
 
