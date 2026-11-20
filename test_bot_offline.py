@@ -41113,6 +41113,59 @@ class TestCountParsing(unittest.TestCase):
         self.assertIsNone(
             bot.parse_youtube_page_count("<html></html>", "views"))
 
+    def test_youtube_page_channel_new_header(self):
+        # Live page shape since 20 Nov 2026: pageHeaderRenderer,
+        # the count is a metadata part text ("1 subscriber");
+        # the old c4TabbedHeaderRenderer / subscriberCountText
+        # is gone from the served page.
+        def channel_page(subscriber_text):
+            channel_data = {
+                "header": {"pageHeaderRenderer": {"pageTitle": "Johannes Abate",
+                    "content": {"pageHeaderViewModel": {
+                        "title": {"dynamicTextViewModel": {"text": {
+                            "content": "Johannes Abate"}}},
+                        "metadata": {"contentMetadataViewModel": {
+                            "metadataRows": [
+                                {"metadataParts": [{"text": {
+                                    "content": "@johannesabate3089"}}]},
+                                {"metadataParts": [{"text": {
+                                    "content": subscriber_text},
+                                    "accessibilityLabel": subscriber_text}]},
+                            ]}},
+                    }}}},
+            }
+            return (
+                "<html><body><script>"
+                f"var ytInitialData = {json.dumps(channel_data)};"
+                "</script></body></html>"
+            )
+
+        self.assertEqual(
+            bot.parse_youtube_page_count(
+                channel_page("1 subscriber"), "subscribers"), 1)
+        self.assertEqual(
+            bot.parse_youtube_page_count(
+                channel_page("1.08K subscribers"), "subscribers"), 1080)
+        # Raw-page fallback: no ytInitialData blob, the count only
+        # as a metadata part text string.
+        bare = '<html><body>{"content": "12.3K subscribers"}</body></html>'
+        self.assertEqual(
+            bot.parse_youtube_page_count(bare, "subscribers"), 12300)
+        # A title that merely mentions subscribers is not a count.
+        title_page = (
+            "<html><body><script>"
+            "var ytInitialData = {\"contents\": {\"twoColumnBrowseResultsRenderer\": "
+            "{\"tabs\": [{\"tabRenderer\": {\"title\": \"How to gain 1000 "
+            "subscribers\"}}]}}};"
+            "</script></body></html>"
+        )
+        self.assertIsNone(
+            bot.parse_youtube_page_count(title_page, "subscribers"))
+        # Handle only, no subscriber text anywhere.
+        self.assertIsNone(
+            bot.parse_youtube_page_count(
+                channel_page("@johannesabate3089"), "subscribers"))
+
     def test_telegram_page(self):
         page = (
             '<div class="tgme_page">'
