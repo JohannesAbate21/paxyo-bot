@@ -17,6 +17,7 @@ tolerance) is covered the same way, as is checking a deposit
 """
 
 import asyncio
+import collections
 from datetime import datetime, timedelta, timezone
 import json
 import pathlib
@@ -2567,6 +2568,10 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
         self.assertIn("How it works", msg.text_sent[0])
 
     async def test_paxyo_info_answers_from_knowledge(self):
+        # "What is Paxyo's website?" is not a trained question, so
+        # the AI knowledge path still answers it (20 Nov 2026: the
+        # trained "What is Paxyo?" answer wins over the AI instead —
+        # see TestChatTrainingHook).
         msg = FakeMessage()
         update = FakeUpdate(msg)
         answer = "Paxyo is a social media service at paxyo.et."
@@ -2576,7 +2581,7 @@ class TestConversationalIntents(unittest.IsolatedAsyncioTestCase):
         ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
             "bot.gemini_generate", new=mock.AsyncMock(return_value=answer)
         ) as gen, mock.patch("bot.speak_reply") as speak:
-            await bot.handle_order_text(update, None, "What is Paxyo?")
+            await bot.handle_order_text(update, None, "What is Paxyo's website?")
         speak.assert_not_called()
         self.assertEqual(msg.text_sent, [answer])
         system = gen.call_args.kwargs["system"]
@@ -15676,12 +15681,22 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Yohannes Abate", msg.text_sent[0])
 
     async def test_paxyo_facts_what_is_when_ai_down(self):
-        msg = await self._paxyo_info_with_ai_down("what is paxyo?")
+        # "tell me about paxyo" is not a trained question, so the
+        # local facts still answer it when the AI is down
+        # (20 Nov 2026: the trained "what is paxyo?" answer wins
+        # over the facts instead — see TestChatTrainingHook).
+        msg = await self._paxyo_info_with_ai_down("tell me about paxyo")
         self.assertIn("paxyo.et", msg.text_sent[0])
         self.assertIn("Ethiopian", msg.text_sent[0])
 
     async def test_paxyo_facts_how_to_pay_when_ai_down(self):
-        msg = await self._paxyo_info_with_ai_down("how do I add money?")
+        # "how do you accept payment?" is not a trained question,
+        # so the local facts still answer it when the AI is down
+        # (20 Nov 2026: the trained "how do I add money?" answer
+        # wins over the facts instead — see TestChatTrainingHook).
+        msg = await self._paxyo_info_with_ai_down(
+            "how do you accept payment?"
+        )
         self.assertIn("Telebirr", msg.text_sent[0])
         self.assertIn("REF3723FB335", msg.text_sent[0])
 
@@ -41646,6 +41661,191 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.PENDING, {})
         self.assertEqual(paxyo.orders_created, [])
         self.assertEqual(bot.AUTO_REFILL_DRAFT[1]["target"], 15000)
+
+
+class TestChatTrainingData(unittest.TestCase):
+    """300 owner-approved training entries (20 Nov 2026) and the
+    matcher that answers from them before any AI call."""
+
+    EXPECTED_COUNTS = {
+        "ordering_prices": 34, "service_id": 14, "scheduled_orders": 14,
+        "bulk_orders": 10, "my_orders": 14, "cancel": 10, "balance": 14,
+        "deposits": 34, "promo": 16, "drip_feed": 16, "auto_refill": 16,
+        "order_status": 14, "not_arrived_refund": 16,
+        "referral_invite": 14, "language": 14, "human_support": 10,
+        "greetings_smalltalk": 15, "confused_unclear": 15,
+        "errors_edge": 10,
+    }
+
+    FORBIDDEN = (
+        "godofpanel", "smmpakpanel", "smmsocialmedia", "ensembleddata",
+        "socialholmes", "groq", "deepseek", "gemini", "openrouter",
+        "kilo", "panel", "api",
+    )
+
+    def test_file_loads_300_entries(self):
+        entries = bot.load_training_data()
+        self.assertEqual(len(entries), 300)
+        counts = collections.Counter(e["category"] for e in entries)
+        self.assertEqual(dict(counts), self.EXPECTED_COUNTS)
+        kinds = collections.Counter(e["kind"] for e in entries)
+        self.assertEqual(kinds["answer"], 240)
+        self.assertEqual(kinds["action"], 60)
+
+    def test_entries_have_unique_ids_patterns_and_answers(self):
+        entries = bot.load_training_data()
+        ids = [e["id"] for e in entries]
+        self.assertEqual(len(set(ids)), len(ids))
+        for e in entries:
+            self.assertTrue(e["category"], e["id"])
+            self.assertIn(e["kind"], ("answer", "action"), e["id"])
+            self.assertIsInstance(e["patterns"], list, e["id"])
+            self.assertTrue(e["patterns"], e["id"])
+            self.assertTrue(e["answer"].get("en"), e["id"])
+
+    def test_no_long_dash_in_data(self):
+        entries = bot.load_training_data()
+        for e in entries:
+            for pattern in e["patterns"]:
+                self.assertNotIn("—", pattern, e["id"])
+                self.assertNotIn("–", pattern, e["id"])
+            for text in e["answer"].values():
+                self.assertNotIn("—", text, e["id"])
+                self.assertNotIn("–", text, e["id"])
+
+    def test_no_provider_names_in_answers(self):
+        entries = bot.load_training_data()
+        for e in entries:
+            blob = json.dumps(e["answer"]).lower()
+            for word in self.FORBIDDEN:
+                self.assertNotIn(word, blob, e["id"])
+
+    def test_loader_missing_file_returns_empty(self):
+        self.assertEqual(
+            bot.load_training_data("/nonexistent/nope.json"), []
+        )
+
+    def test_matcher_known_questions(self):
+        cases = [
+            ("What is the cheapest TikTok views you have?", "en",
+             "1000 TikTok views is 18.90 ETB."),
+            ("How do I deposit?", "en", "Minimum is 10 ETB."),
+            ("what is drip feed", "en",
+             "Drip-feed sends your order slowly"),
+            ("my views did not arrive", "en", "I am checking it now."),
+            ("ሰላም", "am", "ሰላም!"),
+            ("what is paxyo", "en", "Paxyo is a service"),
+            ("good morning", "en", "Good morning!"),
+            ("how much are tiktok views", "en", "18.90 ETB"),
+        ]
+        for question, lang, start in cases:
+            answer = bot.match_training_answer(question, lang)
+            self.assertIsNotNone(answer, question)
+            self.assertIn(start, answer, question)
+
+    def test_matcher_refuses_orders_money_and_actions(self):
+        for question in (
+            "What is my balance?",
+            "cancel my order",
+            "show me my orders",
+            "speak amharic",
+            "I want to talk to a real person",
+            "I want 1000 TikTok views https://vt.tiktok.com/abc",
+            "I want to deposit 100 br",
+            "order service 5413",
+            "use code GENA20",
+            "hello there friend",
+        ):
+            self.assertIsNone(
+                bot.match_training_answer(question, "en"), question
+            )
+
+
+class TestChatTrainingHook(unittest.IsolatedAsyncioTestCase):
+    """The matcher runs before the AI classifier in the live flow."""
+
+    def setUp(self):
+        bot.SEEN_UPDATES.clear()
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    def tearDown(self):
+        bot.SEEN_UPDATES.clear()
+        bot.PENDING.clear()
+        bot.PENDING_REFILL.clear()
+        bot.USER_TRAITS.clear()
+        bot.USUAL_SERVICE.clear()
+        bot._USUAL_COUNTS.clear()
+        bot._TONE_SIGNALS.clear()
+        bot._TRAITS_FROM_SERVER.clear()
+        bot._LAST_TRAITS_SAVE.clear()
+        bot.CANCELLED_DRAFT.clear()
+        bot.LAST_ORDER.clear()
+        bot.PARTIAL.clear()
+        bot.PENDING_RECURRING.clear()
+        bot.RECURRING_DRAFT.clear()
+        bot.DEPOSIT_DRAFT.clear()
+        bot.PENDING_DEPOSIT.clear()
+
+    async def _send(self, text, intent, paxyo=None, user=None):
+        msg = FakeMessage()
+        update = FakeUpdate(msg, user=user or FakeUser())
+        with mock.patch("bot.extract_intent", new=mock.AsyncMock(return_value=intent)), \
+             mock.patch("bot.paxyo", paxyo or FakePaxyo()), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, text)
+        self.assertEqual(msg.voice_sent, [])  # text in -> text only
+        return msg
+
+    async def test_answer_paxyo_question_uses_training_without_ai(self):
+        with mock.patch.object(
+            bot, "ai_generate",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("AI must not be called")
+            ),
+        ):
+            answer = await bot.answer_paxyo_question(
+                "how do i deposit", "en", user_id=1
+            )
+        self.assertIn("Minimum is 10 ETB.", answer)
+
+    async def test_paxyo_info_intent_gets_trained_answer_without_ai(self):
+        # The classifier says paxyo_info, so the chat-answer path
+        # runs and the trained answer wins over the AI call.
+        msg = await self._send(
+            "what is paxyo", intent_of("paxyo_info")
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["Paxyo is a service for ordering followers, likes, "
+             "views, comments and subscribers for TikTok, Instagram, "
+             "Telegram, YouTube, Facebook and X."],
+        )
+
+    async def test_training_does_not_preempt_deposit_flow(self):
+        # "How do I add money?" is a deposit action, not a chat
+        # question: the deposit flow still starts and asks for the
+        # amount instead of answering with the trained how-to text.
+        msg = await self._send(
+            "How do I add money?", intent_of("deposit")
+        )
+        self.assertEqual(
+            msg.text_sent,
+            ["How much do you want to deposit? (for example 100)"],
+        )
 
 
 if __name__ == "__main__":
