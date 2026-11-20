@@ -171,14 +171,26 @@ function arf_ensure_tables() {
     // nothing on an install over the existing table, so add the
     // columns here too; error 1060 (duplicate column) means the
     // column is already there and is ignored.
+    // NOTE (20 Nov 2026): mysqli runs in exception mode
+    // (MYSQLI_REPORT_STRICT, set in db.php), so $db->query()
+    // THROWS mysqli_sql_exception instead of returning false and
+    // setting errno — the errno check after the query never runs.
+    // The duplicate-column error must be caught here: 1060 means
+    // the column already exists and is fine; any other error is
+    // real and is rethrown. Without this, every endpoint call
+    // 500s once the guard columns exist (the first ALTER throws).
     foreach ([
         'daily_cap decimal(12,2) DEFAULT NULL',
         'trigger_qty int DEFAULT NULL',
         'trigger_pct decimal(6,4) DEFAULT NULL',
     ] as $column) {
-        $db->query("ALTER TABLE `bot_refills` ADD COLUMN $column");
-        if ($db->errno !== 0 && $db->errno !== 1060) {
-            arf_fail('db_error', 'Could not add the refill guard columns.', 500);
+        try {
+            $db->query("ALTER TABLE `bot_refills` ADD COLUMN $column");
+        } catch (mysqli_sql_exception $e) {
+            if ((int)$e->getCode() !== 1060) {
+                throw $e;
+            }
+            // 1060: column already there — nothing to do.
         }
     }
 }
