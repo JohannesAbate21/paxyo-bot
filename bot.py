@@ -32314,8 +32314,14 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # offer itself refuses while a draft or Confirm card is open.
     # The check runs here, when the user messages, not in the
     # 60-second scheduler: no wake-up spam, no message to a user
-    # who is not chatting.
-    if intent_type in ("greeting", "off_topic", "unclear"):
+    # who is not chatting. A greeting in the user's own language
+    # never reaches this gate (live bug, 20 Nov 2026: bare "ሰላም"
+    # on a Friday got the English order offer instead of the
+    # trained Amharic greeting). English greetings keep the offer,
+    # as before.
+    if intent_type in ("greeting", "off_topic", "unclear") and not (
+        intent_type == "greeting" and _detected != "en"
+    ):
         # One recent-orders list for both gates (owner, 18 Nov
         # 2026): the Friday gate and the feedback gate each
         # fetched the same list, so a light turn paid for it twice
@@ -32907,6 +32913,26 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
     if intent_type == "greeting":
+        if _detected != "en":
+            # A greeting in the user's own language gets its trained
+            # answer (20 Nov 2026: bare "ሰላም" must get the short
+            # Amharic greeting in Ge'ez script, never the stock
+            # intro or the Friday offer). The raw message text is
+            # matched, not the bridged English translation, so the
+            # Ge'ez pattern matches and the answer comes back in
+            # the user's language. English greetings keep the stock
+            # greeting, as before.
+            _raw = normalize_text(
+                getattr(update.message, "text", None) or text
+            )
+            _trained = match_training_answer(_raw, _detected)
+            if _trained is not None:
+                await reply_message(
+                    update.message, _trained, _detected, voice=voice,
+                    reply_markup=hide_reply_keyboard(),
+                )
+                _turn_log("sent", _t0)
+                return
         await reply_message(
             update.message, t("greeting", lang), lang, voice=voice,
             reply_markup=hide_reply_keyboard(),
