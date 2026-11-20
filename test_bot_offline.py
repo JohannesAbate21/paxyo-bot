@@ -773,6 +773,34 @@ class TestStripDashes(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("—", card)
 
+    def test_confirm_card_hides_service_id_when_none_given(self):
+        # Owner rule, 20 Nov 2026: when the user gave no service
+        # ID, the Confirm card shows the name only — no service
+        # number anywhere on it.
+        service = {
+            "name": "Instagram Followers | Fast", "service": 1001,
+            "average_time": "5 minutes", "rate_etb_per_1000": 42.0,
+        }
+        card = bot.confirm_card_text(
+            "en", service, 1000, 42.0, "https://instagram.com/p/x",
+        )
+        self.assertIn("Instagram Followers", card)
+        self.assertNotIn("(#", card)
+        self.assertNotIn("#1001", card)
+        self.assertNotIn("1001", card)
+
+    def test_confirm_card_shows_service_id_when_given(self):
+        # The same card with an entered ID still shows it.
+        service = {
+            "name": "Instagram Followers | Fast", "service": 1001,
+            "average_time": "5 minutes", "rate_etb_per_1000": 42.0,
+        }
+        card = bot.confirm_card_text(
+            "en", service, 1000, 42.0, "https://instagram.com/p/x",
+            full_name=True,
+        )
+        self.assertIn("Instagram Followers | Fast (#1001)", card)
+
     async def test_notify_user_strips_dash(self):
         app = FakeApp()
         with mock.patch("bot.in_quiet_hours", return_value=False):
@@ -11204,8 +11232,14 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
                 link="https://www.youtube.com/@johannesabate3089",
                 quantity=1000)),
         ], paxyo=FakePaxyo(services=self.YOUTUBE_SERVICES))
-        self.assertIn("(#2427)", msg.text_sent[0])
+        # 20 Nov 2026: no ID given, so the card shows the name
+        # only — the pick is still 2427, proven by the price and
+        # the pending service, not by a number on the card.
+        self.assertIn("Youtube Subscribers", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertIn("92.40 ETB / 1000", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2427)
 
     async def test_unknown_service_lists_available_services(self):
         # An unknown ID is refused plainly, the services on offer
@@ -11235,7 +11269,13 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
                 "order", platform="instagram", service_hint="followers",
                 link="https://instagram.com/p/x", quantity=1000)),
         ])
-        self.assertIn("Instagram Followers (#1001)", msg.text_sent[0])
+        # No ID given (20 Nov 2026): the card shows the name
+        # only; the fastest pick (1001) is proven by the pending
+        # service, not by a number on the card.
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1001)
 
     async def test_cheapest_description_picks_cheapest(self):
         msg, _ = await self._turns([
@@ -11244,7 +11284,11 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
                 service_hint="cheapest instagram followers",
                 link="https://instagram.com/p/x", quantity=1000)),
         ])
-        self.assertIn("Instagram Followers (#1002)", msg.text_sent[0])
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
+        self.assertIn("21.00 ETB / 1000", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1002)
 
     async def test_blacklisted_service_refused(self):
         msg, _ = await self._turns([
@@ -11278,11 +11322,17 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
              mock.patch("bot.speak_reply"):
             await bot.on_callback(update, None)
         self.assertEqual(bot.FASTEST_FALLBACK, {})
+        # The resumed card is for the fastest service, which the
+        # user never named by ID (20 Nov 2026) — so it shows the
+        # name only, no number.
         self.assertIn(
-            "Instagram Followers (#1001)",
+            "Instagram Followers",
             query.message.text_sent[0],
         )
+        self.assertNotIn("(#", query.message.text_sent[0])
         self.assertEqual(len(bot.PENDING), 1)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1001)
 
     async def test_disabled_service_offers_fastest(self):
         msg, _ = await self._turns([
@@ -11305,8 +11355,13 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
              intent_of("order", quantity=1000)),
         ], paxyo=FakePaxyo(recent=[last]))
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("Instagram Followers (#1002)", msg.text_sent[0])
+        # "Same service as last time" is not an entered ID (20 Nov
+        # 2026), so the card shows the name only.
+        self.assertIn("Instagram Followers", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertIn("https://instagram.com/p/x", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1002)
 
     async def test_service_named_mid_flow(self):
         # Link first, then "use service 1002" (Gemini misses it, so
@@ -11468,7 +11523,8 @@ class TestSecrecy(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(msg.text_sent), 1)
         card = msg.text_sent[0]
-        self.assertIn("Instagram Followers (#1001)", card)
+        self.assertIn("Instagram Followers", card)
+        self.assertNotIn("(#", card)
         self.assertIn("42.00 ETB / 1000", card)
         self._assert_clean(card)
 
@@ -15057,8 +15113,11 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
              intent_of("order", platform="tiktok", service_hint="views")),
         ], paxyo=TikTokPaxyo())
         self.assertIn("Which one do you want", msg.text_sent[0])
-        self.assertIn("TikTok Video Views (#2001)", msg.text_sent[1])
+        self.assertIn("TikTok Video Views", msg.text_sent[1])
+        self.assertNotIn("(#", msg.text_sent[1])
         self.assertIsNotNone(msg.markups[1])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2001)
 
     # (g) duplicate updates -----------------------------------------
 
@@ -15111,8 +15170,11 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             msg.text_sent[1], "Please send your Instagram profile link."
         )
-        self.assertIn("Instagram Followers (#1002)", msg.text_sent[2])
+        self.assertIn("Instagram Followers", msg.text_sent[2])
+        self.assertNotIn("(#", msg.text_sent[2])
         self.assertIsNotNone(msg.markups[2])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1002)
 
     async def test_second_one_selects_second_budget_option(self):
         msg, _ = await self._turns([
@@ -15127,7 +15189,10 @@ class TestRoundTwoFixes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             msg.text_sent[1], "Please send your Instagram profile link."
         )
-        self.assertIn("Instagram Followers (#1001)", msg.text_sent[2])
+        self.assertIn("Instagram Followers", msg.text_sent[2])
+        self.assertNotIn("(#", msg.text_sent[2])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1001)
 
     async def test_bare_number_picks_budget_option(self):
         msg, _ = await self._turns([
@@ -15219,9 +15284,11 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
         ], paxyo=TikTokPaxyo())
         self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("TikTok Video Views", msg.text_sent[0])
-        self.assertIn("(#2001)", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertNotIn("Video Save", msg.text_sent[0])
         self.assertNotIn("Comment Likes", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2001)
 
     async def test_platform_only_hint_views_order_picks_views_service(self):
         msg, _ = await self._turns([
@@ -15231,7 +15298,9 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
                        quantity=1000)),
         ], paxyo=TikTokPaxyo())
         self.assertIn("TikTok Video Views", msg.text_sent[0])
-        self.assertIn("(#2001)", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2001)
 
     async def test_existing_metric_hint_is_not_overridden(self):
         # Round-4 change (owner, 13 Nov 2026): "tiktok likes" is
@@ -15246,8 +15315,10 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
                        quantity=1000)),
         ], paxyo=TikTokPaxyo())
         self.assertIn("TikTok Likes", msg.text_sent[0])
-        self.assertIn("(#2005)", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertNotIn("Comment Likes", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2005)
 
     async def test_derived_hint_stored_when_asking_for_link(self):
         msg, _ = await self._turns([
@@ -15274,7 +15345,7 @@ class TestRoundThreeFixes(unittest.IsolatedAsyncioTestCase):
             msg.text_sent[0], "Please send the link of the video."
         )
         self.assertIn("TikTok Video Views", msg.text_sent[1])
-        self.assertIn("(#2001)", msg.text_sent[1])
+        self.assertNotIn("(#", msg.text_sent[1])
         # The hint carried through the bare link: the pending order
         # is on the views service, not the fastest TikTok service.
         self.assertEqual(len(bot.PENDING), 1)
@@ -15741,8 +15812,10 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
                        quantity=100)),
         ], paxyo=TikTokPaxyo())
         self.assertIn("Tiktok Comment Likes", msg.text_sent[0])
-        self.assertIn("(#2003)", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertNotIn("TikTok Likes | Fast", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2003)
 
     async def test_comments_flow(self):
         msg, _ = await self._turns([
@@ -15752,8 +15825,10 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
                        quantity=100)),
         ], paxyo=TikTokPaxyo())
         self.assertIn("Tiktok Custom Comments", msg.text_sent[0])
-        self.assertIn("(#2004)", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertNotIn("Comment Likes", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2004)
 
     async def test_singular_comment_flow(self):
         msg, _ = await self._turns([
@@ -15763,7 +15838,9 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
                        quantity=100)),
         ], paxyo=TikTokPaxyo())
         self.assertIn("Tiktok Custom Comments", msg.text_sent[0])
-        self.assertIn("(#2004)", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2004)
 
     async def test_video_likes_flow(self):
         msg, _ = await self._turns([
@@ -15774,8 +15851,10 @@ class TestRoundFourFixes(unittest.IsolatedAsyncioTestCase):
                        quantity=100)),
         ], paxyo=TikTokPaxyo())
         self.assertIn("TikTok Likes", msg.text_sent[0])
-        self.assertIn("(#2005)", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertNotIn("Comment Likes", msg.text_sent[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 2005)
 
 
 class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
@@ -15959,7 +16038,8 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
         ], paxyo=TikTokPaxyo())
         card = msg.text_sent[0]
         self.assertIn("TikTok Video Views", card)
-        self.assertIn("#2001", card)
+        self.assertNotIn("(#", card)
+        self.assertNotIn("#2001", card)
         self.assertIn("18.90", card)
         self.assertNotIn("TikTok Video Views | Fast", card)
 
@@ -25027,8 +25107,8 @@ class TestRetestFixRound14Nov(_LanguageRoundBase):
         self.assertEqual(
             msg.text_sent[0], "Please send the link of the Telegram post."
         )
-        self.assertIn("#1723", msg.text_sent[1])
         self.assertIn("Pray", msg.text_sent[1])
+        self.assertNotIn("(#", msg.text_sent[1])
         self.assertNotIn("Which platform?", msg.text_sent[1])
         self.assertEqual(len(bot.PENDING), 1)
         pending = list(bot.PENDING.values())[0]
@@ -26762,10 +26842,15 @@ class TestWordQuantitiesAndLinkPlatform(_LanguageRoundBase):
 
     def _assert_card(self, msg, service_id, quantity, link=None):
         self.assertIn("Please confirm:", msg.text_sent[-1])
-        self.assertIn(f"(#{service_id})", msg.text_sent[-1])
+        # 20 Nov 2026: no ID is given in these flows, so the card
+        # shows the name only — the picked service is proven by
+        # the pending record, not by a number on the card.
+        self.assertNotIn("(#", msg.text_sent[-1])
         self.assertIn(f"🔢 {quantity}", msg.text_sent[-1])
         if link is not None:
             self.assertIn(link, msg.text_sent[-1])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], service_id)
         self.assertNotIn(
             "could not find a service", msg.text_sent[-1]
         )
@@ -27224,10 +27309,15 @@ class TestBareLinkReactionAndCancelFix(_LanguageRoundBase):
 
     def _assert_card(self, msg, service_id, quantity, link=None):
         self.assertIn("Please confirm:", msg.text_sent[-1])
-        self.assertIn(f"(#{service_id})", msg.text_sent[-1])
+        # 20 Nov 2026: no ID is given in these flows, so the card
+        # shows the name only — the picked service is proven by
+        # the pending record, not by a number on the card.
+        self.assertNotIn("(#", msg.text_sent[-1])
         self.assertIn(f"🔢 {quantity}", msg.text_sent[-1])
         if link is not None:
             self.assertIn(link, msg.text_sent[-1])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], service_id)
 
     # Fault 1: bare link completing a reactions draft ---------------
 
@@ -27553,10 +27643,15 @@ class TestManyEmojiReactions(_LanguageRoundBase):
 
     def _assert_card(self, msg, service_id, quantity, link=None):
         self.assertIn("Please confirm:", msg.text_sent[-1])
-        self.assertIn(f"(#{service_id})", msg.text_sent[-1])
+        # 20 Nov 2026: no ID is given in these flows, so the card
+        # shows the name only — the picked service is proven by
+        # the pending record, not by a number on the card.
+        self.assertNotIn("(#", msg.text_sent[-1])
         self.assertIn(f"🔢 {quantity}", msg.text_sent[-1])
         if link is not None:
             self.assertIn(link, msg.text_sent[-1])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], service_id)
 
     # (1) parsing ----------------------------------------------------
 
@@ -33619,10 +33714,13 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                             services=_snapshot_fixture()),
         )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("(#8161)", msg.text_sent[0])
+        self.assertIn("Spotify Plays", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertIn("37.80 ETB / 1000", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])  # Confirm card
         self.assertEqual(fake.orders_created, [])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 8161)
 
     async def test_order_twitch_live_viewers(self):
         msg, _ = await self._send(
@@ -33634,9 +33732,12 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                             services=_snapshot_fixture()),
         )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("(#1804)", msg.text_sent[0])
+        self.assertIn("Twitch Live Stream Viewers", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertIn("535.50 ETB / 1000", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1804)
 
     async def test_order_whatsapp_poll_votes(self):
         msg, _ = await self._send(
@@ -33648,9 +33749,12 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                             services=_snapshot_fixture()),
         )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("(#8773)", msg.text_sent[0])
+        self.assertIn("Whatsapp Poll Votes", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertIn("362.88 ETB / 1000", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 8773)
 
     async def test_order_snapchat_views_bundle(self):
         # Snapchat views exist ONLY as a Likes+Views bundle (#8765):
@@ -33665,9 +33769,12 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                             services=_snapshot_fixture()),
         )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("(#8765)", msg.text_sent[0])
+        self.assertIn("Snapchat Likes + Views", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertIn("1,600.20 ETB / 1000", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 8765)
 
     async def test_order_telegram_followers_is_honest(self):
         # Telegram has no followers product (the 20 name hits are
@@ -33700,10 +33807,13 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                             services=_snapshot_fixture()),
         )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("(#1943)", msg.text_sent[0])
+        self.assertIn("YouTube Views", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
         self.assertIn("151.20 ETB / 1000", msg.text_sent[0])
         self.assertNotIn("Live Stream", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 1943)
 
     async def test_order_twitter_retweets_both_words(self):
         # "twitter" and "x" are the same platform (the old gate
@@ -33725,9 +33835,12 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                                     services=_snapshot_fixture()),
                 )
                 self.assertEqual(len(msg.text_sent), 1)
-                self.assertIn("(#3980)", msg.text_sent[0])
+                self.assertIn("X / Twitter Retweet", msg.text_sent[0])
+                self.assertNotIn("(#", msg.text_sent[0])
                 self.assertIn("412.99 ETB / 1000", msg.text_sent[0])
                 self.assertIsNotNone(msg.markups[0])
+                pending = list(bot.PENDING.values())[-1]
+                self.assertEqual(pending["service"]["service"], 3980)
 
     # --- cheapest answers that changed --------------------------
 
@@ -41394,8 +41507,14 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         msg = await self._send("ok", intent_of("unclear"), paxyo=paxyo)
         preview = msg.text_sent[0]
         self.assertIn("Auto-refill", preview)
-        self.assertIn("(#2006)", preview)
-        self.assertNotIn("(#2001)", preview)
+        # No ID given in the refill setup (20 Nov 2026): the
+        # preview shows the name only. The service is still the
+        # order's slow 2006 — proven by its 9.00 price and the
+        # pending setup — and the fastest 2001 is nowhere on it.
+        self.assertIn("TikTok Video Views", preview)
+        self.assertNotIn("(#", preview)
+        self.assertIn("9.00 ETB / 1000", preview)
+        self.assertNotIn("18.90 ETB / 1000", preview)
         setup = next(iter(bot.PENDING_AUTO_REFILL.values()))
         self.assertEqual(setup["service"]["service"], 2006)
         self.assertEqual(setup["link"], self.LINK)
