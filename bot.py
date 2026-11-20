@@ -981,6 +981,14 @@ TEXT = {
         "am": "ይህ service በPaxyo አይገኝም — እባክዎ ሌላ ይምረጡ።",
         "en": "That service isn't available on Paxyo — please choose another one.",
     },
+    # The services on offer for the platform/metric the user asked
+    # about, shown when the service they named by ID is not
+    # available (20 Nov 2026). Numbers and prices only, never a
+    # provider name: the supply chain stays secret.
+    "available_services_intro": {
+        "am": "ያሉኝ services:",
+        "en": "Available services:",
+    },
     # A service the user chose (named by ID, pinned, or the last
     # order's) is auto-paused right now (cancel-cutting item 2,
     # 16 Nov 2026): say so plainly and offer the fastest one
@@ -3853,7 +3861,8 @@ def mentions_same_service(text):
     return any(p in s for p in phrases)
 
 
-SERVICE_ID_RE = re.compile(r"service\s*#?\s*(\d+)")
+SERVICE_ID_RE = re.compile(r"service\s+(?:id\s+)?#?\s*(\d+)")
+SERVICE_ID_WORD_RE = re.compile(r"\bid\s*#?\s*(\d+)")
 HASH_ID_RE = re.compile(r"#\s*(\d+)")
 USE_ID_RE = re.compile(r"\b(?:use|with)\s+(\d+)\b")
 
@@ -3861,12 +3870,14 @@ USE_ID_RE = re.compile(r"\b(?:use|with)\s+(\d+)\b")
 def extract_service_id(text: str):
     """A service ID the user named, or None.
 
-    Explicit forms only: "service 6139", "service #5535", "#6139",
-    "use 6139", "with 7246", or a bare number. A bare number (or one
-    after "use"/"with") only counts when it is at least 3 digits and
-    NOT a multiple of 10, because quantities must be multiples of 10:
-    "2000" is a quantity, "6139" is a service ID. Gemini's service_id
-    field is the main path; this is the local fallback when it misses.
+    Explicit forms only: "service 6139", "service id 6139",
+    "id 6139", "service #5535", "#6139", "use 6139", "with 7246",
+    or a bare number. A bare number, one after "use"/"with", or
+    one after "id" only counts when it is at least 3 digits and
+    NOT a multiple of 10, because quantities must be multiples of
+    10: "2000" is a quantity, "6139" is a service ID. Gemini's
+    service_id field is the main path; this is the local fallback
+    when it misses.
     """
     s = " ".join((text or "").strip().lower().split())
     match = SERVICE_ID_RE.search(s)
@@ -3875,6 +3886,11 @@ def extract_service_id(text: str):
     match = HASH_ID_RE.search(s)
     if match:
         return int(match.group(1))
+    match = SERVICE_ID_WORD_RE.search(s)
+    if match:
+        value = int(match.group(1))
+        if value >= 100 and value % 10 != 0:
+            return value
     match = USE_ID_RE.search(s)
     if match:
         value = int(match.group(1))
@@ -5415,7 +5431,11 @@ def find_service_by_id(services, service_id):
     2026) matches exactly; a bare id matches the first service with
     that bare id, GOP first (the merged catalogue lists the
     live API services before the SMM entries), exactly like before
-    the wiring — a bare id alone cannot tell the providers apart."""
+    the wiring — a bare id alone cannot tell the providers apart.
+    The bare id is read from "service" first, then from
+    "provider_service_id" and "id" (20 Nov 2026): the number the
+    user gives is the panel service ID, and a catalogue row may
+    carry it under any of those keys."""
     if isinstance(service_id, str) and ":" in service_id:
         wanted = service_id.strip()
         for s in services or []:
@@ -5432,6 +5452,13 @@ def find_service_by_id(services, service_id):
                 return s
         except (TypeError, ValueError):
             continue
+    for s in services:
+        for key in ("provider_service_id", "id"):
+            try:
+                if int(s.get(key, 0) or 0) == wanted:
+                    return s
+            except (TypeError, ValueError):
+                continue
     return None
 
 
@@ -25719,6 +25746,53 @@ def _current_conversation_order(user_id):
     return None
 
 
+def _current_order_service(user_id, services, platform=None, service_hint=None):
+    """The service of the order this user is already building in
+    this conversation (Confirm card waiting, or draft), resolved
+    against the live catalogue. Returns (service, error, had):
+    had is False when there is no such order or it names no
+    service (the caller falls back to picking); had is True and
+    error is None when the order's service fits and is usable;
+    had is True and error is the resolve error ("not_found" /
+    "disabled" / "blacklisted") when the order named a service
+    that can no longer be used.
+
+    A refill for an existing order must use that order's service,
+    never a fresh guess from the link (20 Nov 2026: the setup
+    guessed TikTok Followers for a TikTok Video Views order). The
+    order's service is only used when it fits this refill's
+    platform and metric — a card for another platform never
+    hijacks the refill.
+    """
+    current = _current_conversation_order(user_id)
+    if not current:
+        return None, None, False
+    stored = current.get("service")
+    wanted = None
+    if isinstance(stored, dict):
+        wanted = stored.get("combined_id") or stored.get("service")
+    if wanted is None:
+        wanted = current.get("service_id")
+    if wanted is None:
+        return None, None, False
+    service, error = resolve_named_service(services, wanted)
+    if error is not None:
+        return None, error, True
+    _want_platform = (platform or "").strip().lower()
+    if _want_platform:
+        _plat, _ = _platform_hint_of_service(service)
+        if _plat and _plat != _want_platform:
+            return None, None, False
+    _hint_kinds = _name_kinds(service_hint or "")
+    if _hint_kinds:
+        _svc_kinds = _name_kinds(
+            service.get("name") or "", service.get("category") or ""
+        )
+        if _svc_kinds and not (_hint_kinds & _svc_kinds):
+            return None, None, False
+    return service, None, True
+
+
 async def handle_recurring_text(update, text, intent, lang, voice=False):
     """Build a BOUNDED repeating-order plan (drip-feed) over several
     turns, then show the plan summary with a Confirm card. Nothing
@@ -26037,7 +26111,7 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
         stored = {}
     merged = {}
     for key in ("platform", "service_hint", "link", "target",
-                "trigger", "daily_cap", "guards_asked",
+                "service_id", "trigger", "daily_cap", "guards_asked",
                 "guards_decided"):
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
@@ -26046,6 +26120,14 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
     if merged.get("target") is None and (text or "").strip().isdigit():
         # A bare number while the setup waits for its target.
         merged["target"] = int((text or "").strip())
+    # A service the user named by ID ("service 5413", "service id
+    # 5413", "id 5413"): the classifier's service_id first, the
+    # local regex as fallback. A bare number is the target, never
+    # a service ID — it is already claimed above.
+    if merged.get("service_id") is None:
+        merged["service_id"] = intent.get("service_id")
+    if merged.get("service_id") is None and not (text or "").strip().isdigit():
+        merged["service_id"] = extract_service_id(text)
     try:
         target = int(merged["target"]) if merged.get("target") is not None else None
     except (TypeError, ValueError):
@@ -26090,29 +26172,71 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
     # Complete setup: pick the service, then check the count can
     # actually be read for it. A platform+metric with no count
     # chain (Instagram today) is refused honestly here, before
-    # any Confirm card promises it.
+    # any Confirm card promises it. The service is the one the
+    # user named by ID first, then the service of the order already
+    # being built in this conversation (a refill for an existing
+    # order uses that order's service, never a fresh guess from
+    # the link), and only then the fastest pick for the
+    # platform/metric.
     try:
         services = await paxyo.services()
     except Exception as exc:
         log.warning("services fetch failed: %s", exc)
         await reply_message(update.message, t("not_understood", lang), lang, voice=voice)
         return
-    picks = pick_services(
-        services, platform=merged.get("platform"),
-        service_hint=merged.get("service_hint"),
-        reaction_emoji=reaction_emoji(text),
-    )
-    if not picks:
-        await reply_message(
-            update.message,
-            no_service_reply(
-                merged.get("platform"), merged.get("service_hint"),
-                text, lang,
-            ) or t("no_service", lang),
-            lang, voice=voice,
+    service = None
+    _named = merged.get("service_id")
+    if _named is not None:
+        service, _svc_error = resolve_named_service(services, _named)
+        if _svc_error is not None:
+            AUTO_REFILL_DRAFT[user.id] = {
+                k: v for k, v in merged.items() if v is not None
+            }
+            await reply_message(
+                update.message,
+                _named_service_refusal_text(
+                    services, merged.get("platform"),
+                    merged.get("service_hint"), _svc_error, lang,
+                ),
+                lang, voice=voice,
+            )
+            return
+    if service is None:
+        _order_service, _order_error, _had_order = _current_order_service(
+            user.id, services, platform=merged.get("platform"),
+            service_hint=merged.get("service_hint"),
         )
-        return
-    service = picks[0]
+        if _had_order and _order_error is not None:
+            AUTO_REFILL_DRAFT[user.id] = {
+                k: v for k, v in merged.items() if v is not None
+            }
+            await reply_message(
+                update.message,
+                _named_service_refusal_text(
+                    services, merged.get("platform"),
+                    merged.get("service_hint"), _order_error, lang,
+                ),
+                lang, voice=voice,
+            )
+            return
+        service = _order_service
+    if service is None:
+        picks = pick_services(
+            services, platform=merged.get("platform"),
+            service_hint=merged.get("service_hint"),
+            reaction_emoji=reaction_emoji(text),
+        )
+        if not picks:
+            await reply_message(
+                update.message,
+                no_service_reply(
+                    merged.get("platform"), merged.get("service_hint"),
+                    text, lang,
+                ) or t("no_service", lang),
+                lang, voice=voice,
+            )
+            return
+        service = picks[0]
     metric = _auto_refill_metric(merged.get("service_hint"), service)
     platform = (merged.get("platform") or "").strip().lower()
     if not platform:
@@ -26871,6 +26995,50 @@ async def _balance_alert_line(user_id):
     )
 
 
+def _available_services_text(services, platform, service_hint, lang, limit=5):
+    """The orderable services for this platform/metric, one line
+    each: short name, (#id), price per 1000, average time — cheapest
+    first. Only service numbers, names, prices and speeds: never a
+    provider name (owner rule, 20 Nov 2026 — the supply chain stays
+    secret). Empty string when there is nothing to show."""
+    if not platform and not service_hint:
+        return ""
+    picks = pick_services(
+        services, platform=platform, service_hint=service_hint, limit=limit,
+    )
+    if not picks:
+        return ""
+    picks = sorted(
+        picks, key=lambda s: float(s.get("rate_etb_per_1000") or 0)
+    )
+    lines = [t("available_services_intro", lang)]
+    for s in picks:
+        line = (
+            f"{short_service_name(s.get('name'))} (#{s.get('service')}) - "
+            f"{format_money(s.get('rate_etb_per_1000', 0))} ETB / 1000"
+        )
+        if s.get("average_time"):
+            line += f" - {s.get('average_time')}"
+        lines.append(line)
+    return _strip_dashes("\n".join(lines))
+
+
+def _named_service_refusal_text(services, platform, service_hint, error, lang):
+    """The plain refusal for a named service that cannot be used,
+    plus the available services for this platform/metric. No order
+    and no refill is ever placed on this path."""
+    key = {
+        "blacklisted": "service_blacklisted",
+        "not_found": "service_not_found",
+        "disabled": "service_disabled",
+    }[error]
+    reply = t(key, lang)
+    available = _available_services_text(services, platform, service_hint, lang)
+    if available:
+        reply = f"{reply}\n\n{available}"
+    return reply
+
+
 async def complete_order(message, user_id, merged, lang, voice=False,
                          named_service_id=None, last_service_id=None,
                          note: str = None, ask_metric: bool = True,
@@ -26920,13 +27088,13 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 "user_id": user_id,
                 "merged": {k: v for k, v in merged.items() if v is not None},
             }
-            key = {
-                "blacklisted": "service_blacklisted",
-                "not_found": "service_not_found",
-                "disabled": "service_disabled",
-            }[svc_error]
             await reply_message(
-                message, t(key, lang), lang, voice=voice,
+                message,
+                _named_service_refusal_text(
+                    services, merged.get("platform"),
+                    merged.get("service_hint"), svc_error, lang,
+                ),
+                lang, voice=voice,
                 reply_markup=fastest_fallback_keyboard(token, lang),
             )
             return False
@@ -31470,8 +31638,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Bare acceptance of a pending order: place it and answer with the
     # full order summary IN TEXT. Checked before intent extraction, so
-    # a "yes" is never misread as a new order.
-    if is_acceptance(text):
+    # a "yes" is never misread as a new order. EXCEPT an "ok" that
+    # answers the auto-refill setup's guards question (20 Nov 2026):
+    # the setup is mid-flight and the bot just asked the question,
+    # so the answer belongs to the setup — otherwise "ok" places
+    # the waiting order and the refill dies. The follow-up routing
+    # below sends it to the setup instead.
+    if is_acceptance(text) and not _is_auto_refill_followup(text, user.id):
         confirm_id, pending = pending_for_user(user.id)
         if pending is not None:
             PENDING.pop(confirm_id, None)
