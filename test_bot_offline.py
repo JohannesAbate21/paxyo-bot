@@ -9565,11 +9565,12 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             bot.REPORT_PENDING[1], {"order_id": None, "step": "pick"})
 
-    async def test_amharic_report_request_bridged_to_english(self):
+    async def test_amharic_report_request_answered_in_amharic(self):
         # The bridge translates the Amharic report request to
         # English first, so the deterministic detection still fires;
-        # the back-translation fails offline, so the English ask is
-        # sent as-is.
+        # the ask itself comes back in Amharic from the template
+        # directly (20 Nov 2026) — no back-translation is needed,
+        # so a failed Gemini call can no longer leave it English.
         msg = FakeMessage()
         update = FakeUpdate(msg)
         fake = FakePaxyo()
@@ -9586,7 +9587,7 @@ class TestReportProblem(unittest.IsolatedAsyncioTestCase):
             await bot.handle_order_text(
                 update, None, "በorder 1841 ላይ ችግር አለ")
         self.assertIn("#1841", msg.text_sent[0])
-        self.assertIn("What's wrong", msg.text_sent[0])
+        self.assertIn("ምን ችግር አለ", msg.text_sent[0])
 
 
 class TestDelayedOrdersApiClient(unittest.IsolatedAsyncioTestCase):
@@ -16676,9 +16677,10 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
     async def test_ban_question_amharic(self):
         # The same answer for an Amharic question: the bridge
         # translates the question to English (so the ban detector
-        # fires) and the reply goes back through the Amharic
-        # bridge. The identity mock stands in for the translator;
-        # the Amharic wording itself is pinned by
+        # fires) and the reply is the Amharic template directly
+        # (20 Nov 2026) — no Gemini round-trip is needed any more,
+        # so the back-translation is never called for it. The
+        # Amharic wording itself is pinned by
         # test_ban_template_amharic below.
         with mock.patch(
             "bot.translate_to_english",
@@ -16687,15 +16689,17 @@ class TestRoundFiveFixes(unittest.IsolatedAsyncioTestCase):
             ),
         ), mock.patch(
             "bot.translate_to_amharic",
-            new=mock.AsyncMock(side_effect=lambda text: text),
+            new=mock.AsyncMock(side_effect=AssertionError(
+                "no Gemini round-trip: templates answer directly"
+            )),
         ) as to_am:
             msg, _ = await self._turns([
                 ("accountዬ ሊታገድ ይችላል?",
                  intent_of("safety")),
             ])
-        self.assertIn('No, no social media platform bans or strikes', msg.text_sent[0])
-        self.assertNotIn("it can happen", msg.text_sent[0])
-        to_am.assert_awaited_once()
+        self.assertEqual(msg.text_sent, [bot.t("ban_no", "am")])
+        self.assertIn("አይ", msg.text_sent[0])
+        to_am.assert_not_awaited()
 
     def test_ban_template_amharic(self):
         # The deterministic Amharic ban wording (owner, 14 Nov
@@ -19613,11 +19617,13 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(await bot.translate_to_amharic("Hello"), "")
 
-    async def test_amharic_order_translated_and_confirm_card_stays_english(self):
+    async def test_amharic_order_translated_and_confirm_card_is_amharic(self):
         # Live shape: an Amharic views order. The classifier must see
-        # the English translation, and the Confirm card (buttons,
-        # prices, link, service ID) must stay English — it is never
-        # translated.
+        # the English translation, and the Confirm card is Amharic
+        # from the templates (20 Nov 2026): card body and Confirm /
+        # Cancel buttons in Ge'ez, with prices, link and service
+        # untouched — and still no Gemini call, because templates,
+        # not translation, provide the Amharic.
         amharic = (
             "እባክዎ ለዚህ ቪዲዮ 200 የቲክቶክ እይታዎች እፈልጋለሁ: "
             "https://vt.tiktok.com/ZSpQWTSmH/"
@@ -19654,23 +19660,31 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
         extract.assert_awaited_once()
         self.assertEqual(extract.await_args.args[0], english)
         self.assertEqual(len(bot.PENDING), 1)
-        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn("እባክዎ ያረጋግጡ", msg.text_sent[0])
         self.assertIn("TikTok Video Views", msg.text_sent[0])
         self.assertIn("18.90 ETB", msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])
+        buttons = msg.markups[0].inline_keyboard[0]
+        self.assertIn("አረጋግጥ", buttons[0].text)
+        self.assertIn("ሰርዝ", buttons[1].text)
 
-    async def test_amharic_reply_is_translated_back(self):
-        # A source question in Amharic: the guard answers in English
-        # after the bridge, and reply_message translates it back.
+    async def test_amharic_source_question_answered_in_amharic(self):
+        # A source question in Amharic: the guard answers from the
+        # Amharic template directly (20 Nov 2026) — no Gemini
+        # round-trip is needed any more, so the back-translation
+        # is never called for it.
         amharic_q = "አገልግሎቶችዎን ከየት ታገኛላችሁ?"
-        amharic_a = "Paxyo orderዎን በቀጥታ ያደርሳል"
         with mock.patch(
             "bot.translate_to_english",
             new=mock.AsyncMock(return_value="where do you get your services"),
         ), \
             mock.patch(
                 "bot.translate_to_amharic",
-                new=mock.AsyncMock(return_value=amharic_a),
+                new=mock.AsyncMock(
+                    side_effect=AssertionError(
+                        "no Gemini round-trip: templates answer directly"
+                    )
+                ),
             ) as to_am, \
             mock.patch(
                 "bot.extract_intent",
@@ -19682,12 +19696,8 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
             mock.patch("bot.speak_reply"):
             msg = FakeMessage()
             await bot.handle_order_text(FakeUpdate(msg), None, amharic_q)
-        self.assertEqual(msg.text_sent, [amharic_a])
-        to_am.assert_awaited_once()
-        self.assertIn(
-            "Paxyo delivers your order directly",
-            to_am.await_args.args[0],
-        )
+        self.assertEqual(msg.text_sent, [bot.t("source_question", "am")])
+        to_am.assert_not_awaited()
 
     async def test_english_message_never_touches_the_bridge(self):
         with mock.patch(
@@ -19788,6 +19798,141 @@ class TestAmharicBridge(unittest.IsolatedAsyncioTestCase):
             await bot.handle_order_text(FakeUpdate(msg), None, amharic)
         extract.assert_not_called()
         self.assertTrue(msg.text_sent)
+
+    async def test_amharic_balance_question_answered_in_amharic(self):
+        # Live bug, 20 Nov 2026: an Amharic balance question got an
+        # English reply ("Balance: ...") because the bridge set lang
+        # to "en" and only a Gemini round-trip could put Amharic
+        # back. The reply language now stays the detected language,
+        # so the balance template answers in Ge'ez directly and no
+        # back-translation is needed.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value="what is my balance"),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=AssertionError(
+                    "no Gemini round-trip: templates answer directly"
+                )
+            ),
+        ) as to_am, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(return_value=intent_of("balance")),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            msg = FakeMessage()
+            await bot.handle_order_text(
+                FakeUpdate(msg), None, "ሂሳቤ ስንት ነው?"
+            )
+        self.assertEqual(msg.text_sent, ["ሂሳብዎ: 1,000.00 ETB"])
+        to_am.assert_not_awaited()
+
+    async def test_amharic_deposit_question_gets_amharic_confirm_card(self):
+        # Live bug, 20 Nov 2026: an Amharic deposit question got an
+        # English Confirm card (English body, "Confirm" / "Cancel"
+        # buttons) because the bridge set lang to "en" and cards are
+        # never translated back. The card body and its buttons now
+        # come from the Amharic templates directly.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value="i want to deposit 10 birr"),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=AssertionError(
+                    "no Gemini round-trip: templates answer directly"
+                )
+            ),
+        ) as to_am, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                return_value=intent_of("deposit", amount=10)
+            ),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            msg = FakeMessage()
+            await bot.handle_order_text(
+                FakeUpdate(msg), None, "10 ብር ማስገባት እፈልጋለሁ"
+            )
+        self.assertIn("እባክዎ ያረጋግጡ", msg.text_sent[0])
+        self.assertIn("10.00 ETB", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING_DEPOSIT), 1)
+        buttons = msg.markups[0].inline_keyboard[0]
+        self.assertIn("አረጋግጥ", buttons[0].text)
+        self.assertIn("ሰርዝ", buttons[1].text)
+        to_am.assert_not_awaited()
+
+    async def test_amharic_price_question_answered_in_amharic(self):
+        # Live bug, 20 Nov 2026: an Amharic price question got the
+        # English price line because the bridge set lang to "en".
+        # The catalogue price line now comes from the Amharic
+        # template directly.
+        catalogue = [
+            {"service": 1861, "name": "TikTok Video Views | Cheapest",
+             "category": "TikTok", "rate_etb_per_1000": 1.51,
+             "average_time": "30 minutes", "min": 100, "max": 100000},
+        ]
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(return_value="how much are tiktok views"),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=AssertionError(
+                    "no Gemini round-trip: templates answer directly"
+                )
+            ),
+        ) as to_am, mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("classifier must not run")
+            ),
+        ), mock.patch(
+            "bot.paxyo", FakePaxyo(services=catalogue)
+        ), mock.patch("bot.speak_reply"):
+            msg = FakeMessage()
+            await bot.handle_order_text(
+                FakeUpdate(msg), None, "የቲክቶክ እይታዎች ዋጋ ስንት ነው?"
+            )
+        self.assertIn("1.51", msg.text_sent[0])
+        self.assertIn("ለ 1000", msg.text_sent[0])
+        self.assertNotIn("per 1000", msg.text_sent[0])
+        to_am.assert_not_awaited()
+
+    async def test_english_deposit_question_still_english(self):
+        # English behaviour is unchanged: an English deposit
+        # question still gets the English Confirm card, and the
+        # bridge is never touched in either direction.
+        with mock.patch(
+            "bot.translate_to_english",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("must not translate English")
+            ),
+        ), mock.patch(
+            "bot.translate_to_amharic",
+            new=mock.AsyncMock(
+                side_effect=AssertionError("must not translate back")
+            ),
+        ), mock.patch(
+            "bot.extract_intent",
+            new=mock.AsyncMock(
+                return_value=intent_of("deposit", amount=10)
+            ),
+        ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
+            "bot.speak_reply"
+        ):
+            msg = FakeMessage()
+            await bot.handle_order_text(
+                FakeUpdate(msg), None, "I want to deposit 10"
+            )
+        self.assertIn("Please confirm", msg.text_sent[0])
+        self.assertIn("10.00 ETB", msg.text_sent[0])
+        buttons = msg.markups[0].inline_keyboard[0]
+        self.assertEqual(buttons[0].text, "✅ Confirm")
+        self.assertEqual(buttons[1].text, "❌ Cancel")
 
 
 # Sentinel for "ai_generate not mocked" in the round-8 _send helper
@@ -22790,7 +22935,10 @@ class TestLanguageRound(_LanguageRoundBase):
     async def test_reply_follows_current_message_after_switch(self):
         # The live repro: an Amharic turn, then the English
         # "I'm tired today" — the second reply must be English,
-        # not translated back to Amharic.
+        # not translated back to Amharic. The Amharic turn itself
+        # is answered by the Amharic template directly (20 Nov
+        # 2026): no Gemini round-trip is needed any more, so the
+        # back-translation is never called for it.
         amharic_q = "አገልግሎቶችዎን ከየት ታገኛላችሁ?"
         with mock.patch(
             "bot.translate_to_english",
@@ -22810,8 +22958,10 @@ class TestLanguageRound(_LanguageRoundBase):
         ):
             msg = FakeMessage()
             await bot.handle_order_text(FakeUpdate(msg), None, amharic_q)
-            self.assertEqual(msg.text_sent, ["AMHARIC-REPLY"])
-            to_am.assert_awaited_once()
+            self.assertEqual(
+                msg.text_sent, [bot.t("source_question", "am")]
+            )
+            to_am.assert_not_awaited()
         # Same task, next turn, English: the bridge must NOT fire.
         with mock.patch(
             "bot.translate_to_english",
@@ -23679,8 +23829,10 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
 
     async def test_amharic_howto_answered_in_amharic(self):
         # Amharic already works (owner, 14 Nov 2026): the bridge
-        # translates the question to English, DeepSeek answers
-        # freely, and the reply comes back in Amharic.
+        # translates the question to English, and the deterministic
+        # how-to answer comes back in Amharic from its template
+        # directly (20 Nov 2026) — no Gemini round-trip is needed
+        # any more, so the back-translation is never called for it.
         msg = FakeMessage()
         update = FakeUpdate(msg, user=FakeUser(language_code="am"))
         with mock.patch(
@@ -23690,8 +23842,12 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
             ),
         ), mock.patch(
             "bot.translate_to_amharic",
-            new=mock.AsyncMock(return_value="AMHARIC-LINK-ANSWER"),
-        ), mock.patch(
+            new=mock.AsyncMock(
+                side_effect=AssertionError(
+                    "no Gemini round-trip: templates answer directly"
+                )
+            ),
+        ) as to_am, mock.patch(
             "bot.extract_intent",
             new=mock.AsyncMock(return_value=intent_of("off_topic")),
         ), mock.patch("bot.paxyo", FakePaxyo()), mock.patch(
@@ -23703,7 +23859,10 @@ class TestWidenFreeAnswers(_LanguageRoundBase):
             await bot.handle_order_text(
                 update, None, "የቴሌግራም ፖስት ሊንክ እንዴት አገኛለሁ?"
             )
-        self.assertEqual(msg.text_sent, ["AMHARIC-LINK-ANSWER"])
+        self.assertEqual(
+            msg.text_sent, [bot.t("telegram_post_link", "am")]
+        )
+        to_am.assert_not_awaited()
 
 
 class PricePaxyo(FakePaxyo):
