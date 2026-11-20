@@ -7,7 +7,8 @@
 //   GET  /api/bot/service-reliability
 //     -> {"reliability": {"gop:123": {"orders": 12, "completed": 10,
 //         "cancelled": 2, "failed": 0, "cancel_rate": 0.17,
-//         "clean_streak": 10}, "smm:7013": {...}, ...}}
+//         "clean_streak": 10, "last10_orders": 10,
+//         "last10_completed": 9}, "smm:7013": {...}, ...}}
 //        Per (provider, service) 30-day stats from the live orders
 //        table. Only services with at least one order in the window
 //        are listed. `cancel_rate` is cancelled / orders — the
@@ -17,15 +18,21 @@
 //        BOT-SIDE CONTRACT below). `clean_streak` is the number of
 //        consecutive completed orders ending with the service's most
 //        recent order in the window, capped at 10 (0 when the most
-//        recent order did not complete). It is how the bot knows a
-//        service is TRUSTED (item 8): 10 clean completions in a row.
+//        recent order did not complete). `last10_orders` /
+//        `last10_completed` (20 Nov 2026) are the exact counts over
+//        the service's 10 most recent orders in the window (fewer
+//        when it has fewer) — the bot's success-rate walk reads
+//        them: a service is taken only when over 60% of its last
+//        10 orders delivered.
 //
-// THE BOT READS THESE STATS to rank services (bot.py's pick
-// path): trusted services first, then reliable services
-// fastest-first; unreliable services (cancel_rate >= 10% with
-// >= 5 orders) are skipped unless every candidate is unreliable;
-// unproven services (fewer than 10 completed orders) only get
-// small orders (under 100 ETB) unless nothing else fits. The
+// THE BOT READS THESE STATS to pick services (bot.py's pick
+// path): walking fastest-first by average time, a service is
+// taken only when its success rate over its last 10 orders is
+// over 60% (7+ of 10 delivered, from last10_completed /
+// last10_orders); anything at or below 60% is skipped for the
+// next-fastest, and when every candidate is skipped the bot asks
+// the user instead of guessing. A service with no record at all
+// reads as unknown — no evidence against it — and is taken. The
 // ranking itself is a BOT-side build: this server file only
 // exposes the counts. It never changes a price, a total, or
 // which service is picked — the money steps stay deterministic.
@@ -151,12 +158,23 @@ function bot_rel_service_reliability() {
             $out[$key] = [
                 'orders' => 0, 'completed' => 0, 'cancelled' => 0,
                 'failed' => 0, 'cancel_rate' => 0.0, 'clean_streak' => 0,
+                'last10_orders' => 0, 'last10_completed' => 0,
                 '_streak_open' => true,
             ];
         }
         $rec = &$out[$key];
         $rec['orders']++;
         $status = strtolower(trim((string)($row['status'] ?? '')));
+        // Last-10 window (20 Nov 2026): rows arrive newest-first
+        // per service, so the first 10 rows ARE the last 10
+        // orders. The bot's success-rate walk reads these exact
+        // counts (over 60% of the last 10 must have delivered).
+        if ($rec['last10_orders'] < 10) {
+            $rec['last10_orders']++;
+            if (in_array($status, $completed_words, true)) {
+                $rec['last10_completed']++;
+            }
+        }
         if (in_array($status, $completed_words, true)) {
             $rec['completed']++;
             // The streak counts leading completed orders from the
@@ -207,8 +225,12 @@ function bot_rel_service_reliability() {
 //   -> expect {"success":true,"reliability":{...}} with one entry per
 //      (provider, service) that has orders in the last 30 days, each
 //      carrying orders/completed/cancelled/failed/cancel_rate/
-//      clean_streak. A service with no orders in 30 days is absent
-//      (the bot reads that as unknown/neutral, never penalised).
+//      clean_streak/last10_orders/last10_completed. A service with
+//      no orders in 30 days is absent (the bot reads that as
+//      unknown/neutral, never penalised). NOTE: this file must be
+//      re-installed on the server (splice into bot.php) for the
+//      last10_* fields to appear — until then the bot's walk reads
+//      the clean streak (7+ takes) and the 30-day rate instead.
 //   Sanity: pick one service id with known history and check the
 //   counts against:
 //     mysql -e "SELECT status, COUNT(*) FROM orders WHERE service_id=N

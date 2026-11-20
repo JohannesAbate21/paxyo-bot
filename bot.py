@@ -966,6 +966,15 @@ TEXT = {
         "am": "{platform} {kind} የለኝም — እባክዎ ሌላ service ይሞክሩ።",
         "en": "I don't have {platform} {kind} — please try another service.",
     },
+    # Every candidate failed the success-rate walk (owner rule,
+    # 20 Nov 2026): the fastest services all succeeded in 6 or
+    # fewer of their last 10 orders, so the bot picked none and
+    # asks instead of guessing. The user can name a service ID
+    # to use it anyway, or try again later.
+    "no_service_success": {
+        "am": "ፈጣን {platform} {kind} አገልግሎቶች ሁሉም በመጨረሻዎቹ 10 ትዕዛዞች ውስጥ ከ6 በላይ አላሳኩም፤ ስለዚህ አንዱንም አልመረጥኩም። የተወሰነ አገልግሎት ከፈልጉ የአገልግሎት ቁጥሩን ይላኩልኝ፣ ወይም ቆይተው እንደገና ይሞክሩ።",
+        "en": "The fastest {platform} {kind} services have all succeeded in 6 or fewer of their last 10 orders, so I didn't pick one. If you want a specific service, send its service ID, or try again later.",
+    },
     # A service the user named by ID: it does not exist, is turned
     # off, or is blacklisted. All three offer the fastest service
     # instead, with one tap.
@@ -3691,6 +3700,67 @@ def parse_average_time(text):
     return total if found else None
 
 
+def estimated_minutes(service, quantity=None):
+    """Estimated completion minutes for this service — the average
+    time ONLY (owner, 14:22 EAT 20 Nov 2026: per-day speeds in
+    service names — "Day 500K", "25K-50K/D" — are NOT realistic
+    and are never parsed, for ranking, estimates or tiebreaks).
+    The panel's stated average time is the only speed signal;
+    a service with no average time has no estimate (None), never
+    a name-derived one. `quantity` is accepted for the callers'
+    sake; the average time does not depend on it.
+    """
+    if not isinstance(service, dict):
+        return None
+    return parse_average_time(service.get("average_time"))
+
+
+def pick_speed_key(service, quantity=None):
+    """Sort key for fastest-first picks (owner rule, 20 Nov 2026,
+    corrected 14:22 EAT): average time ONLY. Services WITH an
+    average time come first, fastest first by that time; services
+    WITHOUT one rank below them all, in catalogue order — the
+    stable sort keeps their input order, because no speed is
+    invented for them (per-day name speeds are not realistic and
+    are never parsed). `quantity` is accepted for the callers'
+    sake; the key does not depend on it.
+    """
+    avg = parse_average_time(
+        service.get("average_time") if isinstance(service, dict) else None
+    )
+    if avg is not None:
+        return (0, avg)
+    return (1, 0)
+
+
+def format_eta_minutes(minutes):
+    """'10 hours 39 minutes' style text for a minute count."""
+    minutes = max(1, int(round(minutes)))
+    if minutes < 60:
+        return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+    hours, mins = divmod(minutes, 60)
+    if hours < 24:
+        head = f"{hours} hour" if hours == 1 else f"{hours} hours"
+        return head if mins == 0 else f"{head} {mins} minutes"
+    days, hours = divmod(hours, 24)
+    head = f"{days} day" if days == 1 else f"{days} days"
+    if hours == 0:
+        return head
+    tail = f"{hours} hour" if hours == 1 else f"{hours} hours"
+    return f"{head} {tail}"
+
+
+def service_eta_text(service, quantity=None):
+    """The time shown on a Confirm card for this order: the
+    service's average time (see estimated_minutes), or 'n/a'
+    when the service states no average time — never a speed
+    guessed from its name (owner, 14:22 EAT 20 Nov 2026)."""
+    minutes = estimated_minutes(service, quantity)
+    if minutes is None:
+        return "n/a"
+    return format_eta_minutes(minutes)
+
+
 def parse_interval_minutes(text):
     """Parse a repeat gap from plain words to minutes, or None.
 
@@ -4373,13 +4443,34 @@ def _drop_geo_candidates(candidates, hint):
 
 
 def pick_services(services, platform=None, service_hint=None, limit=3,
-                  reaction_emoji=None, ratings=None, reliability=None,
+                  reaction_emoji=None, reliability=None,
                   paused=None, balance_health=None, quantity=None,
                   story=None):
-    """Rank services for a platform, fastest average time first.
+    """Rank services for a platform, fastest first by average time.
 
-    Excludes blacklisted and inactive services. Services with no average
-    time sort last. Returns at most `limit` services. A description
+    The ranking is by average_time ONLY (owner rule, 20 Nov 2026:
+    "use the one who has average time", corrected 14:22 EAT:
+    per-day speeds in service names are NOT realistic and are
+    never parsed, for ranking, estimates or tiebreaks). Services
+    WITHOUT an average time rank BELOW all services that have
+    one, in catalogue order — no speed is invented for them —
+    and they are only used when no service with an average time
+    is available at all. Fastest-first still stands inside the
+    average-time set: the fastest service is picked, and the
+    second-fastest only when the fastest fails the success-rate
+    check — nothing else moves it down the list. That check is
+    the success-rate walk (_apply_success_walk): walking the
+    fastest-first list, a service is taken only when its success
+    rate over its last 10 orders is over 60% (7+ of 10
+    delivered); anything at or below 60% is skipped and the
+    next-fastest is checked the same way. When every candidate
+    is skipped the list comes back empty and the caller asks the
+    user instead of guessing. There is no trust tier, no
+    user-rating demotion and no provider-balance guard re-ranking
+    or dropping the fastest. A low provider balance never filters
+    a pick either — a placement that fails for insufficient
+    balance rescues to the next-fastest service instead.
+    Excludes blacklisted and inactive services. A description
     hint ("cheapest instagram followers") is matched word by word
     against the service name and category — EVERY word of the hint
     must appear, so "tiktok views" never matches "TikTok Video Save"
@@ -4412,28 +4503,17 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     the emoji's own service. The emoji decides: the platform check,
     the kinds check and the exact-emoji pool still guard the pick.
     A generic reactions request (no emoji) keeps the word filter.
-    `ratings` is an optional {service id: {"good": n, "bad": n}}
-    mapping (rate your order, ideas batch 2, feature 3, 15 Nov
-    2026): when given, the fastest-first ranking is demoted by
-    apply_rating_demotions — cheapest-first and reaction-emoji
-    picks are NOT demoted (a cheapest question must quote the
-    true cheapest; an emoji pick must stay the exact emoji).
-    Cancel-cutting (16 Nov 2026, items 1 + 2 + 8 + 12) — placement
+    Cancel-cutting (16 Nov 2026, items 2 + 12) — placement
     picks only; informational picks (a price or speed answer) pass
     none of these, so they quote exactly as before:
     `reliability` is the {combined id: 30-day stats} map (None =
-    unknown, no ranking change) — the fastest-first ranking is
-    re-ranked by apply_trust_reliability_ranking (trusted first,
-    unreliable skipped unless all are, unproven small-orders-only;
-    cheapest-first and reaction-emoji picks are NOT re-ranked,
-    exactly like ratings). `paused` is a set of paused services'
-    combined ids (None = unknown, skip nothing) — paused services
-    are skipped in EVERY ranking, never placed on. `balance_health`
-    maps provider slug -> True when its balance is healthy (None =
-    unknown, skip nothing) — a nearly-empty provider's services
-    are skipped when a healthy provider has candidates too, and
-    kept when it is the only option. `quantity` is the order's
-    quantity, for the unproven small-order cap; None lifts it.
+    unknown, no ranking change) — read only by the failure gate
+    above. `paused` is a set of paused services' combined ids
+    (None = unknown, skip nothing) — paused services are skipped
+    in EVERY ranking, never placed on. `balance_health` is
+    accepted but no longer filters anything (owner rule, 20 Nov
+    2026 — see above). `quantity` is the order's quantity, for
+    the speed estimate; None estimates for 1,000 units.
     """
     wanted = (platform or "").strip().lower()
     hint = (service_hint or "").strip().lower()
@@ -4575,66 +4655,76 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
         candidates.sort(
             key=lambda s: (
                 float(s.get("rate_etb_per_1000") or 0),
-                parse_average_time(s.get("average_time")) or 0,
+                pick_speed_key(s, quantity),
             )
         )
     else:
-        candidates.sort(
-            key=lambda s: (
-                parse_average_time(s.get("average_time")) is None,
-                parse_average_time(s.get("average_time")) or 0,
-            )
-        )
+        # Fastest first by average time ONLY (owner rule, 20 Nov
+        # 2026, corrected 14:22 EAT): services WITH an average
+        # time come first, fastest first by that time; services
+        # WITHOUT one rank below them all, in catalogue order —
+        # no speed is invented for them. See pick_speed_key.
+        candidates.sort(key=lambda s: pick_speed_key(s, quantity))
+    if quantity is not None:
+        # Min/max is a hard constraint (owner brief, 20 Nov 2026):
+        # a service whose min/max cannot take this quantity is not
+        # a candidate for the order — the fastest service overall
+        # is useless when it needs 500,000 and the order is 1,000
+        # (live fault, 20 Nov 2026: YouTube views picked gop:2149,
+        # min 500K, for a 1,000-view order, once the no-average-time
+        # ordering put it first). When at least one candidate fits,
+        # the rest
+        # are dropped before the walk, so the walk never "takes" a
+        # service the order cannot use. When none fits, the list is
+        # left whole: the fastest overall is picked and
+        # complete_order answers with that service's quantity range,
+        # so the user can fix the number. Quantity None (a price or
+        # speed answer, a cheapest quote) skips this entirely.
+        try:
+            _qty = int(quantity)
+        except (TypeError, ValueError):
+            _qty = None
+        if _qty and _qty > 0:
+            _fitting = [
+                s for s in candidates
+                if validate_quantity(_qty, s) is None
+            ]
+            if _fitting:
+                candidates = _fitting
     if reliability is not None and not cheapest and reaction is None:
-        # Trust/reliability ranking (cancel-cutting items 1 + 8):
-        # only the fastest-first ranking is re-ranked, never
-        # cheapest or emoji picks (same rule as ratings above).
-        candidates = apply_trust_reliability_ranking(
-            candidates, reliability, quantity
-        )
-    if ratings and not cheapest and reaction is None:
-        # Rating demotion (feature 3): only the fastest-first
-        # ranking is demoted, never cheapest or emoji picks.
-        candidates = apply_rating_demotions(candidates, ratings)
+        # Success-rate walk (owner rule, 20 Nov 2026): walk the
+        # fastest-first list and take the first service whose
+        # success rate over its last 10 orders is over 60% (7+
+        # of 10 delivered). A service that fails the check is
+        # skipped and the next-fastest is checked the same way.
+        # Nothing else moves a service down the list. When every
+        # candidate is skipped the list comes back empty and the
+        # caller asks the user instead of guessing.
+        candidates, _ = _apply_success_walk(candidates, reliability)
     return candidates[:limit]
 
 
-# Rating demotion (rate your order, ideas batch 2, feature 3,
-# 15 Nov 2026). THE RULE, deliberately simple and conservative:
-#   * bad >= 10 -> the service is SKIPPED for this pick, unless it
-#     is the only candidate left (never leave the user with no
-#     service at all).
-#   * bad >= 3 AND bad > good -> the service is DEMOTED below every
-#     service that is not demoted — same speed or slower; among
-#     demoted services the fastest-first order is kept.
-# A service with 1-2 bad ratings, or more good than bad, is
-# untouched. Demotion never changes a price, never re-enables a
-# blacklisted service (pick_services already excluded those), and
-# never applies to cheapest-first or reaction-emoji picks.
-RATING_DEMOTE_BAD_MIN = 3
-RATING_SKIP_BAD_MIN = 10
-
-
-# Cancel-cutting (16 Nov 2026, items 1 + 2 + 8 + 12) — ONE merged
-# ranking for placement picks, not two competing systems. The
+# Cancel-cutting (16 Nov 2026, items 1 + 2 + 8 + 12) — the
 # reliability endpoint (GET /service-reliability) is the single
 # source: 30-day per (provider, service) stats + clean streak.
-#   * RELIABILITY_MIN_ORDERS / RELIABILITY_MAX_CANCEL_RATE: a
-#     service with cancel_rate >= 10% over >= 5 orders is
-#     unreliable and skipped unless every candidate is.
-#   * TRUST_MIN_ORDERS: 10 clean completions in a row (clean
-#     streak) makes a service trusted — it ranks first. Fewer
-#     than 10 completed orders makes it unproven: it only gets
-#     small orders (its own total under TRUST_SMALL_ORDER_MAX_ETB)
-#     until it earns trust, unless nothing else fits.
+# Fastest-first rule (owner, 20 Nov 2026): the stats feed ONLY
+# the success-rate walk (_apply_success_walk) — walking
+# fastest-first, a service is taken when its success rate over
+# its last 10 orders is over 60%, else it is skipped for the
+# next-fastest. There is no trust tier and no unproven
+# small-order cap any more: a trusted-but-slower service never
+# outranks the fastest, and an unproven service is never held
+# back for want of history.
 #   * PAUSE_CANCEL_THRESHOLD / PAUSE_WINDOW_HOURS /
 #     PAUSE_DURATION_HOURS: 3 provider-cancels in 24h pauses a
 #     service for 24h (server/api-service-pause.php).
 #   * SERVICE_PAUSES_CACHE_SECONDS: pauses change rarely, 5
-#     minutes is plenty fresh (mirrors the ratings cache).
+#     minutes is plenty fresh.
 #   * RELIABILITY_CACHE_SECONDS: the 30-day counts move one order
 #     at a time — one hour is plenty fresh (mirrors the
 #     price-watch snapshot probe's cadence).
+# TRUST_MIN_ORDERS / TRUST_SMALL_ORDER_MAX_ETB survive only for
+# the cheapest-first drop-only gate (_drop_risky_candidates).
 RELIABILITY_MIN_ORDERS = 5
 RELIABILITY_MAX_CANCEL_RATE = 0.10
 RELIABILITY_CACHE_SECONDS = 3600
@@ -4646,123 +4736,25 @@ PAUSE_DURATION_HOURS = 24
 SERVICE_PAUSES_CACHE_SECONDS = 300
 
 
-def apply_rating_demotions(candidates, ratings):
-    """Re-rank an already fastest-first candidate list by order
-    ratings: {"service id": {"good": n, "bad": n}}. Pure — no
-    network, no state. Unknown ids count as 0/0; a ratings mapping
-    of None/{} returns the list unchanged."""
-    if not candidates:
-        return []
-    if not ratings:
-        return list(candidates)
-
-    def _counts(service):
-        try:
-            sid = str(int(service.get("service") or 0))
-        except (TypeError, ValueError):
-            return 0, 0
-        rec = ratings.get(sid) or {}
-        if not isinstance(rec, dict):
-            return 0, 0
-        try:
-            good = int(rec.get("good") or 0)
-        except (TypeError, ValueError):
-            good = 0
-        try:
-            bad = int(rec.get("bad") or 0)
-        except (TypeError, ValueError):
-            bad = 0
-        return good, bad
-
-    kept = [s for s in candidates if _counts(s)[1] < RATING_SKIP_BAD_MIN]
-    pool = kept if kept else list(candidates)
-
-    def _demoted(service):
-        good, bad = _counts(service)
-        return bad >= RATING_DEMOTE_BAD_MIN and bad > good
-
-    ranked = sorted(
-        enumerate(pool),
-        key=lambda pair: (1 if _demoted(pair[1]) else 0, pair[0]),
-    )
-    return [service for _, service in ranked]
-
-
-# Cache for the ratings counts the demotion reads
-# (feature 3, 15 Nov 2026): {"at": epoch seconds of the last
-# fetch, "data": {service id str: {"good": n, "bad": n}}}. Counts
-# change slowly — one user rating at a time — so 5 minutes is
-# plenty fresh, and a pick never waits on a second fetch for ids
-# it already holds. In-memory only, like the other one-shot
-# flags; a restart simply fetches again.
-_SERVICE_RATINGS_CACHE = {"at": 0.0, "data": {}}
-SERVICE_RATINGS_CACHE_SECONDS = 300
-
-
-async def _cached_service_ratings(fetch, service_ids):
-    """Ratings counts for the ids, from the 5-minute cache when
-    every id is already in it, else one fetch through `fetch`
-    (PaxyoClient.service_ratings). Never raises: on any failure
-    — endpoint not live (None), network error, bad shape — it
-    returns {} and the pick ranks exactly as today."""
-    import time
-
-    ids = []
-    for sid in service_ids or []:
-        try:
-            sid = int(sid)
-        except (TypeError, ValueError):
-            continue
-        if sid > 0 and sid not in ids:
-            ids.append(sid)
-    if not ids:
-        return {}
-    now = time.time()
-    cache = _SERVICE_RATINGS_CACHE
-    if (
-        now - cache["at"] < SERVICE_RATINGS_CACHE_SECONDS
-        and all(str(i) in cache["data"] for i in ids)
-    ):
-        return {str(i): cache["data"][str(i)] for i in ids}
-    try:
-        ratings = await fetch(ids)
-    except Exception as exc:
-        log.warning("service ratings failed: %s", exc)
-        return {}
-    if not isinstance(ratings, dict):
-        return {}
-    for key, rec in ratings.items():
-        if isinstance(rec, dict):
-            cache["data"][str(key)] = rec
-    cache["at"] = now
-    return {
-        str(i): cache["data"].get(str(i), {"good": 0, "bad": 0})
-        for i in ids
-    }
-
-
 async def pick_services_rated(services, platform=None, service_hint=None,
                               limit=3, reaction_emoji=None, client=None,
                               reliability=None, paused=None,
                               balance_health=None, quantity=None,
                               story=None):
-    """pick_services with rating demotion applied (rate your order,
-    ideas batch 2, feature 3, 15 Nov 2026): the candidate pool is
-    picked first (limit 100, so the ratings call sees every service
-    the pick could choose between), the counts are fetched once
-    through the 5-minute cache, and the pool is re-picked with
-    them. At most one ratings call per pick; any failure — endpoint
-    not live, network error, a client without the method — ranks
-    exactly as today, never slower or broken. Only the
-    fastest-first ranking is demoted (see pick_services); cheapest
-    and reaction-emoji picks keep their own order.
-    Cancel-cutting (16 Nov 2026): the same re-pick also applies
-    the merged trust/reliability ranking, the pause skip and the
-    balance guard (see pick_services) — the maps are fetched once
-    here through their caches when the caller did not pass them,
-    so the initial pick never waits on more than one fetch each.
-    `quantity` is the order's quantity, for the unproven
-    small-order cap; None lifts the cap.
+    """pick_services with the live pick context applied
+    (cancel-cutting, 16 Nov 2026): the candidate pool is picked
+    first (limit 100), then re-picked with the reliability map,
+    the pauses and the provider balances fetched once through
+    their caches when the caller did not pass them — so the
+    initial pick never waits on more than one fetch each. The
+    re-pick applies the success-rate walk (see pick_services):
+    the fastest service is taken only when its success rate over
+    its last 10 orders is over 60%, else the next-fastest is
+    checked the same way. Returns (picks, all_skipped):
+    all_skipped is True when the pool had candidates but the
+    walk skipped every one, so the caller asks the user instead
+    of guessing. `quantity` is the order's quantity, for the
+    speed estimate; None estimates for 1,000 units.
     Geo rule (19:28 EAT 16 Nov 2026): every fastest-first pick
     skips country-targeted services when a non-geo one fits (see
     _drop_geo_candidates) — a plain request never lands on a geo
@@ -4777,45 +4769,32 @@ async def pick_services_rated(services, platform=None, service_hint=None,
         story=story,
     )
     if not pool:
-        return []
-    fetch = getattr(
-        client if client is not None else paxyo, "service_ratings", None
-    )
-    ratings = None
-    if callable(fetch):
-        ids = []
-        for s in pool:
-            try:
-                sid = int(s.get("service") or 0)
-            except (TypeError, ValueError):
-                continue
-            if sid > 0 and sid not in ids:
-                ids.append(sid)
-        ratings = await _cached_service_ratings(fetch, ids)
+        return [], False
     if reliability is None:
         reliability = await _cached_service_reliability(client)
     if paused is None:
         paused = await _cached_paused_services(client)
     if balance_health is None:
         balance_health = _provider_balance_health()
-    if not ratings:
-        return pick_services(
-            pool, platform=platform, service_hint=service_hint,
-            limit=limit, reaction_emoji=reaction_emoji,
-            reliability=reliability, paused=paused,
-            balance_health=balance_health, quantity=quantity,
-            story=story,
-        )
-    return pick_services(
+    picks = pick_services(
         pool, platform=platform, service_hint=service_hint,
-        limit=limit, reaction_emoji=reaction_emoji, ratings=ratings,
+        limit=limit, reaction_emoji=reaction_emoji,
         reliability=reliability, paused=paused,
         balance_health=balance_health, quantity=quantity,
         story=story,
     )
+    # When the re-pick comes back empty but the pool was not, the
+    # success walk is the usual cause: check it on the pool so the
+    # caller can say why instead of the generic no-service line.
+    # (Pauses can empty a pick too — then the walk reports False
+    # and the caller keeps its generic line.)
+    all_skipped = False
+    if not picks:
+        _, all_skipped = _apply_success_walk(pool, reliability)
+    return picks, all_skipped
 
 
-# Cache for the reliability stats the merged ranking reads
+# Cache for the reliability stats the failure gate reads
 # (cancel-cutting item 1, 16 Nov 2026): {"at": epoch seconds of
 # the last fetch, "data": {"gop:123": {"orders": n, "completed":
 # n, "cancelled": n, "failed": n, "cancel_rate": 0.12,
@@ -4979,90 +4958,81 @@ def _service_is_proven(rec):
 def _filter_pick_candidates(candidates, paused=None,
                             balance_health=None):
     """Drop services a placement pick must never use, in every
-    ranking (item 2 pauses, item 12 balance guard): paused
-    services are skipped outright; a provider whose balance is
-    nearly empty is skipped when a healthy provider has
-    candidates too — and kept when it is the only option, so an
-    order is never blocked for this reason. Pure: no network, no
-    state. `paused` is a set of combined ids (None = unknown, skip
-    nothing); `balance_health` maps provider slug -> True when its
-    balance is healthy (None = unknown, skip nothing)."""
+    ranking: paused services are skipped outright (cancel-cutting
+    item 2). `paused` is a set of combined ids (None = unknown,
+    skip nothing). `balance_health` is accepted but no longer
+    filters anything (owner rule, 20 Nov 2026): a low provider
+    balance never moves the fastest service down — a placement
+    that fails for insufficient balance rescues to the
+    next-fastest service instead. Pure: no network, no state."""
     pool = list(candidates or [])
     if paused:
         pool = [
             s for s in pool
             if service_combined_id(s) not in paused
         ]
-    if balance_health:
-        low = {
-            provider for provider, healthy in balance_health.items()
-            if not healthy
-        }
-        if low:
-            healthy_pool = [
-                s for s in pool
-                if service_provider(s) not in low
-            ]
-            if healthy_pool:
-                pool = healthy_pool
     return pool
 
 
-def apply_trust_reliability_ranking(candidates, reliability,
-                                    quantity=None):
-    """ONE merged ranking (cancel-cutting items 1 + 8, 16 Nov 2026)
-    for a fastest-first candidate list, fastest first inside each
-    tier: trusted services first (10 clean completions in a row),
-    then proven reliable services, then unproven services — but
-    only for small orders (an unproven service's own total under
-    100 ETB); for a bigger order unproven services are the fallback
-    when no trusted or proven service fits, never a refusal.
-    Unreliable services (cancel_rate >= 10% with >= 5 orders) are
-    dropped unless every candidate is unreliable, in which case
-    the fastest is kept anyway and nothing is said to the user
-    about reliability. Pure: no network, no state. `reliability`
-    None (endpoint not live) returns the list unchanged;
-    `quantity` None (no quantity known) lifts the small-order cap,
-    so an unproven service is never blocked for want of a number.
-    A service with no record at all (no orders in 30 days) reads
-    as unproven for the size cap — never penalised by the rate,
-    and the fallback when nothing proven fits."""
+def _service_passes_success_gate(rec):
+    """True when the service's success rate over its last 10 orders
+    is OVER 60% (7+ of 10 delivered), or when it has no orders on
+    record at all (no evidence against it — take it). Success means
+    the order delivered (completed). The check reads the exact
+    last-10 counts when the reliability record carries them
+    (`last10_orders` / `last10_completed`, from the updated
+    server endpoint); otherwise it falls back to what the old
+    endpoint shape carries: a clean streak of 7+ means the last 7
+    orders all delivered, so the last-10 rate is over 60% whatever
+    the older ones did; else the 30-day completed/orders rate.
+    The comparison is exact integer math (completed*10 >
+    orders*6), so 60% exactly (6 of 10, 3 of 5) does NOT pass —
+    the rate must be OVER 60%. Pure: no network, no state.
+    """
+    if not isinstance(rec, dict) or not rec:
+        return True
+    n10 = rec.get("last10_orders")
+    c10 = rec.get("last10_completed")
+    if isinstance(n10, int) and isinstance(c10, int) and n10 > 0:
+        return c10 * 10 > n10 * 6
+    try:
+        streak = int(rec.get("clean_streak") or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    if streak >= 7:
+        return True
+    try:
+        orders = int(rec.get("orders") or 0)
+        completed = int(rec.get("completed") or 0)
+    except (TypeError, ValueError):
+        return True
+    if orders <= 0:
+        return True
+    return completed * 10 > orders * 6
+
+
+def _apply_success_walk(candidates, reliability):
+    """Walk a fastest-first candidate list and take the first
+    service whose success rate over its last 10 orders is over
+    60% (see _service_passes_success_gate). Returns (kept,
+    all_skipped): kept is the list from the first passing service
+    onward, in speed order — the services after it stay as the
+    rescue chain if the first fails at placement. all_skipped is
+    True when the list was non-empty and nothing passed, so the
+    caller asks the user instead of guessing. `reliability` None
+    (endpoint not live) returns the list unchanged with
+    all_skipped False. Pure: no network, no state.
+    """
     if not candidates:
-        return []
+        return [], False
     if reliability is None:
-        return list(candidates)
-    trusted, proven = [], []
-    unproven_small, unproven_big, unreliable = [], [], []
-    for service in candidates:
-        rec = _reliability_record(reliability, service)
-        if _service_is_trusted(rec):
-            trusted.append(service)
-        elif _service_is_unreliable(rec):
-            unreliable.append(service)
-        elif _service_is_proven(rec):
-            proven.append(service)
-        elif quantity is None:
-            unproven_small.append(service)
-        else:
-            try:
-                qty = int(quantity)
-            except (TypeError, ValueError):
-                qty = 0
-            total = estimated_total_etb(
-                float(service.get("rate_etb_per_1000") or 0), qty
-            )
-            if total < TRUST_SMALL_ORDER_MAX_ETB:
-                unproven_small.append(service)
-            else:
-                unproven_big.append(service)
-    ranked = trusted + proven + unproven_small
-    if not ranked:
-        ranked = unproven_big
-    if not ranked:
-        ranked = unreliable
-    if not ranked:
-        return list(candidates)
-    return ranked
+        return list(candidates), False
+    for i, service in enumerate(candidates):
+        if _service_passes_success_gate(
+            _reliability_record(reliability, service)
+        ):
+            return list(candidates[i:]), False
+    return [], True
 
 
 def _drop_risky_candidates(candidates, reliability, quantity=None):
@@ -13350,12 +13320,50 @@ def parse_tiktok_page_count(html, metric):
     return None
 
 
+_SUBSCRIBER_TEXT_RE = re.compile(
+    r"^\s*([\d,\.]+)\s*([KMB]?)\s+subscribers?\s*$", re.IGNORECASE)
+
+
+def _find_subscriber_count(data, _depth=0):
+    """The subscriber count out of a ytInitialData blob, or None.
+    The channel header is now pageHeaderRenderer (the old
+    c4TabbedHeaderRenderer / subscriberCountText is gone from the
+    served page, 20 Nov 2026): the count is a metadata part text
+    like "1 subscriber" / "1.08K subscribers" under a "content"
+    or "accessibilityLabel" key. The match is anchored to the
+    whole string so a video title that merely mentions
+    subscribers never matches. Depth-capped like
+    _deep_find_count."""
+    if data is None or _depth > 12:
+        return None
+    if isinstance(data, dict):
+        for key in ("content", "accessibilityLabel"):
+            value = data.get(key)
+            if isinstance(value, str) and _SUBSCRIBER_TEXT_RE.match(value):
+                return parse_compact_count(value)
+        for value in data.values():
+            found = _find_subscriber_count(value, _depth + 1)
+            if found is not None:
+                return found
+        return None
+    if isinstance(data, list):
+        for item in data:
+            found = _find_subscriber_count(item, _depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
 def parse_youtube_page_count(html, metric):
     """The count out of a YouTube video or channel page, or None.
-    Views come from ytInitialData's viewCount ("5,178 views"),
-    subscribers from subscriberCountText ("12.3K subscribers").
-    The JSON is balanced out of the page; a bare regex on the
-    subscriber text is the fallback."""
+    Views come from ytInitialData's viewCount ("5,178 views");
+    subscribers from the channel header. The header used to be
+    c4TabbedHeaderRenderer / subscriberCountText ("12.3K
+    subscribers"); since 20 Nov 2026 the served page uses
+    pageHeaderRenderer, where the count is a metadata part text
+    ("1 subscriber", "1.08K subscribers"). The JSON is balanced
+    out of the page; bare regexes on the subscriber text are the
+    fallbacks."""
     if not html:
         return None
     field = "viewCount" if metric == "views" else "subscriberCount"
@@ -13365,6 +13373,20 @@ def parse_youtube_page_count(html, metric):
         if found is not None:
             return found
     if metric == "subscribers":
+        if blob is not None:
+            found = _find_subscriber_count(blob)
+            if found is not None:
+                return found
+        # Raw-page fallback (also covers a page whose JSON blob
+        # could not be balanced out): the count as a metadata
+        # part "content" or "accessibilityLabel" text.
+        match = re.search(
+            r'"(?:content|accessibilityLabel)"\s*:\s*"'
+            r"([\d,\.]+[KM]?)\s+subscribers?\"",
+            html,
+        )
+        if match:
+            return parse_compact_count(match.group(1))
         match = re.search(
             r'"subscriberCountText"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"',
             html,
@@ -17853,7 +17875,7 @@ def confirm_card_text(lang: str, service, quantity, total, link,
         lines.append("")
     lines.extend([
         service_line,
-        f"⏱ {service.get('average_time') or 'n/a'}",
+        f"⏱ {service_eta_text(service, quantity)}",
         f"💰 {format_money(service.get('rate_etb_per_1000', 0))} ETB / 1000",
         f"🔢 {quantity}",
         f"🧾 {format_money(total)} ETB (estimated)",
@@ -17942,9 +17964,9 @@ def slowest_service(services, platform=None, service_hint=None):
                           service_hint=service_hint, limit=100)
     if not picks:
         return None
-    timed = [s for s in picks if parse_average_time(s.get("average_time"))]
+    timed = [s for s in picks if estimated_minutes(s) is not None]
     pool = timed if timed else picks
-    return max(pool, key=lambda s: parse_average_time(s.get("average_time")) or 0)
+    return max(pool, key=lambda s: estimated_minutes(s) or 0)
 
 
 def _platform_hint_of_service(service):
@@ -26653,7 +26675,7 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
         t("confirm_title", lang), "",
         _note, "",
         _service_line,
-        f"⏱ {service.get('average_time') or 'n/a'}",
+        f"⏱ {service_eta_text(service)}",
         f"💰 {format_money(service.get('rate_etb_per_1000', 0))} ETB / 1000",
         f"🔗 {merged['link']}",
         "",
@@ -27248,11 +27270,11 @@ async def _low_balance_shortfall(user_id: int, service, total: float):
 
 def _prefer_pick(picks, user_id):
     """The pick to use from an ordered candidate list: a favourite
-    service (#21) first when one is among the picks, else a
-    service with no claimed time when try-new (#40) is on, else
-    the first pick (the picker's own order — fastest or cheapest
+    service (#21) first when one is among the picks, else the
+    first pick (the picker's own order — fastest or cheapest
     first). A favourite is matched by bare service id, on either
-    side of a combined id."""
+    side of a combined id. Try-new (#40) no longer changes the
+    pick (owner rule, 20 Nov 2026)."""
     favourites = get_pref(user_id, "pref_favourite_services") or []
     if favourites:
         for pick in picks:
@@ -27262,10 +27284,10 @@ def _prefer_pick(picks, user_id):
             )
             if bare in favourites or combined_bare in favourites:
                 return pick
-    if get_pref(user_id, "pref_try_new"):
-        for pick in picks:
-            if parse_average_time(pick.get("average_time")) is None:
-                return pick
+    # Try-new used to prefer a service with no claimed time over
+    # the fastest pick — removed (owner rule, 20 Nov 2026): only
+    # a failed fastest service is passed over, never a preference
+    # for trying something new.
     return picks[0]
 
 
@@ -27616,7 +27638,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
             get_pref(user_id, "pref_favourite_services")
             or get_pref(user_id, "pref_try_new")
         ) else 3
-        picks = await pick_services_rated(
+        picks, _all_skipped = await pick_services_rated(
             _pool, platform=merged.get("platform"), service_hint=_hint,
             reaction_emoji=merged.get("reaction_emoji"),
             limit=_pick_limit,
@@ -27631,6 +27653,25 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 await reply_message(
                     message,
                     t("no_exact_reaction", lang, emoji=merged["reaction_emoji"]),
+                    lang, voice=voice,
+                )
+                return False
+            if _all_skipped:
+                # Every candidate failed the success-rate walk
+                # (owner rule, 20 Nov 2026): say why instead of
+                # the generic no-service line, and let the user
+                # name a service ID to use one anyway.
+                _plat = (merged.get("platform") or "").strip().lower()
+                _kind = kind_from_text(merged.get("service_hint") or "")
+                _disp = _PLATFORM_DISPLAY.get(
+                    _plat,
+                    "Website traffic" if _plat == "website-traffic"
+                    else _plat.title(),
+                )
+                await reply_message(
+                    message,
+                    t("no_service_success", lang,
+                      platform=_disp, kind=_kind or ""),
                     lang, voice=voice,
                 )
                 return False
