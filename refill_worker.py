@@ -38,9 +38,9 @@ ONE TICK, PER ACTIVE REFILL (from GET /refills?status=active):
 
 IDEMPOTENCY: running the tick twice in an hour is safe. The
 record's own last_count/last_check is a 30-minute durable cache,
-the claim blocks overlap, the daily cap (1,000 ETB, from bot.py)
-bounds spend, and the order idempotency key replays a
-crash-retry to the same order.
+the claim blocks overlap, the user's own daily cap (when they
+set one — there is no default cap) bounds spend, and the order
+idempotency key replays a crash-retry to the same order.
 
 RUNNING IT (see INSTALL.md for the full steps):
   Fly (primary): a second process in fly.toml ("worker") running
@@ -89,7 +89,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from bot import (  # noqa: E402  (bot.py is the deployed bot, same image)
-        AUTO_REFILL_DAILY_CAP_ETB,
         auto_refill_check,
         count_proxy_from_env,
         count_tokens_from_env,
@@ -230,7 +229,16 @@ def _today_utc():
 def _record_for_check(row):
     """A DB row -> the bot-side record dict auto_refill_check()
     takes. Resets the daily spend when the UTC date rolled over:
-    spent_today belongs to spent_date, and a new day starts at 0."""
+    spent_today belongs to spent_date, and a new day starts at 0.
+    The row's own guards ride along: daily_cap (None = no limit)
+    and the trigger, stored flat on the row as trigger_qty /
+    trigger_pct and rebuilt into the {"type", "value"} dict the
+    check takes."""
+    trigger = None
+    if row.get("trigger_qty") is not None:
+        trigger = {"type": "qty", "value": row.get("trigger_qty")}
+    elif row.get("trigger_pct") is not None:
+        trigger = {"type": "pct", "value": row.get("trigger_pct")}
     record = {
         "id": row.get("id"),
         "telegram_id": row.get("telegram_id"),
@@ -239,6 +247,8 @@ def _record_for_check(row):
         "target": row.get("target"),
         "metric": row.get("metric"),
         "platform": row.get("platform"),
+        "daily_cap": row.get("daily_cap"),
+        "trigger": trigger,
         "spent_today": row.get("spent_today") or 0,
         "spent_date": row.get("spent_date"),
         "last_count": row.get("last_count"),

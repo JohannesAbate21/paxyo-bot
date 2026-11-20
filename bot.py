@@ -54,6 +54,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -331,13 +332,14 @@ REFILLS_LIVE_CACHE_SECONDS = 300  # 5 minutes: same rule for the
 # auto-refill probe (GET /refills/status, server api-auto-refill.php).
 # Auto-refill / keep-above-target (19 Nov 2026): the bot checks a
 # live count once an hour and tops it back up to the target from
-# the user's balance. Guards: a drop smaller than the minimum
-# never orders (providers have minimum quantities anyway), and a
-# daily spend cap stops refills for the day. Both are plain
-# constants so the owner can change them in one place.
-AUTO_REFILL_MIN_DROP_ABSOLUTE = 100  # never order for a drop under 100
-AUTO_REFILL_MIN_DROP_PCT = 0.02  # ... or under 2% of the target
-AUTO_REFILL_DAILY_CAP_ETB = 1000.0  # most the bot may spend on refills per user per day
+# the user's balance. Guards (owner, 20 Nov 2026): NO daily spend
+# cap by default — the bot may use the user's whole balance for
+# refills unless the user sets a limit themselves. The default
+# trigger is a 5% drop below the target; the user can set their
+# own trigger instead (a quantity or a percent) and can stop a
+# refill any time. The default trigger is a plain constant so the
+# owner can change it in one place.
+AUTO_REFILL_DEFAULT_TRIGGER_PCT = 0.05  # 5% below the target
 AUTO_REFILL_CHECK_INTERVAL_MINUTES = 60  # hourly checks (owner, 19 Nov 2026)
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
 
@@ -1977,6 +1979,21 @@ TEXT = {
         "am": "ከስንት በታች እንዳይወርድ ነው? (ለምሳሌ: 15000)",
         "en": "What should I keep it above? (for example: 15000)",
     },
+    "ask_auto_refill_guards": {
+        "am": (
+            "መቼ እሞላለሁ? ከ {target} በታች 5% ሲወርድ እሞላለሁ። የቀን ገደብ "
+            "በነባሪ የለም — balanceዎን ሙሉ መጠቀም እችላለሁ። 'ok' ብለህ እንደዚሁ "
+            "ይቀጥላል፣ ወይም የተለየ ቁጥር ንገረኝ ('ሲወርድ በ 200'፣ '10%') ወይም "
+            "ገደብ ('limit 1000 a day')።"
+        ),
+        "en": (
+            "When do I top it up? I'll top up when it drops 5% below "
+            "{target}. There is no daily spending limit by default — I "
+            "can use your whole balance. Reply 'ok' to keep that, or "
+            "tell me a different drop ('when it drops by 200', '10%') "
+            "or a limit ('limit 1000 a day')."
+        ),
+    },
     "auto_refill_target_too_small": {
         "am": "ዒላማው በጣም ትንሽ ነው, {service} ቢያንስ {min} ያስፈልገዋል። ከዛ በላይ ቁጥር ይስጡ።",
         "en": "That target is too small, {service} needs at least {min}. Give me a bigger number.",
@@ -1987,16 +2004,14 @@ TEXT = {
     },
     "auto_refill_started": {
         "am": (
-            "Auto-refill ጀምሯል! {service} ከ {target} በታች ሲወርድ "
-            "በየሰዓቱ እፈትሻለሁ እና balanceዎን እጠቅማለሁ። በቀን እስከ {cap} ETB። "
-            "Server ላይ ሰዓታዊ ምርመራው ገና አልተጫነም, ስለዚህ እስኪጫን ድረስ "
-            "ምንም order አይዘዝም።"
+            "Auto-refill ጀምሯል! {service}ን በየሰዓቱ እፈትሻለሁ እና {trigger} "
+            "balanceዎን እጠቅማለሁ። {limit} በማንኛውም ጊዜ ማቆም ትችላለህ — "
+            "'stop auto refill' ብለህ ንገረኝ።"
         ),
         "en": (
             "Auto-refill is on! I'll check {service} every hour and top it "
-            "up from your balance whenever it drops below {target}. "
-            "At most {cap} ETB a day. The hourly check on the server is "
-            "not installed yet, so nothing will order until that is live."
+            "up from your balance {trigger}. {limit} You can stop it any "
+            "time — just say 'stop auto refill'."
         ),
     },
     "auto_refill_none": {
@@ -2006,6 +2021,10 @@ TEXT = {
     "auto_refill_stopped": {
         "am": "Auto-refill ({service}) ቆሟል።",
         "en": "Stopped the auto-refill for {service}.",
+    },
+    "auto_refill_stop_failed": {
+        "am": "Auto-refill ማቆም አልቻልኩም። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።",
+        "en": "I could not stop that auto-refill. Please try again in a moment.",
     },
     "auto_refill_none_to_stop": {
         "am": "ሊያቆሙት የሚችሉት auto-refill የለም።",
@@ -6122,10 +6141,23 @@ class PaxyoClient:
 
     async def create_refill(self, telegram_id: int, service_id: int,
                             provider, link: str, platform: str, metric: str,
-                            target: int, service: dict, idempotency_key: str):
+                            target: int, service: dict, idempotency_key: str,
+                            daily_cap=None, trigger=None):
         """POST /refills {...} -> {"ok": true, "id": N, "refill":
         {...}}. Returns None on 404 (endpoint not live yet); any
-        other failure raises, so the caller can log it."""
+        other failure raises, so the caller can log it. daily_cap
+        is the user's own daily limit (None = no limit); trigger
+        is {"type": "qty"|"pct", "value": ...} (None = the 5%
+        default) — both ride flat in the body so the server can
+        store them on the row for the worker."""
+        trigger_qty = None
+        trigger_pct = None
+        if trigger:
+            kind = str(trigger.get("type") or "").strip().lower()
+            if kind == "qty":
+                trigger_qty = trigger.get("value")
+            elif kind == "pct":
+                trigger_pct = trigger.get("value")
         try:
             return await self._send(
                 build_api_request("POST", "/refills", {
@@ -6138,6 +6170,9 @@ class PaxyoClient:
                     "target": target,
                     "service_json": service,
                     "idempotency_key": idempotency_key,
+                    "daily_cap": daily_cap,
+                    "trigger_qty": trigger_qty,
+                    "trigger_pct": trigger_pct,
                 })
             )
         except httpx.HTTPStatusError as exc:
@@ -12693,22 +12728,147 @@ def parse_auto_refill_target(text):
     return None
 
 
-def auto_refill_min_drop(target):
-    """The smallest drop worth ordering for: the larger of 100 or
-    2% of the target. A 50-drop on a 15k target never orders —
-    providers have minimum quantities anyway, and tiny orders
-    churn the balance."""
+def parse_auto_refill_trigger(text):
+    """The user's own trigger, or None to keep the 5% default.
+    "when it drops by 200" / "drop 200" / a bare "200" -> a
+    quantity trigger; "10%", "10 percent", "drops 10%" -> a
+    percent trigger. A percent must be under 100; a quantity
+    must be at least 1. Anything else (including "ok") is None —
+    the caller keeps the default, never guesses."""
+    s = " ".join(str(text or "").strip().lower().split())
+    if not s:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:%|percent|pct)", s)
+    if match:
+        try:
+            pct = float(match.group(1)) / 100.0
+        except ValueError:
+            return None
+        if 0 < pct < 1:
+            return {"type": "pct", "value": pct}
+        return None
+    match = re.search(
+        r"(?:drop(?:s|ped)?|fall(?:s)?|decrease|down|by)\s*(?:by\s*)?(\d[\d,]*)",
+        s,
+    )
+    if match:
+        try:
+            qty = int(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+        if qty >= 1:
+            return {"type": "qty", "value": qty}
+        return None
+    if s.isdigit():
+        qty = int(s)
+        if qty >= 1:
+            return {"type": "qty", "value": qty}
+    return None
+
+
+def parse_auto_refill_daily_cap(text):
+    """A daily spending limit in ETB, or None. "limit 1000",
+    "max 500 a day", "cap 1000 ETB" -> the number. "no limit",
+    "none", "no cap", "unlimited", "ok" -> None (no limit), the
+    same as the default. A number with no limit word ("1000")
+    is NOT a cap — a bare number while the setup waits is a
+    trigger quantity, never a spending limit."""
+    s = " ".join(str(text or "").strip().lower().split())
+    if not s:
+        return None
+    if re.search(r"\b(no\s+limit|no\s+cap|unlimited|none)\b", s):
+        return None
+    match = re.search(
+        r"(?:limit|max|cap|daily\s+limit)\s*:?\s*(\d[\d,]*)", s)
+    if match:
+        try:
+            cap = float(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+        if cap > 0:
+            return cap
+    return None
+
+
+def auto_refill_trigger_text(trigger, target, lang):
+    """The trigger as a clause in the user's language, for the
+    preview and the started message: "when it drops 5% below
+    10,000", "when it drops by 200", "when it drops 10% below
+    10,000". None means the 5% default."""
+    if trigger and str(trigger.get("type") or "").strip().lower() == "qty":
+        try:
+            qty = int(trigger.get("value"))
+        except (TypeError, ValueError):
+            qty = None
+        if qty and qty > 0:
+            if lang == "am":
+                return f"በ {qty:,} ሲቀንስ"
+            return f"when it drops by {qty:,}"
+    if trigger and str(trigger.get("type") or "").strip().lower() == "pct":
+        try:
+            pct = float(trigger.get("value"))
+        except (TypeError, ValueError):
+            pct = None
+        if pct and 0 < pct < 1:
+            shown = int(pct * 100) if float(pct * 100).is_integer() else pct * 100
+            if lang == "am":
+                return f"ከ {int(target):,} በታች {shown}% ሲወርድ"
+            return f"when it drops {shown}% below {int(target):,}"
+    shown = int(AUTO_REFILL_DEFAULT_TRIGGER_PCT * 100)
+    if lang == "am":
+        return f"ከ {int(target):,} በታች {shown}% ሲወርድ"
+    return f"when it drops {shown}% below {int(target):,}"
+
+
+def auto_refill_limit_text(daily_cap, lang):
+    """The daily limit as a sentence: none by default (the bot
+    may use the whole balance), or the user's own limit."""
+    if daily_cap is None:
+        if lang == "am":
+            return "የቀን ገደብ የለም — balanceዎን ሙሉ መጠቀም እችላለሁ።"
+        return "There is no daily limit — I can use your whole balance."
+    if lang == "am":
+        return f"በቀን እስከ {format_money(daily_cap)} ETB።"
+    return f"At most {format_money(daily_cap)} ETB a day."
+
+
+def auto_refill_min_drop(target, trigger=None):
+    """The smallest drop worth ordering for. Default: 5% of the
+    target (owner, 20 Nov 2026). A user-set trigger replaces it:
+    {"type": "qty", "value": 200} ("when it drops by 200") or
+    {"type": "pct", "value": 0.10} ("when it drops 10%"). A bad
+    or empty trigger falls back to the 5% default — a refill
+    never orders on a drop of nothing."""
+    if trigger:
+        kind = str(trigger.get("type") or "").strip().lower()
+        try:
+            value = trigger.get("value")
+            if kind == "qty":
+                qty = int(value)
+                if qty > 0:
+                    return qty
+            elif kind == "pct":
+                pct = float(value)
+                if 0 < pct < 1:
+                    goal = int(target)
+                    if goal > 0:
+                        # 1e-9 guards the float: 15000 * 0.10 is a
+                        # hair above 1500.0 in binary, and ceil
+                        # would wrongly give 1501.
+                        return max(1, math.ceil(goal * pct - 1e-9))
+        except (TypeError, ValueError):
+            pass
     try:
-        value = int(target)
+        goal = int(target)
     except (TypeError, ValueError):
-        return AUTO_REFILL_MIN_DROP_ABSOLUTE
-    if value <= 0:
-        return AUTO_REFILL_MIN_DROP_ABSOLUTE
-    two_pct = (value + 49) // 50  # ceil(2% of target)
-    return max(AUTO_REFILL_MIN_DROP_ABSOLUTE, two_pct)
+        return 1
+    if goal <= 0:
+        return 1
+    # ceil(5% of the target) in whole numbers: (goal + 19) // 20.
+    return max(1, (goal + 19) // 20)
 
 
-def auto_refill_top_up_qty(current, target, service):
+def auto_refill_top_up_qty(current, target, service, trigger=None):
     """How many to order to get back to the target, or None when
     no order is needed. Rounded up to a multiple of 10 and at
     least the service minimum (an order below the minimum would
@@ -12719,20 +12879,24 @@ def auto_refill_top_up_qty(current, target, service):
     except (TypeError, ValueError):
         return None
     drop = goal - now
-    if drop <= 0 or drop < auto_refill_min_drop(goal):
+    if drop <= 0 or drop < auto_refill_min_drop(goal, trigger=trigger):
         return None
     qty = _ceil_to_10(drop)
     return max(qty, _ceil_to_10(_service_min_qty(service)))
 
 
 def auto_refill_decide(current, target, service, spent_today,
-                       cap=AUTO_REFILL_DAILY_CAP_ETB):
+                       cap=None, trigger=None):
     """Pure top-up decision, no network. Returns {"action",
     "quantity", "cost", "reason"}: "top_up" (order this many),
     "skip" (at target, or the drop is too small to bother),
-    "cap" (the daily spend cap would be passed), "unavailable"
-    (no count to judge from). The caller places nothing — the
-    server worker does that, after this decision."""
+    "cap" (the user's own daily spend cap would be passed),
+    "unavailable" (no count to judge from). cap=None means NO
+    daily cap: the bot may use the user's whole balance (owner,
+    20 Nov 2026) — a cap only applies when the user set one.
+    trigger is the per-refill trigger (None = the 5% default).
+    The caller places nothing — the server worker does that,
+    after this decision."""
     if current is None:
         return {"action": "unavailable", "quantity": None,
                 "cost": None, "reason": "no_count"}
@@ -12745,19 +12909,25 @@ def auto_refill_decide(current, target, service, spent_today,
     if now >= goal:
         return {"action": "skip", "quantity": None, "cost": None,
                 "reason": "at_target"}
-    qty = auto_refill_top_up_qty(now, goal, service)
+    qty = auto_refill_top_up_qty(now, goal, service, trigger=trigger)
     if qty is None:
         return {"action": "skip", "quantity": None, "cost": None,
                 "reason": "drop_too_small"}
     rate = float((service or {}).get("rate_etb_per_1000", 0) or 0)
     cost = estimated_total_etb(rate, qty)
-    try:
-        spent = float(spent_today or 0)
-    except (TypeError, ValueError):
-        spent = 0.0
-    if spent + cost > float(cap):
-        return {"action": "cap", "quantity": qty, "cost": cost,
-                "reason": "daily_cap"}
+    if cap is not None:
+        try:
+            limit = float(cap)
+        except (TypeError, ValueError):
+            limit = None
+        if limit is not None:
+            try:
+                spent = float(spent_today or 0)
+            except (TypeError, ValueError):
+                spent = 0.0
+            if spent + cost > limit:
+                return {"action": "cap", "quantity": qty, "cost": cost,
+                        "reason": "daily_cap"}
     return {"action": "top_up", "quantity": qty, "cost": cost,
             "reason": "below_target"}
 
@@ -13656,6 +13826,8 @@ async def auto_refill_check(refill, tokens=None, http_get=None,
         }
     decision = auto_refill_decide(
         current, target, service, spent_today,
+        cap=refill.get("daily_cap"),
+        trigger=refill.get("trigger"),
     )
     decision["current"] = current
     decision["provider"] = provider
@@ -23217,6 +23389,8 @@ def register_auto_refill(setup, user_id: int):
         "target": setup.get("target"),
         "metric": setup.get("metric"),
         "platform": setup.get("platform"),
+        "daily_cap": setup.get("daily_cap"),
+        "trigger": setup.get("trigger"),
         "spent_today": 0,
         "spent_date": None,
         "last_count": None,
@@ -23534,7 +23708,14 @@ def _refill_record_fields(record):
     (the dict auto_refill_check() takes). Server rows already
     carry that shape; memory rows are the register_auto_refill
     dict. `_server` marks a row the server holds, so the stop
-    handler knows whether to tell the server too."""
+    handler knows whether to tell the server too. Server rows
+    carry the trigger flat (trigger_qty / trigger_pct); it is
+    rebuilt into the {"type", "value"} dict here."""
+    trigger = record.get("trigger")
+    if trigger is None and record.get("trigger_qty") is not None:
+        trigger = {"type": "qty", "value": record.get("trigger_qty")}
+    elif trigger is None and record.get("trigger_pct") is not None:
+        trigger = {"type": "pct", "value": record.get("trigger_pct")}
     out = {
         "id": record.get("id"),
         "telegram_id": record.get("telegram_id"),
@@ -23543,6 +23724,8 @@ def _refill_record_fields(record):
         "target": record.get("target"),
         "metric": record.get("metric"),
         "platform": record.get("platform"),
+        "daily_cap": record.get("daily_cap"),
+        "trigger": trigger,
         "spent_today": record.get("spent_today") or 0,
         "spent_date": record.get("spent_date"),
         "last_count": record.get("last_count"),
@@ -23576,6 +23759,8 @@ async def refill_store_create(setup, user_id: int):
             int(setup.get("target")),
             service,
             str(refill["id"]),
+            daily_cap=setup.get("daily_cap"),
+            trigger=setup.get("trigger"),
         )
     except Exception as exc:
         log.warning("create_refill failed, keeping memory record: %s", exc)
@@ -23621,7 +23806,27 @@ async def refill_store_list(user_id: int):
 
 async def refill_store_stop(record, user_id: int):
     """Stop one auto-refill (memory + server when the server
-    holds it). Returns True when it was stopped."""
+    holds it). Returns True when it was stopped. A server stop
+    that fails leaves the memory record in place so the user
+    can try again — telling the user it stopped while the
+    worker still tops it up would be worse than the error. A
+    409 (already stopped on the server) counts as stopped: the
+    row will not be checked again."""
+    server_ok = True
+    if record.get("_server"):
+        try:
+            await paxyo.stop_refill(record["id"], user_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                server_ok = True
+            else:
+                log.warning("stop_refill failed: %s", exc)
+                server_ok = False
+        except Exception as exc:
+            log.warning("stop_refill failed: %s", exc)
+            server_ok = False
+    if not server_ok:
+        return False
     stopped = False
     active = AUTO_REFILL_ACTIVE.get(user_id) or []
     if any(r is record for r in active):
@@ -23632,13 +23837,7 @@ async def refill_store_stop(record, user_id: int):
             r for r in active if str(r.get("id")) != str(record.get("id"))
         ]
         stopped = True
-    if record.get("_server"):
-        try:
-            await paxyo.stop_refill(record["id"], user_id)
-        except Exception as exc:
-            log.warning("stop_refill failed: %s", exc)
-        stopped = True
-    return stopped
+    return stopped or bool(record.get("_server"))
 
 
 async def refills_live():
@@ -25819,14 +26018,16 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
     start on a misunderstood message.
 
     Missing pieces are asked in order: platform -> link ->
-    target. The link is NEVER taken from the user's last order:
+    target -> guards (when to top up, whether there is a daily
+    limit). The link is NEVER taken from the user's last order:
     a stale link here would top up the wrong post, every hour,
     until someone notices. Only a link sent in THIS conversation
     (the message, the draft being built, or the plain card still
     waiting) is used. The preview says plainly that the bot will
-    use the user's balance every time the count drops below the
-    target, and names the daily limit — that warning is the
-    point of the Confirm card, not fine print.
+    use the user's balance when the count drops, names the
+    trigger and the daily limit (or that there is none), and
+    says the refill can be stopped any time — that warning is
+    the point of the Confirm card, not fine print.
     """
     user = update.effective_user
     stored = AUTO_REFILL_DRAFT.get(user.id) or {}
@@ -25835,7 +26036,9 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
     if new_platform and stored_platform and new_platform != stored_platform:
         stored = {}
     merged = {}
-    for key in ("platform", "service_hint", "link", "target"):
+    for key in ("platform", "service_hint", "link", "target",
+                "trigger", "daily_cap", "guards_asked",
+                "guards_decided"):
         value = intent.get(key)
         merged[key] = value if value is not None else stored.get(key)
     if merged.get("target") is None:
@@ -25942,6 +26145,34 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
         update, AUTO_REFILL_DRAFT, user.id, merged, service, lang, voice=voice
     ):
         return
+    # Guards (owner, 20 Nov 2026): before the preview, the setup
+    # asks once when to top up and whether there is a daily
+    # limit. Defaults: 5% below the target, no daily limit. The
+    # answer is parsed from the message that follows the
+    # question; "ok" keeps both, a drop ("when it drops by 200",
+    # "10%") or a limit ("limit 1000 a day") replaces them. An
+    # answer that parses as neither keeps the defaults — the
+    # preview states them plainly and the user can still cancel.
+    if not merged.get("guards_decided"):
+        if merged.get("guards_asked"):
+            parsed_trigger = parse_auto_refill_trigger(text)
+            parsed_cap = parse_auto_refill_daily_cap(text)
+            if parsed_trigger is not None:
+                merged["trigger"] = parsed_trigger
+            if parsed_cap is not None:
+                merged["daily_cap"] = parsed_cap
+            merged["guards_decided"] = True
+            merged["guards_asked"] = None
+        else:
+            _draft = {k: v for k, v in merged.items() if v is not None}
+            _draft["guards_asked"] = True
+            AUTO_REFILL_DRAFT[user.id] = _draft
+            await reply_message(
+                update.message,
+                t("ask_auto_refill_guards", lang, target=f"{target:,}"),
+                lang, voice=voice,
+            )
+            return
     confirm_id = uuid.uuid4().hex[:12]
     AUTO_REFILL_DRAFT.pop(user.id, None)
     PENDING_AUTO_REFILL[confirm_id] = {
@@ -25951,6 +26182,8 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
         "target": target,
         "metric": metric,
         "platform": platform,
+        "daily_cap": merged.get("daily_cap"),
+        "trigger": merged.get("trigger"),
     }
     # A dedicated preview, not confirm_card_text: there is no
     # single order here, so no quantity and no total — showing
@@ -25958,9 +26191,11 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
     # balance warning is the note on top, in plain words.
     _note = (
         f"Auto-refill: keep {metric} above {target:,} — checked every hour. "
-        f"I will use your balance every time it drops below {target:,}, "
-        f"only the missing amount, at most {format_money(AUTO_REFILL_DAILY_CAP_ETB)} "
-        "ETB a day."
+        f"I will use your balance "
+        f"{auto_refill_trigger_text(merged.get('trigger'), target, lang)}, "
+        f"only the missing amount. "
+        f"{auto_refill_limit_text(merged.get('daily_cap'), lang)} "
+        "You can stop it any time — just say 'stop auto refill'."
     )
     _preview = _strip_dashes("\n".join([
         t("confirm_title", lang), "",
@@ -25983,10 +26218,12 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
 
 def _is_auto_refill_followup(text, user_id):
     """True when a message only answers the open auto-refill
-    setup's question: a bare link, or a bare number while the
-    setup waits for its target. A fuller message (a fresh order,
-    a balance question, a deposit) is not a follow-up and goes
-    through the normal dispatch."""
+    setup's question: a bare link, a bare number while the
+    setup waits for its target, or an answer to the guards
+    question ("ok", "when it drops by 200", "10%", "limit 1000
+    a day"). A fuller message (a fresh order, a balance
+    question, a deposit) is not a follow-up and goes through
+    the normal dispatch."""
     draft = AUTO_REFILL_DRAFT.get(user_id) or {}
     if not draft:
         return False
@@ -25995,6 +26232,17 @@ def _is_auto_refill_followup(text, user_id):
     for link in links:
         rest = rest.replace(link, " ")
     rest = " ".join(rest.strip().lower().split())
+    if draft.get("guards_asked"):
+        if rest in ("ok", "okay", "yes", "keep", "default", "no",
+                    "no limit", "none", "unlimited", "no cap"):
+            return True
+        if parse_auto_refill_trigger(text) is not None:
+            return True
+        if parse_auto_refill_daily_cap(text) is not None:
+            return True
+        if rest.isdigit():
+            return True
+        return False
     if links and not rest:
         return not PARTIAL.get(user_id)
     if draft.get("target") is None and rest.isdigit():
@@ -26020,9 +26268,19 @@ async def handle_auto_refill_status(update, lang, voice=False):
     lines = []
     for refill in refills:
         service = refill.get("service") or {}
+        trigger = auto_refill_trigger_text(
+            refill.get("trigger"), refill.get("target"), lang)
+        if refill.get("daily_cap") is None:
+            limit = ("no daily limit" if lang != "am"
+                     else "የቀን ገደብ የለም")
+        else:
+            limit = (f"at most {format_money(refill.get('daily_cap'))} ETB a day"
+                     if lang != "am" else
+                     f"በቀን እስከ {format_money(refill.get('daily_cap'))} ETB")
         lines.append(
             f"{short_service_name(service.get('name'))}: "
             f"keep {refill.get('metric')} above {refill.get('target'):,} — "
+            f"tops up {trigger}, {limit} — "
             f"{refill.get('link')}"
         )
     if not await refills_live():
@@ -26052,7 +26310,12 @@ async def handle_auto_refill_stop(update, text, lang, voice=False):
         return
     if len(refills) == 1:
         stopped = refills[0]
-        await refill_store_stop(stopped, user.id)
+        if not await refill_store_stop(stopped, user.id):
+            await reply_message(
+                update.message, t("auto_refill_stop_failed", lang),
+                lang, voice=voice,
+            )
+            return
         await reply_message(
             update.message,
             t(
@@ -26075,7 +26338,12 @@ async def handle_auto_refill_stop(update, text, lang, voice=False):
             named = refill
             break
     if named is not None:
-        await refill_store_stop(named, user.id)
+        if not await refill_store_stop(named, user.id):
+            await reply_message(
+                update.message, t("auto_refill_stop_failed", lang),
+                lang, voice=voice,
+            )
+            return
         await reply_message(
             update.message,
             t(
@@ -31244,8 +31512,13 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     service=short_service_name(
                         (auto_setup.get("service") or {}).get("name")
                     ),
-                    target=f"{auto_setup.get('target'):,}",
-                    cap=format_money(AUTO_REFILL_DAILY_CAP_ETB),
+                    trigger=auto_refill_trigger_text(
+                        auto_setup.get("trigger"),
+                        auto_setup.get("target"), lang,
+                    ),
+                    limit=auto_refill_limit_text(
+                        auto_setup.get("daily_cap"), lang,
+                    ),
                 )
             )
             return
@@ -35141,8 +35414,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 service=short_service_name(
                     (auto_setup.get("service") or {}).get("name")
                 ),
-                target=f"{auto_setup.get('target'):,}",
-                cap=format_money(AUTO_REFILL_DAILY_CAP_ETB),
+                trigger=auto_refill_trigger_text(
+                    auto_setup.get("trigger"),
+                    auto_setup.get("target"), lang,
+                ),
+                limit=auto_refill_limit_text(
+                    auto_setup.get("daily_cap"), lang,
+                ),
             )
         )
         return
