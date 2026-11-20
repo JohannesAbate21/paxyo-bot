@@ -35648,6 +35648,37 @@ class TestRefillApiUserAgent(unittest.IsolatedAsyncioTestCase):
                 await api.close()
 
 
+class TestTickIntervalSeconds(unittest.TestCase):
+    """refill_worker._tick_interval_seconds reads REFILL_TICK_SECONDS
+    (20 Nov 2026): temporary 5-minute test cadence while the
+    auto-refill is failing, back to the 3600s default after."""
+
+    def test_env_300(self):
+        import refill_worker
+        with mock.patch.dict(os.environ, {"REFILL_TICK_SECONDS": "300"}):
+            self.assertEqual(refill_worker._tick_interval_seconds(), 300)
+
+    def test_default_3600_when_unset(self):
+        import refill_worker
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("REFILL_TICK_SECONDS", None)
+            self.assertEqual(refill_worker._tick_interval_seconds(), 3600)
+
+    def test_blank_or_garbage_falls_back_to_3600(self):
+        import refill_worker
+        for raw in ("", "  ", "abc", "3.5"):
+            with mock.patch.dict(os.environ, {"REFILL_TICK_SECONDS": raw}):
+                self.assertEqual(
+                    refill_worker._tick_interval_seconds(), 3600, raw)
+
+    def test_zero_or_negative_clamped_to_1(self):
+        import refill_worker
+        for raw in ("0", "-5"):
+            with mock.patch.dict(os.environ, {"REFILL_TICK_SECONDS": raw}):
+                self.assertEqual(
+                    refill_worker._tick_interval_seconds(), 1, raw)
+
+
 class TestRefillInChat(unittest.IsolatedAsyncioTestCase):
     """Refill in chat (15 Nov 2026, feature 3): "refill my last
     order" / "refill order #1841" resolves the caller's own
