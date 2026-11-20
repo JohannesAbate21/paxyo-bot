@@ -981,6 +981,19 @@ TEXT = {
         "am": "ይህ service በPaxyo አይገኝም — እባክዎ ሌላ ይምረጡ።",
         "en": "That service isn't available on Paxyo — please choose another one.",
     },
+    # A service the user chose (named by ID, pinned, or the last
+    # order's) is for another platform than the order's link, or a
+    # different type than they asked for (20 Nov 2026, service
+    # picker guard): refused the same way as a blacklisted one,
+    # with the fastest fitting service one tap away.
+    "service_wrong_platform": {
+        "am": "ይህ service ከሊንክዎ platform ጋር አይመጣጠንም፣ ስለዚህ ለዚህ order መጠቀም አልችልም። የሚስማማውን ፈጣኑን ልጠቀም?",
+        "en": "That service is for a different platform than your link, so I can't use it for this order. Want me to use the fastest one that fits instead?",
+    },
+    "service_wrong_type": {
+        "am": "ይህ service ከጠየቁት አይነት የተለየ ነው፣ ስለዚህ ለዚህ order መጠቀም አልችልም። የሚስማማውን ፈጣኑን ልጠቀም?",
+        "en": "That service is a different type than you asked for, so I can't use it for this order. Want me to use the fastest one that fits instead?",
+    },
     # The services on offer for the platform/metric the user asked
     # about, shown when the service they named by ID is not
     # available (20 Nov 2026). Numbers and prices only, never a
@@ -1597,14 +1610,15 @@ TEXT = {
         "am": "ጠቅላላ: {total} ETB",
         "en": "Total: {total} ETB",
     },
-    # Low-balance warning (15 Nov 2026, feature 1): shown BEFORE
-    # the Confirm card when the user orders their usual service and
-    # the balance is short of the total. Names the shortfall; the
-    # deposit button on it carries exactly the shortfall. The user
-    # can still confirm — the warning never blocks the order.
+    # Low-balance warning (15 Nov 2026, feature 1): shown INSTEAD
+    # of the Confirm card when the balance is short of the total
+    # (20 Nov 2026: Confirm is never offered on an order the user
+    # cannot afford). Names the shortfall; the deposit button on
+    # it carries exactly the shortfall. The order is saved as a
+    # draft, so saying "order" after topping up continues it.
     "low_balance_warning": {
-        "am": "ማስጠንቅቂያ — balanceዎ ({balance} ETB) ለዚህ order ({total} ETB) በ{shortfall} ETB ይጎድላል። ማረጋገጥ ይችላሉ — ወይም መጀመሪያ ጉድለቱን deposit ያድርጉ።",
-        "en": "Heads up — your balance ({balance} ETB) is {shortfall} ETB short of this order ({total} ETB). You can still confirm — or top up the shortfall first.",
+        "am": "ማስጠንቅቂያ — balanceዎ ({balance} ETB) ለዚህ order ({total} ETB) በ{shortfall} ETB ይጎድላል። መጀመሪያ ጉድለቱን deposit ያድርጉ — orderዎ ተቀምጧል፣ ከዚያ ለመቀጠል \"order\" ይበሉ።",
+        "en": "Heads up — your balance ({balance} ETB) is {shortfall} ETB short of this order ({total} ETB). Top up the shortfall first. Your order is saved — say \"order\" to continue it after you top up.",
     },
     # Bulk orders (15 Nov 2026, feature 2): more than 5 links in
     # one message — ask the user to split them into smaller
@@ -4379,7 +4393,9 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
     kind, read as the two-word kind from kind_from_text — so a
     comment-likes request never gets a likes+comments bundle, and a
     plain views request never gets a live-stream service (live
-    viewers are their own kind). A name with no kind word at all
+    viewers are their own kind — enforced in the loop below, 20 Nov
+    2026: a live-stream service is skipped outright unless the hint
+    names live viewers). A name with no kind word at all
     still matches — the platform check above already ran.
     Reactions requests are special (round 8.1, 14 Nov 2026): only
     single-post reactions services, in the emoji's family — see
@@ -4509,6 +4525,15 @@ def pick_services(services, platform=None, service_hint=None, limit=3,
                 continue
         if hint_kinds and not _kinds_compatible(
                 _name_kinds(name, category), hint_kinds):
+            continue
+        # Live-stream services are their own product (20 Nov 2026):
+        # a plain likes/views request never gets one — the fastest
+        # TikTok Live Stream [LIKES] service (1 min) used to win a
+        # plain "5k like" order over real video-likes services,
+        # because its name carries the word "likes". Only a request
+        # that names live viewers keeps them.
+        if "live viewers" not in hint_kinds and _primary_kind(
+                name, category) == "live viewers":
             continue
         candidates.append(s)
     # Reactions (round 8.1, 14 Nov 2026): only single-post
@@ -16824,6 +16849,49 @@ def validate_order_link(link, service):
     return None
 
 
+def _picked_service_mismatch(service, merged):
+    """'platform' when the picked service is for another platform
+    than the order's link (or the merged platform), 'type' when its
+    kind does not match the requested metric, else None. The final
+    guard in complete_order (20 Nov 2026, service-picker bug): a
+    TikTok video-like request reached the Confirm card on Twitter
+    Followers #1, because no path ever checked the picked service
+    against the link or the metric — the named-service path, pins
+    and last-order reuse all bypass the picker's filters. A
+    live-stream service is its own product: it never fulfils a
+    plain likes/views request, even though its name carries the
+    word. Conservative by design, like validate_order_link: when
+    either side cannot be told, the service passes.
+    Pure: no network, no state."""
+    if not service:
+        return None
+    link = merged.get("link")
+    link_platform = platform_from_link(link) if link else None
+    svc_platform, _hint = _platform_hint_of_service(service)
+    if link_platform and svc_platform and link_platform != svc_platform:
+        return "platform"
+    merged_platform = (merged.get("platform") or "").strip().lower() or None
+    if (
+        merged_platform and svc_platform
+        and merged_platform != svc_platform
+    ):
+        return "platform"
+    kind = kind_from_text(merged.get("service_hint") or "")
+    if kind:
+        name_kinds = _name_kinds(
+            service.get("name"), service.get("category")
+        )
+        if not _kinds_compatible(name_kinds, {kind}):
+            return "type"
+        if (
+            _primary_kind(service.get("name"), service.get("category"))
+            == "live viewers"
+            and kind != "live viewers"
+        ):
+            return "type"
+    return None
+
+
 def _same_link(a: str, b: str) -> bool:
     """Same link up to scheme, www, query string and a trailing
     slash — the AI sometimes normalises the link it returns."""
@@ -27158,8 +27226,9 @@ async def _low_balance_shortfall(user_id: int, service, total: float):
     restart once the server traits endpoint is installed), so a
     user ordering something new and unaffordable got no warning at
     all. A balance that covers the total, or a balance that cannot
-    be read, returns None. The warning never blocks the order —
-    the caller shows it and still shows the Confirm card."""
+    be read, returns None. The warning blocks the Confirm card
+    (20 Nov 2026): the caller shows it and stops there, no card,
+    until the user tops up."""
     user_id = int(user_id)
     try:
         bal = await paxyo.balance(user_id)
@@ -27291,6 +27360,8 @@ def _named_service_refusal_text(services, platform, service_hint, error, lang):
         "blacklisted": "service_blacklisted",
         "not_found": "service_not_found",
         "disabled": "service_disabled",
+        "platform": "service_wrong_platform",
+        "type": "service_wrong_type",
     }[error]
     reply = t(key, lang)
     available = _available_services_text(services, platform, service_hint, lang)
@@ -27687,6 +27758,67 @@ async def complete_order(message, user_id, merged, lang, voice=False,
     rate = float(service.get("rate_etb_per_1000", 0))
     total = estimated_total_etb(rate, quantity)
 
+    # Service-picker guard (20 Nov 2026, major bug): the service
+    # that reaches here must match the order's link platform and
+    # the requested metric, whatever path produced it — the AI
+    # intent, a pin, the last order, or a named service ID. Live
+    # fault: a TikTok video-like request got Twitter Followers #1
+    # at 28,350 ETB, because the named-service path never checked
+    # the service against the link or the metric. A mismatch never
+    # reaches the Confirm card: a user-chosen service is refused
+    # with the available services and a one-tap fastest one; an
+    # automatic pick is re-picked once without the bad service,
+    # and if nothing fits the bot asks instead of guessing.
+    _mismatch = _picked_service_mismatch(service, merged)
+    if _mismatch is not None:
+        if _user_chosen_service:
+            _token = uuid.uuid4().hex[:12]
+            FASTEST_FALLBACK[_token] = {
+                "user_id": user_id,
+                "merged": {k: v for k, v in merged.items() if v is not None},
+            }
+            await reply_message(
+                message,
+                _named_service_refusal_text(
+                    services, merged.get("platform"),
+                    merged.get("service_hint"), _mismatch, lang,
+                ),
+                lang, voice=voice,
+                reply_markup=fastest_fallback_keyboard(_token, lang),
+            )
+            return False
+        _rel, _paused, _health = await _pick_context()
+        _bad = service_combined_id(service)
+        _pool = _pick_pool if _pick_pool is not None else services
+        _repicks = pick_services(
+            [s for s in _pool if service_combined_id(s) != _bad],
+            platform=merged.get("platform"),
+            service_hint=merged.get("service_hint"),
+            reaction_emoji=merged.get("reaction_emoji"),
+            limit=10,
+            reliability=_rel, paused=_paused, balance_health=_health,
+            quantity=merged.get("quantity"),
+            story=_story,
+        )
+        _good = None
+        for _cand in _repicks:
+            if _picked_service_mismatch(_cand, merged) is None:
+                _good = _cand
+                break
+        if _good is None:
+            await reply_message(
+                message,
+                no_service_reply(
+                    merged.get("platform"), merged.get("service_hint"),
+                    merged.get("service_hint") or "", lang,
+                ) or t("no_service", lang),
+                lang, voice=voice,
+            )
+            return False
+        service = _good
+        rate = float(service.get("rate_etb_per_1000", 0))
+        total = estimated_total_etb(rate, quantity)
+
     # Weekly spending limit (#25): refuse before the card when
     # this order would take the week's spending over the limit
     # the customer set — naming what was spent. The draft stays,
@@ -27757,17 +27889,24 @@ async def complete_order(message, user_id, merged, lang, voice=False,
             )
             return False
 
-    # Low-balance warning (15 Nov 2026, feature 1): the user's
-    # usual service, and the balance is short of the total. The
-    # warning goes out BEFORE the Confirm card, names the exact
+    # Low-balance block (15 Nov 2026, feature 1; blocking since
+    # 20 Nov 2026): the balance is short of the total. The warning
+    # goes out INSTEAD of the Confirm card, names the exact
     # shortfall, and carries a one-tap deposit button for exactly
     # that shortfall (callback "depshort:<amount>" — it pre-fills
     # the deposit flow's amount, then asks for method and phone).
-    # The Confirm card is still shown below it: the user can still
-    # confirm and place the order.
+    # No Confirm card is ever shown for an order the user cannot
+    # afford (live: a 28,350 ETB card was offered on a 1,041.38
+    # ETB balance). The draft is parked, so saying "order" after
+    # topping up resumes it (the "order" shortcut only resumes
+    # parked drafts — it wipes a draft left in PARTIAL).
     _shortfall = await _low_balance_shortfall(user_id, service, total)
     if _shortfall is not None:
         _short_amount, _balance = _shortfall
+        PARTIAL[user_id] = {
+            k: v for k, v in merged.items() if v is not None
+        }
+        _park_order_draft(user_id)
         await reply_message(
             message,
             t(
@@ -27785,6 +27924,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
                 )
             ]]),
         )
+        return False
 
     # Low balance alert (#24): no shortfall, but the balance is
     # below the level the customer set — a note on the card, not
@@ -30300,9 +30440,10 @@ async def apply_card_edit(update, user_id, confirm_id, pending, store,
     was handled with a reply. Nothing is placed: Confirm after an
     edit places the UPDATED order, Cancel still cancels it. The
     price is re-derived from the service rate, and affordability
-    is re-checked on the new total (a shortfall warns first, like
-    the original card, and the card is still shown). A refused
-    edit leaves the card unchanged."""
+    is re-checked on the new total: a shortfall warns instead of
+    the card (20 Nov 2026) — the card is dropped and the order
+    saved as a draft, so no Confirm can be tapped on an order the
+    user cannot afford. A refused edit leaves the card unchanged."""
     service = pending.get("service") or {}
     field = edit["field"]
     value = edit.get("value")
@@ -30609,6 +30750,19 @@ async def apply_card_edit(update, user_id, confirm_id, pending, store,
                 )
             ]]),
         )
+        # No Confirm on an unaffordable order (20 Nov 2026): the
+        # edited card is dropped, so the Confirm button on the old
+        # message is dead, and the order is parked as a draft — the
+        # user tops up and says "order" to continue it.
+        PARTIAL[user_id] = {
+            k: v for k, v in pending.items()
+            if k in ("platform", "service_hint", "link", "quantity")
+            and v is not None
+        }
+        _park_order_draft(user_id)
+        _table = PENDING if store == "pending" else PENDING_DELAYED
+        _table.pop(confirm_id, None)
+        return True
     # A successful edit is a correction to the pending order: log
     # it like the old quantity-change path did, so the failure log
     # still sees it.

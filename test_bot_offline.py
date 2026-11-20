@@ -11188,6 +11188,37 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
             [s["service"] for s in picks], [1001, 1002, 1003]
         )
 
+    def test_plain_likes_never_gets_live_stream_service(self):
+        # 20 Nov 2026 (service-picker bug, attempt 2): the fastest
+        # TikTok Live Stream [LIKES] service (1 min) used to win a
+        # plain "5k like" order over real video-likes services,
+        # because its name carries the word "likes". A live-stream
+        # service is its own product: only a request that names
+        # live viewers keeps it.
+        services = [
+            {"service": 2882,
+             "name": "TikTok Live Stream Viewers [LIKES]",
+             "category": "TikTok Live Stream", "type": "Default",
+             "rate_etb_per_1000": 12.73, "min": 10, "max": 100000,
+             "average_time": "1 minute", "active": True,
+             "provider": "smmsocialmedia", "combined_id": "smm:2882"},
+            {"service": 7554, "name": "TikTok Likes [HQ]",
+             "category": "TikTok Likes", "type": "Default",
+             "rate_etb_per_1000": 246.96, "min": 50, "max": 10000000,
+             "average_time": "6 minutes", "active": True,
+             "provider": "smmsocialmedia", "combined_id": "smm:7554"},
+        ]
+        picks = bot.pick_services(
+            services, platform="tiktok", service_hint="tiktok likes",
+        )
+        self.assertEqual([s["service"] for s in picks], [7554])
+        # A request that names live viewers still gets the live one.
+        picks = bot.pick_services(
+            services, platform="tiktok",
+            service_hint="tiktok live viewers",
+        )
+        self.assertEqual([s["service"] for s in picks], [2882])
+
     async def test_named_service_id_wins_over_fastest(self):
         # 1002 is slower than 1001 — naming it must still use it.
         msg, _ = await self._turns([
@@ -12925,6 +12956,10 @@ class TestEditableConfirmCard(unittest.IsolatedAsyncioTestCase):
     # Affordability ---------------------------------------------------------
 
     async def test_affordability_rechecked_on_raised_total(self):
+        # 20 Nov 2026: the edit raises the total past the balance,
+        # so the warning goes out INSTEAD of the reshown card — no
+        # Confirm can be tapped on the unaffordable order. The card
+        # is dropped and the order saved as a draft.
         paxyo = FakePaxyo(
             dripfeed_live=True, services=[dict(self.TIKTOK_VIEWS)])
         await self._build_drip(paxyo=paxyo)
@@ -12934,12 +12969,12 @@ class TestEditableConfirmCard(unittest.IsolatedAsyncioTestCase):
         msg = await self._send(
             "change quantity to 2000", intent_of("unclear"), paxyo=poor,
         )
+        self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("short", msg.text_sent[0])
         self.assertIn("27.80", msg.text_sent[0])
-        self.assertIn("37.80", msg.text_sent[1])
-        self.assertIn("10 runs of 200", msg.text_sent[1])
-        self.assertIsNotNone(msg.markups[1])
-        self.assertEqual(self._pending()["total"], 37.8)
+        self.assertIn("37.80", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 0)
+        self.assertEqual(bot.PARKED_DRAFT[1].get("quantity"), 2000)
         self.assertEqual(poor.orders_created, [])
 
     # Delayed cards -----------------------------------------------------------
@@ -33608,6 +33643,7 @@ class TestPerUserPersonality(_SmartLoopBase):
 # inventory's §2 table — real service names/rates, not hand-made
 # names — so these tests pin the analyst's verdict, not a toy.
 _SNAPSHOT_FIXTURE_CACHE = None
+_COMBINED_FIXTURE_CACHE = None
 
 
 def _snapshot_fixture():
@@ -33633,6 +33669,35 @@ def _snapshot_fixture():
             "active": True,
         } for s in raw if int(s["service"]) not in (5379, 5834)]
     return _SNAPSHOT_FIXTURE_CACHE
+
+
+def _combined_fixture():
+    """Fixture from combined-services-2026-11-15.with-times.json
+    (10,476 services, both providers, real average times): the
+    only fixture that contains the SMM live-stream services behind
+    the 20 Nov 2026 service-picker bug (smm:2882 TikTok Live
+    Stream [LIKES], 1 minute)."""
+    global _COMBINED_FIXTURE_CACHE
+    if _COMBINED_FIXTURE_CACHE is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "combined-services-2026-11-15.with-times.json",
+        )
+        with open(path) as f:
+            raw = json.load(f)
+        _COMBINED_FIXTURE_CACHE = [{
+            "service": int(s["service"]),
+            "provider": s.get("provider"),
+            "combined_id": s.get("combined_id"),
+            "name": s["name"],
+            "category": s["category"],
+            "rate_etb_per_1000": float(s["price_etb_per_1000"]),
+            "min": int(s.get("min") or 0),
+            "max": int(s.get("max") or 0),
+            "average_time": s.get("average_time"),
+            "active": True,
+        } for s in raw if int(s["service"]) not in (5379, 5834)]
+    return _COMBINED_FIXTURE_CACHE
 
 
 def _inventory_cheapest_rows():
@@ -33699,12 +33764,18 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
         ("tiktok", "live viewers"): 3769,
         ("kick", "viewers"): 7517,
         ("youtube", "viewers"): 1774,
+        # 20 Nov 2026: the old cheapest "youtube likes" was #1774,
+        # a Live Stream Views + Likes service — a live-stream
+        # product, not video likes. The true cheapest video-likes
+        # service is #5634.
+        ("youtube", "likes"): 5634,
     }
 
     def setUp(self):
         bot.PENDING.clear()
         bot.PENDING_REFILL.clear()
         bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.FASTEST_FALLBACK.clear()
@@ -33721,6 +33792,7 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
         bot.PENDING.clear()
         bot.PENDING_REFILL.clear()
         bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.CANCELLED_DRAFT.clear()
         bot.FASTEST_FALLBACK.clear()
@@ -33772,6 +33844,24 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                         ),
                     )
                     continue
+                if (plat, metric) == ("facebook", "auto views"):
+                    # No true auto-views subscription for Facebook
+                    # either: its only "auto views" service is an
+                    # Auto Live Stream Views subscription — a
+                    # live-stream product, not post auto-views
+                    # (20 Nov 2026). The bot must say so, not guess
+                    # a live service for a plain request.
+                    self.assertIsNone(bot.cheapest_service(
+                        fixture, platform="facebook",
+                        service_hint="facebook auto views",
+                    ))
+                    self.assertIn(
+                        "auto views",
+                        bot.no_service_reply(
+                            "facebook", "facebook auto views", q, "en",
+                        ),
+                    )
+                    continue
                 expected = self.CORRECTED_CHEAPEST.get(
                     (plat, metric), expected,
                 )
@@ -33793,6 +33883,15 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bot.pick_services(
                     fixture, platform="youtube",
                     service_hint="youtube auto views",
+                ), [])
+                continue
+            if (plat, metric) == ("facebook", "auto views"):
+                # Only an Auto Live Stream Views service exists —
+                # never picked for a plain auto-views order
+                # (20 Nov 2026).
+                self.assertEqual(bot.pick_services(
+                    fixture, platform="facebook",
+                    service_hint="facebook auto views",
                 ), [])
                 continue
             phrase = _type_phrase(plat, metric)
@@ -33988,6 +34087,115 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(msg.markups[0])
         pending = next(iter(bot.PENDING.values()))
         self.assertEqual(pending["service"]["service"], 1943)
+
+    async def test_order_tiktok_likes_excludes_live_stream(self):
+        # 20 Nov 2026 (service-picker bug, attempt 2, live): "I
+        # want tiktok video like" + a TikTok video link got a
+        # Confirm card for "TikTok Live Stream" (12.73 ETB/1000)
+        # instead of video likes. The live-stream service is the
+        # fastest TikTok likes-shaped service (1 min), so
+        # fastest-first picked it over real video likes (6 min).
+        msg, _ = await self._send(
+            "I want 5k tiktok video likes "
+            "https://www.tiktok.com/@shali10_/video/7709088375885548821",
+            intent_of(
+                "order", platform="tiktok", service_hint="tiktok likes",
+                link="https://www.tiktok.com/@shali10_/video/"
+                     "7709088375885548821",
+                quantity=5000,
+            ),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_combined_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("TikTok Likes", msg.text_sent[0])
+        self.assertNotIn("Live Stream", msg.text_sent[0])
+        self.assertNotIn("(#", msg.text_sent[0])
+        self.assertIn("246.96 ETB / 1000", msg.text_sent[0])
+        self.assertIn("1,234.80 ETB", msg.text_sent[0])
+        self.assertIsNotNone(msg.markups[0])
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(
+            pending["service"]["combined_id"], "smm:7554")
+        self.assertEqual(pending["total"], 1234.8)
+
+    async def test_named_twitter_service_refused_for_tiktok_link(self):
+        # 20 Nov 2026 (service-picker bug, attempt 1, live):
+        # "Please put 5k like" + a TikTok video link got a Confirm
+        # card for Twitter Followers #1 at 28,350 ETB — the
+        # named-service path never checked the service against the
+        # link or the metric. A service for another platform than
+        # the link is refused, with a one-tap fastest one instead.
+        msg, _ = await self._send(
+            "Please put 5k like "
+            "https://www.tiktok.com/@shali10_/video/7709088375885548821",
+            intent_of(
+                "order", platform="tiktok", service_hint="tiktok likes",
+                link="https://www.tiktok.com/@shali10_/video/"
+                     "7709088375885548821",
+                quantity=5000, service_id="gop:1",
+            ),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_combined_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("different platform", msg.text_sent[0])
+        self.assertNotIn("Twitter Followers", msg.text_sent[0])
+        self.assertNotIn("28,350", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 0)
+        self.assertEqual(
+            [fb["user_id"] for fb in bot.FASTEST_FALLBACK.values()],
+            [1],
+        )
+
+    async def test_named_live_stream_service_refused_for_video_likes(self):
+        # Same guard, wrong type instead of wrong platform: a
+        # named TikTok Live Stream [LIKES] service cannot fulfil a
+        # video-likes order on a video link.
+        msg, _ = await self._send(
+            "I want 5k tiktok video likes "
+            "https://www.tiktok.com/@shali10_/video/7709088375885548821",
+            intent_of(
+                "order", platform="tiktok", service_hint="tiktok likes",
+                link="https://www.tiktok.com/@shali10_/video/"
+                     "7709088375885548821",
+                quantity=5000, service_id="smm:2882",
+            ),
+            paxyo=FakePaxyo(balance=100000.0,
+                            services=_combined_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("different type", msg.text_sent[0])
+        self.assertNotIn("Live Stream", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING), 0)
+
+    async def test_tiktok_like_shortfall_blocks_confirm(self):
+        # 20 Nov 2026 (service-picker bug, attempt 1, live): the
+        # bot offered a 28,350 ETB Confirm card on a 1,041.38 ETB
+        # balance. Even on the CORRECT service the order costs
+        # 1,234.80 ETB — still more than the balance — so no
+        # Confirm card is offered at all, only the top-up warning.
+        msg, _ = await self._send(
+            "Please put 5k like "
+            "https://www.tiktok.com/@shali10_/video/7709088375885548821",
+            intent_of(
+                "order", platform="tiktok", service_hint="tiktok likes",
+                link="https://www.tiktok.com/@shali10_/video/"
+                     "7709088375885548821",
+                quantity=5000,
+            ),
+            paxyo=FakePaxyo(balance=1041.38,
+                            services=_combined_fixture()),
+        )
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn("193.42 ETB short", msg.text_sent[0])
+        self.assertIn("1,234.80 ETB", msg.text_sent[0])
+        callbacks = [b.callback_data for row in msg.markups[0].inline_keyboard
+                     for b in row]
+        self.assertIn("depshort:193.42", callbacks)
+        self.assertNotIn("confirm:", callbacks)
+        self.assertEqual(len(bot.PENDING), 0)
+        self.assertEqual(bot.PARKED_DRAFT[1]["quantity"], 5000)
 
     async def test_order_twitter_retweets_both_words(self):
         # "twitter" and "x" are the same platform (the old gate
@@ -35134,11 +35342,14 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
 
 class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
     """Low-balance warning (15 Nov 2026, feature 1): ordering any
-    service with a balance below the total warns BEFORE the Confirm
-    card, names the exact shortfall, and offers a one-tap deposit
-    of exactly that shortfall. Confirm still works. (Widened from
-    usual-only after the 15 Nov live test: the usual gate hid the
-    warning whenever a deploy wiped the bot's in-memory traits.)"""
+    service with a balance below the total warns INSTEAD of the
+    Confirm card (blocking since 20 Nov 2026 — Confirm is never
+    offered on an order the user cannot afford), names the exact
+    shortfall, and offers a one-tap deposit of exactly that
+    shortfall. The order is parked as a draft, so topping up and
+    saying "order" continues it. (Widened from usual-only after
+    the 15 Nov live test: the usual gate hid the warning whenever
+    a deploy wiped the bot's in-memory traits.)"""
 
     def setUp(self):
         bot.PENDING.clear()
@@ -35152,6 +35363,7 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
         bot.PENDING_RECURRING.clear()
         bot.RECURRING_DRAFT.clear()
         bot.DEPOSIT_DRAFT.clear()
@@ -35174,6 +35386,7 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
         bot.CANCELLED_DRAFT.clear()
         bot.LAST_ORDER.clear()
         bot.PARTIAL.clear()
+        bot.PARKED_DRAFT.clear()
         bot.PENDING_RECURRING.clear()
         bot.RECURRING_DRAFT.clear()
         bot.DEPOSIT_DRAFT.clear()
@@ -35207,22 +35420,29 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
             link="https://instagram.com/p/x", quantity=1000,
         )
 
-    async def test_warning_shows_exact_shortfall_before_card(self):
+    async def test_warning_blocks_confirm_when_short(self):
+        # 20 Nov 2026: the warning used to go out BEFORE the
+        # Confirm card, and the card was still shown — a 28,350 ETB
+        # card was offered live on a 1,041.38 ETB balance. Now the
+        # warning goes out INSTEAD of the card: top-up only, no
+        # Confirm button, and the order is saved as a draft.
         paxyo = FakePaxyo(balance=10.0, traits=self._usual_traits())
         msg = await self._send(
             "I want 1000 instagram followers https://instagram.com/p/x",
             self._usual_order_intent(), paxyo=paxyo,
         )
-        # Two messages: the warning first, then the Confirm card.
-        self.assertEqual(len(msg.text_sent), 2)
+        self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("32.00 ETB short", msg.text_sent[0])
         self.assertIn("42.00 ETB", msg.text_sent[0])
+        self.assertIn("Top up the shortfall first", msg.text_sent[0])
         callbacks = [b.callback_data for row in msg.markups[0].inline_keyboard
                      for b in row]
         self.assertIn("depshort:32.00", callbacks)
-        self.assertIn("Please confirm", msg.text_sent[1])
-        self.assertIn("42.00 ETB", msg.text_sent[1])
-        self.assertEqual(len(bot.PENDING), 1)
+        self.assertNotIn("confirm:", callbacks)
+        self.assertEqual(len(bot.PENDING), 0)
+        self.assertEqual(bot.PARKED_DRAFT[1]["quantity"], 1000)
+        self.assertEqual(
+            bot.PARKED_DRAFT[1]["link"], "https://instagram.com/p/x")
 
     async def test_deposit_button_prefills_shortfall_amount(self):
         paxyo = FakePaxyo(balance=10.0, traits=self._usual_traits())
@@ -35251,16 +35471,23 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(paxyo.deposits_created[0]["amount"], 32.0)
         self.assertIn("32.00 ETB", query2.edited[-1])
 
-    async def test_confirm_still_places_after_warning(self):
+    async def test_top_up_then_order_resumes_and_places(self):
+        # 20 Nov 2026: there is no card to confirm while the
+        # balance is short — the warning is the only reply. The
+        # user tops up first (the warning's whole point), says
+        # "order" to continue the saved draft, and the card that
+        # appears then places the order as normal.
         paxyo = FakePaxyo(balance=10.0, traits=self._usual_traits())
-        await self._send(
+        msg = await self._send(
             "I want 1000 instagram followers https://instagram.com/someuser",
             self._usual_order_intent(), paxyo=paxyo,
         )
-        self.assertEqual(len(bot.PENDING), 1)
-        # The user tops up first (the warning's whole point), then
-        # confirms: the card places the order as normal.
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertEqual(len(bot.PENDING), 0)
         paxyo._balance = 1000.0
+        msg = await self._send("order", intent_of("order"), paxyo=paxyo)
+        self.assertIn("Please confirm", msg.text_sent[-1])
+        self.assertEqual(len(bot.PENDING), 1)
         confirm_id = next(iter(bot.PENDING))
         query = FakeQuery(f"confirm:{confirm_id}", message_text="Please confirm:")
         update = FakeCallbackUpdate(query)
@@ -35283,6 +35510,7 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
         # Widened 15 Nov 2026: the warning fires for ANY order the
         # balance cannot cover, not only the user's usual. A user
         # ordering something new and unaffordable gets warned too.
+        # 20 Nov 2026: warned AND blocked — no Confirm card.
         paxyo = FakePaxyo(balance=10.0, traits={
             "usual_platform": "tiktok",
             "usual_metric": "views",
@@ -35293,26 +35521,27 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
             "I want 1000 instagram followers https://instagram.com/p/x",
             self._usual_order_intent(), paxyo=paxyo,
         )
-        self.assertEqual(len(msg.text_sent), 2)
+        self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("32.00 ETB short", msg.text_sent[0])
         self.assertIn("42.00 ETB", msg.text_sent[0])
         callbacks = [b.callback_data for row in msg.markups[0].inline_keyboard
                      for b in row]
         self.assertIn("depshort:32.00", callbacks)
-        self.assertIn("Please confirm", msg.text_sent[1])
+        self.assertEqual(len(bot.PENDING), 0)
 
     async def test_warning_shows_when_user_has_no_traits(self):
         # Widened 15 Nov 2026: no learned traits (e.g. right after
         # a deploy wiped the in-memory traits) must not hide the
         # warning — the balance check alone decides.
+        # 20 Nov 2026: warned AND blocked — no Confirm card.
         paxyo = FakePaxyo(balance=10.0)
         msg = await self._send(
             "I want 1000 instagram followers https://instagram.com/p/x",
             self._usual_order_intent(), paxyo=paxyo,
         )
-        self.assertEqual(len(msg.text_sent), 2)
+        self.assertEqual(len(msg.text_sent), 1)
         self.assertIn("32.00 ETB short", msg.text_sent[0])
-        self.assertIn("Please confirm", msg.text_sent[1])
+        self.assertEqual(len(bot.PENDING), 0)
 
 
 class TestBulkOrders(unittest.IsolatedAsyncioTestCase):
