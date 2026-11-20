@@ -1160,13 +1160,12 @@ TEXT = {
     # translated. The button continues to the Confirm card.
     "deposit_guide": {
         "am": (
-            "Pay {amount} ETB deposit:\n\n"
-            "1. Tap the button below.\n"
-            "2. Enter your phone number and payment method on the page.\n"
-            "3. Enter your pin on USSD prompt to confirm.\n\n"
-            "One-time link only. If you put wrong number or cancelled "
-            "USSD and the link is dead. Come back here and ask for a "
-            "new one."
+            "{amount} ETB deposit ይክፈሉ:\n\n"
+            "1. ከታች ያለውን ቁልፍ ይጫኑ።\n"
+            "2. ስልክ ቁጥርዎን እና የክፍያ ዘዴዎን በገጹ ላይ ያስገቡ።\n"
+            "3. ለማረጋገጥ በUSSD ጥያቄ ላይ PINዎን ያስገቡ።\n\n"
+            "አገናኙ አንድ ጊዜ ብቻ ይሰራል። የተሳሳተ ቁጥር ካስገቡ ወይም "
+            "USSD ከሰረዙ አገናኙ ይጠፋል። ወደዚህ ተመልሰው አዲስ ይጠይቁ።"
         ),
         "en": (
             "Pay {amount} ETB deposit:\n\n"
@@ -1919,7 +1918,7 @@ TEXT = {
         "en": "You have no orders yet.",
     },
     "balance": {
-        "am": "Balance: {balance} ETB",
+        "am": "ሂሳብዎ: {balance} ETB",
         "en": "Balance: {balance} ETB",
     },
     "transcribe_failed": {
@@ -3289,6 +3288,7 @@ TEXT = {
         ),
     },
     "report_no_order_button": {
+        "am": "ሌላ ነገር፣ order የለም",
         "en": "Something else — no order",
     },
     "reorder_not_found": {
@@ -3335,9 +3335,11 @@ TEXT = {
         "en": "You usually order {quantity} {service} on {weekday}s — want me to place it?",
     },
     "friday_yes_button": {
+        "am": "✅ አዎ፣ አስገባው",
         "en": "✅ Yes, place it",
     },
     "friday_no_button": {
+        "am": "ዛሬ አይደለም",
         "en": "Not today",
     },
     "friday_link_ask": {
@@ -3349,6 +3351,7 @@ TEXT = {
         "en": "{service} ×{quantity} — {total} ETB. Send me your link and I'll show you the Confirm card.\nSame link as last time? Tap below.",
     },
     "friday_same_link_button": {
+        "am": "🔗 እንደ ከዚህ ቀደም ያው አገናኝ",
         "en": "🔗 Same link as last time",
     },
     "friday_declined": {
@@ -3407,6 +3410,7 @@ TEXT = {
     # English like the rest of that message; the question answers
     # are user-facing, so they carry a first-pass Amharic version.
     "loyalty_bonus": {
+        "am": "እና ለ{order_number}ኛው የተጠናቀቀ orderዎ {bonus} ETB የታማኝነት ቦነስ አግኝተዋል፣ አስቀድሞ በሂሳብዎ ውስጥ ነው።",
         "en": "...and you earned a {bonus} ETB loyalty bonus for your {order_number}th completed order — it is already in your balance.",
     },
     # Loyalty bonus admin report (feature 9, William 15 Nov 10:57
@@ -3462,63 +3466,83 @@ TEXT = {
     # to English and the bridge translates prose at send time, so
     # no unverified Amharic is written for these new lines.
     "browse_empty": {
+        "am": "ምንም {label} service ማግኘት አልቻልኩም።",
         "en": "I couldn't find any {label} services.",
     },
     "browse_next_button": {
+        "am": "ቀጣይ ›",
         "en": "Next ›",
     },
     "cancel_order_ask": {
+        "am": "ይህን order ሰርዝ?\n\n{service} ×{quantity} — {total} ETB (order #{order_id})\nሙሉው {total} ETB ወደ ሂሳብዎ ይመለሳል።",
         "en": "Cancel this order?\n\n{service} ×{quantity} — {total} ETB (order #{order_id})\nThe full {total} ETB goes back to your balance.",
     },
     "cancel_order_done": {
+        "am": "Order #{order_id} ተሰርዟል — {refunded} ETB ወደ ሂሳብዎ ተመልሷል።",
         "en": "Cancelled order #{order_id} — {refunded} ETB is back in your balance.",
     },
     "cancel_order_not_found": {
+        "am": "Order #{order_id} ማግኘት አልቻልኩም።",
         "en": "I couldn't find order #{order_id}.",
     },
     "cancel_order_already_done": {
+        "am": "Order #{order_id} አስቀድሞ {status} ነው — ሊሰረዝ አይችልም።",
         "en": "Order #{order_id} is already {status} — it can't be cancelled.",
     },
     "cancel_order_not_live": {
+        "am": "Order መሰረዝ እስካሁን አልተጀመረም — እባክዎ Williamን በ t.me/paxyo ያነጋግሩ።",
         "en": "Cancelling orders isn't switched on yet — please message William at t.me/paxyo.",
     },
     "cancel_order_refused": {
+        "am": "ይህ order ሊሰረዝ አይችልም: {reason}",
         "en": "That order can't be cancelled: {reason}",
     },
     "cancel_order_failed": {
+        "am": "Order #{order_id} መሰረዝ አልቻልኩም — እባክዎ እንደገና ይሞክሩ።",
         "en": "I couldn't cancel order #{order_id} — please try again.",
     },
     "cancel_order_no_orders": {
+        "am": "ለመሰረዝ ምንም order የለዎትም።",
         "en": "You have no orders to cancel.",
     },
     "partial_refunded": {
+        "am": "Orderዎ #{order_id} ከ{quantity} {delivered} አድርሷል — {remains} አልደረሰም፣ ስለዚህ {refunded} ETB ወደ ሂሳብዎ ተመልሷል።",
         "en": "Your order #{order_id} delivered {delivered} of {quantity} — {remains} didn't arrive, so {refunded} ETB is back in your balance.",
     },
     "abandoned_deposit_nudge": {
+        "am": "የ{amount} ETB deposit ጀምረዋል ግን አላጠናቀቁም — ከቆሙበት ለመቀጠል ከታች ይጫኑ።",
         "en": "You started a deposit of {amount} ETB but didn't finish it — tap below to pick up where you left off.",
     },
     "abandoned_deposit_resume_button": {
+        "am": "Depositዬን ቀጥል",
         "en": "Resume my deposit",
     },
     "abandoned_deposit_gone": {
+        "am": "ያ deposit እየጠበቀ አይደለም — በማንኛውም ጊዜ አዲስ ይጀምሩ።",
         "en": "That deposit is no longer waiting — start a fresh one any time.",
     },
     "reorder_no_last": {
+        "am": "እስካሁን ምንም የቀደመ order የለዎትም — ምን ማዘዝ እንደሚፈልጉ ይንገሩኝ።",
         "en": "You have no previous order yet — tell me what you'd like to order.",
     },
     "deposit_method_again": {
+        "am": "ባለፈው ጊዜ በ{method} ከፍለዋል። እንደገና {method} ይጠቀሙ?",
         "en": "Last time you paid with {method}. Use {method} again?",
     },
     "deposit_method_again_button": {
+        "am": "✅ እንደገና {method}",
         "en": "✅ {method} again",
     },
     "deposit_method_other_button": {
+        "am": "ሌላ ዘዴ ይጠቀሙ",
         "en": "Use a different method",
     },
     "channel_nudge": {
+        "am": "ከPaxyo ጋር ለመጀመሪያው orderዎ እናመሰግናለን! ለቅናሾች እና ዝመናዎች channelያችን ይቀላቀሉ — ከታች ይጫኑ።",
         "en": "Thanks for your first order with Paxyo! Join our channel for offers and updates — tap below.",
     },
     "channel_nudge_button": {
+        "am": "Channelያችን ይቀላቀሉ",
         "en": "Join our channel",
     },
 }
@@ -10536,7 +10560,8 @@ async def extract_intent(text: str, user_id: int = None,
     }
 
 
-async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> str:
+async def answer_paxyo_question(text: str, lang: str, user_id: int = None,
+                              raw_text: str = None) -> str:
     """Answer a question about Paxyo itself (paxyo_info intent).
 
     The AI answers from PAXYO_KNOWLEDGE only, in the user's language,
@@ -10547,10 +10572,17 @@ async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> st
     the provider or costs.
     """
     # Trained answer first (20 Nov 2026): a question the owner
-    # trained gets its trained answer, before any AI call.
-    trained = match_training_answer(text, lang)
-    if trained is not None:
-        return trained
+    # trained gets its trained answer, before any AI call. The
+    # message as the user typed it is tried first, so a trained
+    # Amharic answer matches in the original language; the
+    # bridged English text is tried next, so an English-pattern
+    # entry still returns its answer in the user's language.
+    for _candidate in (raw_text, text):
+        if not _candidate:
+            continue
+        trained = match_training_answer(_candidate, lang)
+        if trained is not None:
+            return trained
     system = (
         PAXYO_KNOWLEDGE
         + "\nAnswer the user's question using only these facts, in "
@@ -10742,12 +10774,23 @@ async def reply_message(message, text: str, lang: str, voice: bool = False,
     out_text, out_lang = text, lang
     _target = _BRIDGE_LANG.get()
     if reply_markup is None and _target:
-        if _target == "am":
-            _translated = await translate_to_amharic(text)
-        else:
-            _translated = await translate_to_language(text, _target)
-        if _translated:
-            out_text, out_lang = _translated, _target
+        # No re-translation when the reply is already in the
+        # target language (20 Nov 2026): templates and the AI now
+        # answer in the user's language directly, so a second
+        # Gemini round-trip would only waste a call and risk
+        # mangling names and numbers. Ge'ez script means the reply
+        # is already Amharic or Tigrinya; an all-English leftover
+        # (a code-built line with no template) still goes through
+        # the bridge, as before. Oromo is Latin script, so it can
+        # never be told apart this way and always translates.
+        _already = _target in ("am", "ti") and is_amharic(text)
+        if not _already:
+            if _target == "am":
+                _translated = await translate_to_amharic(text)
+            else:
+                _translated = await translate_to_language(text, _target)
+            if _translated:
+                out_text, out_lang = _translated, _target
     # No long dash in any reply (owner, 17 Nov 2026): strip it here
     # so AI-generated text and locally built text are clean too.
     # The conversation history keeps the original (recorded below).
@@ -16101,7 +16144,7 @@ def strip_moralizing(text: str) -> str:
     return " ".join(kept).strip()
 
 
-async def answer_general_question(text: str, lang: str):
+async def answer_general_question(text: str, lang: str, raw_text: str = None):
     """A brief general-knowledge answer (1-2 short sentences) from
     the AI, or None when the AI is down. Never about Paxyo's supplier
     or costs — the system prompt says so, and the caller steers back
@@ -16110,10 +16153,16 @@ async def answer_general_question(text: str, lang: str):
     sanitized, so a warning the AI writes anyway never reaches the
     user."""
     # Trained answer first (20 Nov 2026): a question the owner
-    # trained gets its trained answer, before any AI call.
-    trained = match_training_answer(text, lang)
-    if trained is not None:
-        return trained
+    # trained gets its trained answer, before any AI call. The
+    # message as the user typed it is tried first, so a trained
+    # Amharic answer matches in the original language; the
+    # bridged English text is tried next.
+    for _candidate in (raw_text, text):
+        if not _candidate:
+            continue
+        trained = match_training_answer(_candidate, lang)
+        if trained is not None:
+            return trained
     system = (
         "Answer briefly (1-2 short sentences) from your own general "
         "knowledge, in "
@@ -18774,12 +18823,19 @@ def fastest_fallback_keyboard(token: str, lang: str) -> InlineKeyboardMarkup:
     )
 
 
-def confirm_keyboard(confirm_id: str) -> InlineKeyboardMarkup:
+def confirm_keyboard(confirm_id: str, lang: str = "en") -> InlineKeyboardMarkup:
+    """Confirm / Cancel buttons in the user's language (20 Nov
+    2026: they were hardcoded English, so an Amharic order got an
+    English card even though the card body was Amharic)."""
+    if lang == "am":
+        confirm_label, cancel_label = "✅ አረጋግጥ", "❌ ሰርዝ"
+    else:
+        confirm_label, cancel_label = "✅ Confirm", "❌ Cancel"
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ Confirm", callback_data=f"confirm:{confirm_id}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{confirm_id}"),
+                InlineKeyboardButton(confirm_label, callback_data=f"confirm:{confirm_id}"),
+                InlineKeyboardButton(cancel_label, callback_data=f"cancel:{confirm_id}"),
             ]
         ]
     )
@@ -22113,7 +22169,15 @@ async def conversation_reply(update, text: str, lang: str, voice: bool = False) 
                     lang, voice=voice,
                 )
                 return True
-        general = await answer_general_question(text, lang)
+        # The message as typed, before any bridge translation, so
+        # a trained answer in the user's own language can match
+        # (20 Nov 2026) — same raw-text rule as the greeting
+        # branch. Voice turns have no message text; the
+        # transcription is already the raw text.
+        _raw = normalize_text(
+            getattr(update.message, "text", None) or text
+        )
+        general = await answer_general_question(text, lang, raw_text=_raw)
         if general is None:
             general = local_chat_reply(text, lang)
         else:
@@ -22342,18 +22406,19 @@ def _friday_ordered_this_week(orders, pattern, iso_year, iso_week):
     return False
 
 
-def friday_offer_keyboard(pattern) -> InlineKeyboardMarkup:
-    """Yes / Not today for the Friday offer. Buttons stay English
-    (same rule as Confirm cards — buttons are never translated)."""
+def friday_offer_keyboard(pattern, lang: str = "en") -> InlineKeyboardMarkup:
+    """Yes / Not today for the Friday offer, in the user's
+    language (20 Nov 2026: they were hardcoded English, like
+    the Confirm buttons were)."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
-            t("friday_yes_button", "en"),
+            t("friday_yes_button", lang),
             callback_data=(
                 f"friday:{pattern['service_id']}:{pattern['quantity']}"
             ),
         ),
         InlineKeyboardButton(
-            t("friday_no_button", "en"),
+            t("friday_no_button", lang),
             callback_data=(
                 f"fridayno:{pattern['service_id']}:{pattern['quantity']}"
             ),
@@ -22435,7 +22500,7 @@ async def maybe_friday_pattern_offer(update, user_id: int, lang: str,
                 weekday=_friday_weekday_name(weekday, lang),
             ),
             lang,
-            reply_markup=friday_offer_keyboard(pattern),
+            reply_markup=friday_offer_keyboard(pattern, lang),
         )
         return True
     return False
@@ -22667,7 +22732,7 @@ async def _friday_accept_text(user_id: int, pattern, lang: str):
         )
         markup = InlineKeyboardMarkup([[
             InlineKeyboardButton(
-                t("friday_same_link_button", "en"),
+                t("friday_same_link_button", lang),
                 callback_data=(
                     f"fridaylink:{pattern['service_id']}"
                     f":{pattern['quantity']}"
@@ -26264,7 +26329,7 @@ async def handle_recurring_text(update, text, intent, lang, voice=False):
             note=_note, full_name=False,
         ),
         lang,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
     _remember_card_message(PENDING[confirm_id], update.message, _sent)
 
@@ -26530,7 +26595,7 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
         update.message,
         _preview,
         lang,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
     _remember_card_message(PENDING_AUTO_REFILL[confirm_id], update.message, _sent)
 
@@ -26828,7 +26893,7 @@ async def handle_delayed_order_text(update, text, intent, lang, voice=False):
             lang, service, quantity, total, merged["link"], run_at,
         ),
         lang,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
 
 
@@ -27013,7 +27078,7 @@ def deposit_confirm_card(user_id: int, amount, lang: str):
                 ),
             )
         )
-    return _strip_dashes("\n".join(lines)), confirm_keyboard(confirm_id)
+    return _strip_dashes("\n".join(lines)), confirm_keyboard(confirm_id, lang)
 
 
 async def handle_deposit_text(update, text, intent, lang, voice=False):
@@ -27818,7 +27883,7 @@ async def complete_order(message, user_id, merged, lang, voice=False,
         confirm_card_text(lang, service, quantity, total, merged["link"],
                           note=_card_note, full_name=show_full_name),
         lang,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
     _remember_card_message(_pending_entry, message, _sent)
     return True
@@ -28181,7 +28246,7 @@ async def handle_cancel_order_text(update, text, target, lang,
     ]
     await reply_message(
         update.message, "\n".join(lines), lang,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
 
 
@@ -28855,7 +28920,7 @@ async def show_batch_confirm(message, user_id, ready, lang, voice=False):
     # Batch Confirm card: always text — it carries the buttons.
     await reply_message(
         message, "\n".join(lines), lang, voice=voice,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
 
 
@@ -28991,7 +29056,7 @@ async def show_bundle_confirm(message, user_id, ready, lang, voice=False):
     # Bundle Confirm card: always text — it carries the buttons.
     await reply_message(
         message, "\n".join(lines), lang, voice=voice,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
 
 
@@ -29666,7 +29731,7 @@ async def try_reaction_correction(update, text, lang, voice=False):
     )
     _sent = await reply_message(
         update.message, _card, lang,
-        reply_markup=confirm_keyboard(_new_id),
+        reply_markup=confirm_keyboard(_new_id, lang),
     )
     _remember_card_message(_new_pending, update.message, _sent)
     log_confusion(user.id, text, _card, "correction")
@@ -30221,7 +30286,7 @@ async def _reshow_card(update, confirm_id, pending, store, lang, note=None,
         )
     sent = await reply_message(
         update.message, text, lang,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
     _remember_card_message(pending, update.message, sent)
     return text
@@ -30723,7 +30788,7 @@ async def handle_change_order(update, text, intent, lang, voice=False):
                 full_name=pending.get("full_name", False),
             ),
             lang,
-            reply_markup=confirm_keyboard(confirm_id),
+            reply_markup=confirm_keyboard(confirm_id, lang),
         )
         _remember_card_message(pending, update.message, _sent)
         return
@@ -30922,7 +30987,7 @@ async def handle_refill_request(update, text, lang, voice=False):
             link=order.get("link") or "",
         ),
         lang, voice=voice,
-        reply_markup=confirm_keyboard(confirm_id),
+        reply_markup=confirm_keyboard(confirm_id, lang),
     )
 
 
@@ -30963,7 +31028,7 @@ async def _build_refill_reorder(user_id: int, refill, lang: str):
             lang, service, int(quantity), total, refill["link"],
             note=t("refill_reorder_note", lang),
         ),
-        confirm_keyboard(confirm_id),
+        confirm_keyboard(confirm_id, lang),
     )
 
 
@@ -31384,20 +31449,33 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     _set_bridge_lang(None)
     _detected = detect_language(text, user.language_code)
     lang = _detected
+    # The message as the user typed it, before any bridge
+    # translation: the training matcher tries it first (20 Nov
+    # 2026), so a trained Amharic answer matches in the original
+    # language instead of only in English. For voice turns the
+    # transcription IS the raw text; for photo captions it is the
+    # caption. normalize_text already ran above.
+    _raw_text = text
     # Translate-bridge (owner, 13 Nov 2026; Oromo and Tigrinya
     # added 14 Nov 2026): a message in Amharic, Tigrinya or Oromo
     # is translated to English by Gemini first, so the whole flow
     # below runs in English and the main AI never has to guess the
-    # language. Prose replies are translated back before sending
-    # (see reply_message). Only non-English text triggers it —
-    # English never touches the bridge. If translation fails or
-    # comes back unchanged, the original text is used and the local
-    # handling applies untouched.
+    # language. The English translation is ONLY for understanding
+    # (classification, extraction, the AI prompts): the reply
+    # language stays the detected language (20 Nov 2026 — the
+    # old code set lang = "en" here, so every template, card and
+    # flow answered in English and only a second Gemini call in
+    # reply_message could put the user's language back, which
+    # never ran for replies with buttons and failed whenever
+    # Gemini did). Templates answer in the user's language
+    # directly now; the bridge-back in reply_message only covers
+    # English leftovers. If translation fails or comes back
+    # unchanged, the original text is used and the local handling
+    # applies untouched.
     if _detected in ("am", "ti", "om"):
         _english = await translate_to_english(text, source_lang=_detected)
         if _english and _english.strip() != text.strip():
             text = _english
-            lang = "en"
             _set_bridge_lang(_detected)
     # Conversation memory: remember who is speaking and what they
     # said, so the bot's first reply of this turn is recorded.
@@ -32972,7 +33050,8 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     PARTIAL[user.id] = {
                         **_draft, "platform": _bare_platform,
                     }
-        _paxyo_answer = await answer_paxyo_question(text, lang, user_id=user.id)
+        _paxyo_answer = await answer_paxyo_question(text, lang, user_id=user.id,
+                                                  raw_text=_raw_text)
         _turn_log("answer", _t0)
         await reply_message(
             update.message, _paxyo_answer,
@@ -32986,7 +33065,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # is about ordering, not off-topic chat. The AI is up here
         # (the classifier ran), so a None answer only means an
         # empty reply — the short Paxyo line is the fallback.
-        general = await answer_general_question(text, lang)
+        general = await answer_general_question(text, lang, raw_text=_raw_text)
         _turn_log("answer", _t0)
         await reply_message(
             update.message,
@@ -33003,7 +33082,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # is capped: the first two turns get a general answer plus
         # a nudge, the third (and beyond) steers back.
         if is_question(text):
-            general = await answer_general_question(text, lang)
+            general = await answer_general_question(text, lang, raw_text=_raw_text)
             if general is not None:
                 await reply_message(
                     update.message,
@@ -33018,7 +33097,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if count >= 3:
             await reply_message(update.message, t("off_topic_steer", lang), lang, voice=voice)
             return
-        general = await answer_general_question(text, lang)
+        general = await answer_general_question(text, lang, raw_text=_raw_text)
         if general is None:
             await reply_message(update.message, t("off_topic", lang), lang, voice=voice)
             return
@@ -33692,7 +33771,7 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             _sent = await reply_message(
                 update.message, _card, lang,
-                reply_markup=confirm_keyboard(_cid),
+                reply_markup=confirm_keyboard(_cid, lang),
             )
             _remember_card_message(_pending, update.message, _sent)
             log_confusion(user.id, text, _card, "correction")
@@ -35068,7 +35147,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             )
         await query.edit_message_text(
-            "\n".join(lines), reply_markup=confirm_keyboard(arg)
+            "\n".join(lines), reply_markup=confirm_keyboard(arg, lang)
         )
         return
 
@@ -35677,7 +35756,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "This is a big order, "
                     f"{format_money(pending['total'])} ETB. Tap "
                     "Confirm again to place it.",
-                    reply_markup=confirm_keyboard(arg),
+                    reply_markup=confirm_keyboard(arg, lang),
                 )
                 return
         # Button tap: place the order and replace the Confirm card with
