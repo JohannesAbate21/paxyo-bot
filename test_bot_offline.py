@@ -866,6 +866,7 @@ class FakePaxyo:
                  session=None, delayed=None, delayed_due=None,
                  delayed_none=False, claim_ok=True,
                  refills=None, refills_none=False, refills_live=False,
+                 refill_stop_raises=False, refill_stop_409=False,
                  services=None, status_by_order=None, admin_stats=None,
                  my_referral=None, referral_error=None,
                  referral_error_status=400, referral_none=False,
@@ -1095,6 +1096,8 @@ class FakePaxyo:
         self._refills_none = refills_none
         self._refills_live = refills_live
         self._refill_next_id = 201
+        self._refill_stop_raises = refill_stop_raises
+        self._refill_stop_409 = refill_stop_409
         self.refills_created = []
         self.refills_stopped = []
         # Promo codes (ideas batch 2, feature 1, 15 Nov 2026):
@@ -2118,7 +2121,7 @@ class FakePaxyo:
 
     async def create_refill(self, telegram_id, service_id, provider, link,
                             platform, metric, target, service,
-                            idempotency_key):
+                            idempotency_key, daily_cap=None, trigger=None):
         """refills_none=True returns None (the real client does that
         on a 404: endpoint not live yet). Otherwise mirror the
         server: store the row and return it with its server id."""
@@ -2129,6 +2132,7 @@ class FakePaxyo:
             "service_id": service_id, "provider": provider,
             "link": link, "platform": platform, "metric": metric,
             "target": target, "service": service,
+            "daily_cap": daily_cap, "trigger": trigger,
             "spent_today": 0, "spent_date": None,
             "last_count": None, "last_check": None,
             "count_usage": {}, "status": "active",
@@ -2146,6 +2150,16 @@ class FakePaxyo:
                 and r.get("status") == status]
 
     async def stop_refill(self, refill_id, telegram_id):
+        if self._refill_stop_raises:
+            raise RuntimeError("server down")
+        if self._refill_stop_409:
+            request = bot.httpx.Request(
+                "POST", "https://paxyo.et/api/bot/refills/1/stop")
+            raise bot.httpx.HTTPStatusError(
+                "409 Conflict",
+                request=request,
+                response=bot.httpx.Response(409, request=request),
+            )
         self.refills_stopped.append(refill_id)
         for r in self._refills:
             if str(r.get("id")) == str(refill_id):
@@ -40120,24 +40134,48 @@ class TestAutoRefillParsing(unittest.TestCase):
 
 
 class TestAutoRefillGuards(unittest.TestCase):
-    """Minimum drop and daily cap (19 Nov 2026)."""
+    """Trigger and daily cap (owner, 20 Nov 2026): 5% drop by
+    default, no daily cap unless the user sets one."""
 
     SERVICE = {
         "service": 2001, "name": "TikTok Video Views | Fast",
         "rate_etb_per_1000": 18.9, "min": 10, "max": 1000000,
     }
 
-    def test_min_drop_absolute_floor(self):
-        self.assertEqual(bot.auto_refill_min_drop(1000), 100)
-        self.assertEqual(bot.auto_refill_min_drop(4000), 100)
-
-    def test_min_drop_two_percent(self):
-        self.assertEqual(bot.auto_refill_min_drop(15000), 300)
-        self.assertEqual(bot.auto_refill_min_drop(1000000), 20000)
+    def test_min_drop_five_percent_default(self):
+        self.assertEqual(bot.auto_refill_min_drop(1000), 50)
+        self.assertEqual(bot.auto_refill_min_drop(4000), 200)
+        self.assertEqual(bot.auto_refill_min_drop(15000), 750)
+        self.assertEqual(bot.auto_refill_min_drop(1000000), 50000)
 
     def test_min_drop_bad_input(self):
-        self.assertEqual(bot.auto_refill_min_drop(None), 100)
-        self.assertEqual(bot.auto_refill_min_drop(0), 100)
+        self.assertEqual(bot.auto_refill_min_drop(None), 1)
+        self.assertEqual(bot.auto_refill_min_drop(0), 1)
+
+    def test_min_drop_user_trigger_quantity(self):
+        trigger = {"type": "qty", "value": 200}
+        self.assertEqual(
+            bot.auto_refill_min_drop(15000, trigger=trigger), 200)
+        self.assertEqual(
+            bot.auto_refill_min_drop(1000, trigger=trigger), 200)
+
+    def test_min_drop_user_trigger_percent(self):
+        trigger = {"type": "pct", "value": 0.10}
+        self.assertEqual(
+            bot.auto_refill_min_drop(15000, trigger=trigger), 1500)
+        self.assertEqual(
+            bot.auto_refill_min_drop(1000, trigger=trigger), 100)
+
+    def test_min_drop_bad_trigger_falls_back_to_default(self):
+        self.assertEqual(
+            bot.auto_refill_min_drop(15000, trigger={"type": "qty", "value": 0}),
+            750)
+        self.assertEqual(
+            bot.auto_refill_min_drop(15000, trigger={"type": "pct", "value": 1.5}),
+            750)
+        self.assertEqual(
+            bot.auto_refill_min_drop(15000, trigger={"type": "bogus", "value": 5}),
+            750)
 
     def test_top_up_quantity(self):
         self.assertEqual(
@@ -40145,11 +40183,13 @@ class TestAutoRefillGuards(unittest.TestCase):
 
     def test_top_up_rounds_up_to_ten(self):
         self.assertEqual(
-            bot.auto_refill_top_up_qty(14650, 15000, self.SERVICE), 350)
+            bot.auto_refill_top_up_qty(14245, 15000, self.SERVICE), 760)
 
     def test_top_up_none_when_drop_too_small(self):
         self.assertIsNone(
             bot.auto_refill_top_up_qty(14950, 15000, self.SERVICE))
+        self.assertIsNone(
+            bot.auto_refill_top_up_qty(14300, 15000, self.SERVICE))
 
     def test_top_up_none_when_at_or_above_target(self):
         self.assertIsNone(
@@ -40158,9 +40198,18 @@ class TestAutoRefillGuards(unittest.TestCase):
             bot.auto_refill_top_up_qty(16000, 15000, self.SERVICE))
 
     def test_top_up_never_below_service_minimum(self):
-        service = dict(self.SERVICE, min=500)
+        service = dict(self.SERVICE, min=1000)
         self.assertEqual(
-            bot.auto_refill_top_up_qty(14700, 15000, service), 500)
+            bot.auto_refill_top_up_qty(14240, 15000, service), 1000)
+
+    def test_top_up_with_user_trigger_quantity(self):
+        trigger = {"type": "qty", "value": 200}
+        self.assertEqual(
+            bot.auto_refill_top_up_qty(
+                14800, 15000, self.SERVICE, trigger=trigger), 200)
+        self.assertIsNone(
+            bot.auto_refill_top_up_qty(
+                14850, 15000, self.SERVICE, trigger=trigger))
 
     def test_decide_top_up_with_cost(self):
         decision = bot.auto_refill_decide(
@@ -40169,11 +40218,24 @@ class TestAutoRefillGuards(unittest.TestCase):
         self.assertEqual(decision["quantity"], 1000)
         self.assertEqual(decision["cost"], 18.9)
 
-    def test_decide_cap(self):
+    def test_decide_no_cap_by_default(self):
+        # No daily cap unless the user set one: even 990 ETB
+        # already spent today does not stop a top-up.
         decision = bot.auto_refill_decide(
             14000, 15000, self.SERVICE, spent_today=990.0)
+        self.assertEqual(decision["action"], "top_up")
+        decision = bot.auto_refill_decide(
+            14000, 15000, self.SERVICE, spent_today=5000.0)
+        self.assertEqual(decision["action"], "top_up")
+
+    def test_decide_user_cap_respected(self):
+        decision = bot.auto_refill_decide(
+            14000, 15000, self.SERVICE, spent_today=990.0, cap=1000.0)
         self.assertEqual(decision["action"], "cap")
         self.assertEqual(decision["quantity"], 1000)
+        decision = bot.auto_refill_decide(
+            14000, 15000, self.SERVICE, spent_today=0, cap=1000.0)
+        self.assertEqual(decision["action"], "top_up")
 
     def test_decide_skip_at_target_and_small_drop(self):
         self.assertEqual(
@@ -40190,6 +40252,76 @@ class TestAutoRefillGuards(unittest.TestCase):
             bot.auto_refill_decide(
                 None, 15000, self.SERVICE, spent_today=0)["action"],
             "unavailable")
+
+
+class TestAutoRefillGuardParsing(unittest.TestCase):
+    """The setup's trigger and daily-limit answers, in plain
+    words (owner, 20 Nov 2026)."""
+
+    def test_parse_trigger_quantity(self):
+        self.assertEqual(
+            bot.parse_auto_refill_trigger("when it drops by 200"),
+            {"type": "qty", "value": 200})
+        self.assertEqual(
+            bot.parse_auto_refill_trigger("drop 200"),
+            {"type": "qty", "value": 200})
+        self.assertEqual(
+            bot.parse_auto_refill_trigger("200"),
+            {"type": "qty", "value": 200})
+
+    def test_parse_trigger_percent(self):
+        self.assertEqual(
+            bot.parse_auto_refill_trigger("10%"),
+            {"type": "pct", "value": 0.10})
+        self.assertEqual(
+            bot.parse_auto_refill_trigger("when it drops 10 percent"),
+            {"type": "pct", "value": 0.10})
+        self.assertEqual(
+            bot.parse_auto_refill_trigger("drops 2.5%"),
+            {"type": "pct", "value": 0.025})
+
+    def test_parse_trigger_keeps_default(self):
+        self.assertIsNone(bot.parse_auto_refill_trigger("ok"))
+        self.assertIsNone(bot.parse_auto_refill_trigger("yes"))
+        self.assertIsNone(bot.parse_auto_refill_trigger(""))
+        self.assertIsNone(bot.parse_auto_refill_trigger("100%"))
+        self.assertIsNone(bot.parse_auto_refill_trigger("0"))
+
+    def test_parse_daily_cap(self):
+        self.assertEqual(
+            bot.parse_auto_refill_daily_cap("limit 1000 a day"), 1000.0)
+        self.assertEqual(
+            bot.parse_auto_refill_daily_cap("max 500 a day"), 500.0)
+        self.assertEqual(
+            bot.parse_auto_refill_daily_cap("cap 1000 ETB"), 1000.0)
+
+    def test_parse_daily_cap_none(self):
+        self.assertIsNone(bot.parse_auto_refill_daily_cap("no limit"))
+        self.assertIsNone(bot.parse_auto_refill_daily_cap("ok"))
+        self.assertIsNone(bot.parse_auto_refill_daily_cap("unlimited"))
+        # A bare number is a trigger quantity, never a cap.
+        self.assertIsNone(bot.parse_auto_refill_daily_cap("1000"))
+
+    def test_trigger_text(self):
+        self.assertEqual(
+            bot.auto_refill_trigger_text(None, 10000, "en"),
+            "when it drops 5% below 10,000")
+        self.assertEqual(
+            bot.auto_refill_trigger_text(
+                {"type": "qty", "value": 200}, 10000, "en"),
+            "when it drops by 200")
+        self.assertEqual(
+            bot.auto_refill_trigger_text(
+                {"type": "pct", "value": 0.10}, 10000, "en"),
+            "when it drops 10% below 10,000")
+
+    def test_limit_text(self):
+        self.assertEqual(
+            bot.auto_refill_limit_text(None, "en"),
+            "There is no daily limit — I can use your whole balance.")
+        self.assertEqual(
+            bot.auto_refill_limit_text(1000.0, "en"),
+            "At most 1,000.00 ETB a day.")
 
 
 class TestCountParsing(unittest.TestCase):
@@ -40804,6 +40936,7 @@ class TestCountChain(unittest.IsolatedAsyncioTestCase):
             "service": {"rate_etb_per_1000": 18.9, "min": 10},
             "platform": "tiktok", "metric": "views",
             "link": self.LINK, "target": 15000, "spent_today": 0,
+            "daily_cap": 1000.0,
             "last_count": None, "last_check": None,
             "count_usage": {},
         }
@@ -40823,6 +40956,26 @@ class TestCountChain(unittest.IsolatedAsyncioTestCase):
             now=1760000000 + 60,
         )
         self.assertEqual(result["action"], "cap")
+
+    async def test_auto_refill_check_no_cap_by_default(self):
+        # The same spend with no user-set cap tops up instead:
+        # by default the bot may use the whole balance.
+        http_get = self._fake_http({
+            ("GET", "tiktok.com"): (200, self.TIKTOK_PAGE),
+        })
+        refill = {
+            "telegram_id": 1,
+            "service": {"rate_etb_per_1000": 18.9, "min": 10},
+            "platform": "tiktok", "metric": "views",
+            "link": self.LINK, "target": 15000, "spent_today": 990.0,
+            "last_count": 5178, "last_check": 1760000000,
+            "count_usage": {},
+        }
+        result = await bot.auto_refill_check(
+            refill, tokens=dict(self.TOKENS), http_get=http_get,
+            now=1760000000 + 60,
+        )
+        self.assertEqual(result["action"], "top_up")
 
     async def test_auto_refill_check_unavailable_when_all_fail(self):
         http_get = self._fake_http({
@@ -40969,10 +41122,17 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         return intent
 
     async def _build_preview(self, paxyo=None):
+        return await self._build_preview_with_guards("ok", paxyo=paxyo)
+
+    async def _build_preview_with_guards(self, answer, paxyo=None):
         msg = await self._send(
             "keep my tiktok views above 10k", self._setup_intent(),
             paxyo=paxyo,
         )
+        # The setup asks the guards question before the preview.
+        self.assertIn("top it up", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING_AUTO_REFILL), 0)
+        msg = await self._send(answer, intent_of("unclear"), paxyo=paxyo)
         self.assertEqual(len(bot.PENDING_AUTO_REFILL), 1)
         return msg
 
@@ -40992,11 +41152,15 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("link", msg.text_sent[0].lower())
         # The target was already given in the first message, so
-        # the link completes the setup and the preview shows.
+        # the link completes the setup and the guards question
+        # shows; "ok" keeps the defaults and the preview shows.
         msg = await self._send(
             self.LINK,
             intent_of("unclear", link=self.LINK),
         )
+        self.assertIn("top it up", msg.text_sent[0])
+        self.assertEqual(len(bot.PENDING_AUTO_REFILL), 0)
+        msg = await self._send("ok", intent_of("unclear"))
         self.assertIn("Auto-refill", msg.text_sent[0])
         self.assertEqual(len(bot.PENDING_AUTO_REFILL), 1)
 
@@ -41013,6 +41177,8 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("above", msg.text_sent[0].lower())
         msg = await self._send("10000", intent_of("unclear"))
+        self.assertIn("top it up", msg.text_sent[0])
+        msg = await self._send("ok", intent_of("unclear"))
         self.assertIn("Auto-refill", msg.text_sent[0])
         self.assertEqual(len(bot.PENDING_AUTO_REFILL), 1)
 
@@ -41022,11 +41188,49 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Auto-refill", msg.text_sent[0])
         self.assertIn("I will use your balance", msg.text_sent[0])
         self.assertIn("10,000", msg.text_sent[0])
-        self.assertIn("1,000.00", msg.text_sent[0])
+        self.assertIn("when it drops 5% below 10,000", msg.text_sent[0])
+        self.assertIn("no daily limit", msg.text_sent[0])
+        self.assertIn("stop it any time", msg.text_sent[0])
+        self.assertNotIn("1,000.00", msg.text_sent[0])
         self.assertIn(self.LINK, msg.text_sent[0])
         self.assertIsNotNone(msg.markups[0])  # Confirm/Cancel buttons
         self.assertEqual(paxyo.orders_created, [])
         self.assertEqual(bot.AUTO_REFILL_ACTIVE, {})
+
+    async def test_guards_question_offers_defaults(self):
+        msg = await self._send(
+            "keep my tiktok views above 10k", self._setup_intent())
+        self.assertIn("5% below 10,000", msg.text_sent[0])
+        self.assertIn("no daily spending limit", msg.text_sent[0])
+        self.assertIn("ok", msg.text_sent[0].lower())
+        self.assertEqual(len(bot.PENDING_AUTO_REFILL), 0)
+
+    async def test_guards_custom_trigger_quantity(self):
+        msg = await self._build_preview_with_guards("when it drops by 200")
+        self.assertIn("when it drops by 200", msg.text_sent[0])
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        setup = bot.PENDING_AUTO_REFILL[confirm_id]
+        self.assertEqual(setup["trigger"], {"type": "qty", "value": 200})
+        self.assertIsNone(setup["daily_cap"])
+
+    async def test_guards_custom_trigger_percent(self):
+        msg = await self._build_preview_with_guards("10%")
+        self.assertIn("when it drops 10% below 10,000", msg.text_sent[0])
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        setup = bot.PENDING_AUTO_REFILL[confirm_id]
+        self.assertEqual(setup["trigger"], {"type": "pct", "value": 0.10})
+
+    async def test_guards_user_daily_cap(self):
+        paxyo = FakePaxyo(services=self.SERVICES)
+        msg = await self._build_preview_with_guards(
+            "limit 1000 a day", paxyo=paxyo)
+        self.assertIn("At most 1,000.00 ETB a day", msg.text_sent[0])
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        setup = bot.PENDING_AUTO_REFILL[confirm_id]
+        self.assertEqual(setup["daily_cap"], 1000.0)
+        await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertEqual(len(paxyo.refills_created), 1)
+        self.assertEqual(paxyo.refills_created[0]["daily_cap"], 1000.0)
 
     async def test_confirm_button_switches_it_on(self):
         paxyo = FakePaxyo(services=self.SERVICES)
@@ -41034,7 +41238,8 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
         query = await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
         self.assertIn("Auto-refill is on", query.edited[0])
-        self.assertIn("not installed yet", query.edited[0])
+        self.assertIn("no daily limit", query.edited[0])
+        self.assertIn("stop it any time", query.edited[0])
         self.assertEqual(len(bot.AUTO_REFILL_ACTIVE[1]), 1)
         self.assertEqual(bot.AUTO_REFILL_ACTIVE[1][0]["target"], 10000)
         self.assertEqual(bot.PENDING_AUTO_REFILL, {})
@@ -41055,6 +41260,8 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created["link"], self.LINK)
         self.assertEqual(created["platform"], "tiktok")
         self.assertEqual(created["metric"], "views")
+        self.assertIsNone(created["daily_cap"])
+        self.assertIsNone(created["trigger"])
         record = bot.AUTO_REFILL_ACTIVE[1][0]
         self.assertEqual(record["id"], created["id"])
         self.assertTrue(record["_server"])
@@ -41113,6 +41320,8 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
             "my auto refills", intent_of("auto_refill_status"))
         self.assertIn("TikTok Video Views", msg.text_sent[0])
         self.assertIn("10,000", msg.text_sent[0])
+        self.assertIn("when it drops 5% below 10,000", msg.text_sent[0])
+        self.assertIn("no daily limit", msg.text_sent[0])
         self.assertIn("not installed yet", msg.text_sent[0])
 
     async def test_stop_removes_refill_and_none(self):
@@ -41125,6 +41334,50 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         await self._callback(f"confirm:{confirm_id}")
         msg = await self._send(
             "stop auto refill", intent_of("auto_refill_stop"))
+        self.assertIn("Stopped the auto-refill", msg.text_sent[0])
+        self.assertEqual(bot.AUTO_REFILL_ACTIVE[1], [])
+
+    async def test_stop_memory_only_refill(self):
+        # Server not live yet (404): the refill lives in memory
+        # only, and stopping it removes it there with no server
+        # call at all.
+        paxyo = FakePaxyo(services=self.SERVICES, refills_none=True)
+        await self._build_preview(paxyo=paxyo)
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        self.assertFalse(bot.AUTO_REFILL_ACTIVE[1][0].get("_server"))
+        msg = await self._send(
+            "stop auto refill", intent_of("auto_refill_stop"), paxyo=paxyo)
+        self.assertIn("Stopped the auto-refill", msg.text_sent[0])
+        self.assertEqual(bot.AUTO_REFILL_ACTIVE[1], [])
+        self.assertEqual(paxyo.refills_stopped, [])
+
+    async def test_stop_server_failure_keeps_refill(self):
+        # The server stop fails: the bot must NOT say it stopped
+        # while the worker still tops it up. The memory record
+        # stays so the user can try again.
+        paxyo = FakePaxyo(
+            services=self.SERVICES, refills_live=True,
+            refill_stop_raises=True)
+        await self._build_preview(paxyo=paxyo)
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        msg = await self._send(
+            "stop auto refill", intent_of("auto_refill_stop"), paxyo=paxyo)
+        self.assertIn("could not stop", msg.text_sent[0])
+        self.assertEqual(len(bot.AUTO_REFILL_ACTIVE[1]), 1)
+
+    async def test_stop_server_409_counts_as_stopped(self):
+        # The server says the row is already stopped (409): that
+        # counts as stopped, the memory record goes too.
+        paxyo = FakePaxyo(
+            services=self.SERVICES, refills_live=True,
+            refill_stop_409=True)
+        await self._build_preview(paxyo=paxyo)
+        confirm_id = next(iter(bot.PENDING_AUTO_REFILL))
+        await self._callback(f"confirm:{confirm_id}", paxyo=paxyo)
+        msg = await self._send(
+            "stop auto refill", intent_of("auto_refill_stop"), paxyo=paxyo)
         self.assertIn("Stopped the auto-refill", msg.text_sent[0])
         self.assertEqual(bot.AUTO_REFILL_ACTIVE[1], [])
 

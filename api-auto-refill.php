@@ -13,13 +13,17 @@
 //        check is not installed)
 //   POST /api/bot/refills
 //     {telegram_id, service_id, provider, link, platform, metric,
-//      target, service_json, idempotency_key}
+//      target, service_json, idempotency_key[, daily_cap,
+//      trigger_qty, trigger_pct]}
 //     -> {"ok":true,"id":N,"refill":{...}}   (idempotency_key is
 //        UNIQUE — a retry with the same key returns the existing
-//        row, never a second refill)
+//        row, never a second refill; daily_cap is the user's own
+//        daily limit, null = no limit; trigger_qty / trigger_pct
+//        is the user's own trigger, null = the 5% default)
 //   GET  /api/bot/refills?telegram_id=X[&status=active]
 //     -> {"refills":[{id,telegram_id,service_id,provider,link,
-//        platform,metric,target,service,spent_today,spent_date,
+//        platform,metric,target,service,daily_cap,trigger_qty,
+//        trigger_pct,spent_today,spent_date,
 //        last_count,last_check,count_usage,status,created_at,
 //        updated_at}]}   (no telegram_id: every user — the hourly
 //        worker's list; no status: active + checking rows only;
@@ -141,6 +145,9 @@ function arf_ensure_tables() {
       `metric` varchar(32) NOT NULL DEFAULT '',
       `target` int NOT NULL,
       `service_json` text NOT NULL,
+      `daily_cap` decimal(12,2) DEFAULT NULL,
+      `trigger_qty` int DEFAULT NULL,
+      `trigger_pct` decimal(6,4) DEFAULT NULL,
       `spent_today` decimal(12,2) NOT NULL DEFAULT 0.00,
       `spent_date` date DEFAULT NULL,
       `last_count` int DEFAULT NULL,
@@ -157,6 +164,22 @@ function arf_ensure_tables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
     if (!$db->query($sql)) {
         arf_fail('db_error', 'Could not create the refills table.', 500);
+    }
+    // Guards (owner, 20 Nov 2026): the per-refill daily cap and
+    // trigger ride on the row so the hourly worker enforces the
+    // user's own settings. CREATE TABLE IF NOT EXISTS does
+    // nothing on an install over the existing table, so add the
+    // columns here too; error 1060 (duplicate column) means the
+    // column is already there and is ignored.
+    foreach ([
+        'daily_cap decimal(12,2) DEFAULT NULL',
+        'trigger_qty int DEFAULT NULL',
+        'trigger_pct decimal(6,4) DEFAULT NULL',
+    ] as $column) {
+        $db->query("ALTER TABLE `bot_refills` ADD COLUMN $column");
+        if ($db->errno !== 0 && $db->errno !== 1060) {
+            arf_fail('db_error', 'Could not add the refill guard columns.', 500);
+        }
     }
 }
 
@@ -194,6 +217,9 @@ function arf_row_to_record($row) {
         'metric' => $row['metric'],
         'target' => (int)$row['target'],
         'service' => arf_decode_json($row['service_json'], []),
+        'daily_cap' => $row['daily_cap'] !== null ? (float)$row['daily_cap'] : null,
+        'trigger_qty' => $row['trigger_qty'] !== null ? (int)$row['trigger_qty'] : null,
+        'trigger_pct' => $row['trigger_pct'] !== null ? (float)$row['trigger_pct'] : null,
         'spent_today' => (float)$row['spent_today'],
         'spent_date' => $row['spent_date'],
         'last_count' => $row['last_count'] !== null ? (int)$row['last_count'] : null,
@@ -237,6 +263,22 @@ function arf_create() {
     if (is_string($service)) {
         $service = arf_decode_json($service, null);
     }
+    // Guards (owner, 20 Nov 2026): the user's own daily limit
+    // (null = no limit) and trigger (null = the 5% default).
+    // Either trigger field wins over the default; a quantity
+    // beats a percent when both are sent.
+    $daily_cap = null;
+    if (isset($in['daily_cap']) && $in['daily_cap'] !== null && $in['daily_cap'] !== '') {
+        $daily_cap = (float)$in['daily_cap'];
+    }
+    $trigger_qty = null;
+    if (isset($in['trigger_qty']) && $in['trigger_qty'] !== null && $in['trigger_qty'] !== '') {
+        $trigger_qty = (int)$in['trigger_qty'];
+    }
+    $trigger_pct = null;
+    if (isset($in['trigger_pct']) && $in['trigger_pct'] !== null && $in['trigger_pct'] !== '') {
+        $trigger_pct = (float)$in['trigger_pct'];
+    }
     $idem = trim($in['idempotency_key'] ?? '');
     if ($telegram_id <= 0) {
         arf_fail('bad_telegram_id', 'telegram_id is required.');
@@ -255,6 +297,15 @@ function arf_create() {
     }
     if ($target <= 0) {
         arf_fail('bad_target', 'target must be a count above zero.');
+    }
+    if ($daily_cap !== null && $daily_cap <= 0) {
+        arf_fail('bad_daily_cap', 'daily_cap must be above zero.');
+    }
+    if ($trigger_qty !== null && $trigger_qty <= 0) {
+        arf_fail('bad_trigger_qty', 'trigger_qty must be above zero.');
+    }
+    if ($trigger_pct !== null && ($trigger_pct <= 0 || $trigger_pct >= 1)) {
+        arf_fail('bad_trigger_pct', 'trigger_pct must be between 0 and 1.');
     }
     if (!is_array($service) || !isset($service['service'])
         || !isset($service['rate_etb_per_1000'])) {
@@ -278,11 +329,13 @@ function arf_create() {
     $service_json = json_encode($service);
     $stmt = $db->prepare(
         'INSERT INTO bot_refills (telegram_id, service_id, provider, link, ' .
-        'platform, metric, target, service_json, idempotency_key) ' .
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'platform, metric, target, service_json, idempotency_key, ' .
+        'daily_cap, trigger_qty, trigger_pct) ' .
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
-    $stmt->bind_param('iissssiss', $telegram_id, $service_id, $provider, $link,
-        $platform, $metric, $target, $service_json, $idem);
+    $stmt->bind_param('iissssissdid', $telegram_id, $service_id, $provider, $link,
+        $platform, $metric, $target, $service_json, $idem,
+        $daily_cap, $trigger_qty, $trigger_pct);
     if (!$stmt->execute()) {
         // 1062: a concurrent create with the same key won the race —
         // return its row instead of failing.
