@@ -13350,12 +13350,50 @@ def parse_tiktok_page_count(html, metric):
     return None
 
 
+_SUBSCRIBER_TEXT_RE = re.compile(
+    r"^\s*([\d,\.]+)\s*([KMB]?)\s+subscribers?\s*$", re.IGNORECASE)
+
+
+def _find_subscriber_count(data, _depth=0):
+    """The subscriber count out of a ytInitialData blob, or None.
+    The channel header is now pageHeaderRenderer (the old
+    c4TabbedHeaderRenderer / subscriberCountText is gone from the
+    served page, 20 Nov 2026): the count is a metadata part text
+    like "1 subscriber" / "1.08K subscribers" under a "content"
+    or "accessibilityLabel" key. The match is anchored to the
+    whole string so a video title that merely mentions
+    subscribers never matches. Depth-capped like
+    _deep_find_count."""
+    if data is None or _depth > 12:
+        return None
+    if isinstance(data, dict):
+        for key in ("content", "accessibilityLabel"):
+            value = data.get(key)
+            if isinstance(value, str) and _SUBSCRIBER_TEXT_RE.match(value):
+                return parse_compact_count(value)
+        for value in data.values():
+            found = _find_subscriber_count(value, _depth + 1)
+            if found is not None:
+                return found
+        return None
+    if isinstance(data, list):
+        for item in data:
+            found = _find_subscriber_count(item, _depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
 def parse_youtube_page_count(html, metric):
     """The count out of a YouTube video or channel page, or None.
-    Views come from ytInitialData's viewCount ("5,178 views"),
-    subscribers from subscriberCountText ("12.3K subscribers").
-    The JSON is balanced out of the page; a bare regex on the
-    subscriber text is the fallback."""
+    Views come from ytInitialData's viewCount ("5,178 views");
+    subscribers from the channel header. The header used to be
+    c4TabbedHeaderRenderer / subscriberCountText ("12.3K
+    subscribers"); since 20 Nov 2026 the served page uses
+    pageHeaderRenderer, where the count is a metadata part text
+    ("1 subscriber", "1.08K subscribers"). The JSON is balanced
+    out of the page; bare regexes on the subscriber text are the
+    fallbacks."""
     if not html:
         return None
     field = "viewCount" if metric == "views" else "subscriberCount"
@@ -13365,6 +13403,20 @@ def parse_youtube_page_count(html, metric):
         if found is not None:
             return found
     if metric == "subscribers":
+        if blob is not None:
+            found = _find_subscriber_count(blob)
+            if found is not None:
+                return found
+        # Raw-page fallback (also covers a page whose JSON blob
+        # could not be balanced out): the count as a metadata
+        # part "content" or "accessibilityLabel" text.
+        match = re.search(
+            r'"(?:content|accessibilityLabel)"\s*:\s*"'
+            r"([\d,\.]+[KM]?)\s+subscribers?\"",
+            html,
+        )
+        if match:
+            return parse_compact_count(match.group(1))
         match = re.search(
             r'"subscriberCountText"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"',
             html,
