@@ -15,6 +15,9 @@ primary_region = "iad"
   # The worker logs a truncated error body on a tick HTTP failure
   # (20 Nov 2026 diagnostic: the hourly tick gets HTTP 403 from a
   # layer in front of bot.php — the body tells which layer).
+  # (20 Nov 2026: refill_worker.py-only change — browser User-Agent
+  # on the server API client — needs this fly.toml touch to trigger
+  # the deploy workflow, whose path filter does not cover it.)
   worker = "python refill_worker.py --loop"
 
 [env]

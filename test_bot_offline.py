@@ -35174,6 +35174,32 @@ class TestRefillWorkerHttpErrorLog(unittest.IsolatedAsyncioTestCase):
         self.assertIn("403 Forbidden by WAF", out)
 
 
+class TestRefillApiUserAgent(unittest.IsolatedAsyncioTestCase):
+    """refill_worker.RefillApi sends a browser User-Agent (workaround
+    option 1, 20 Nov 2026): the Fly worker's hourly tick gets HTTP
+    403 from the layer in front of bot.php, and httpx's default
+    python-httpx UA is one candidate trigger. The X-Bot-Secret
+    header must still be sent unchanged."""
+
+    async def test_browser_user_agent_and_secret_sent(self):
+        import refill_worker
+        self.assertEqual(
+            refill_worker.BROWSER_USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36")
+        with mock.patch.object(refill_worker, "BOT_SECRET", "test-secret"):
+            api = refill_worker.RefillApi()
+            try:
+                headers = api._client.headers
+                self.assertEqual(headers["User-Agent"],
+                                 refill_worker.BROWSER_USER_AGENT)
+                self.assertNotIn("python-httpx", headers["User-Agent"])
+                self.assertEqual(headers["X-Bot-Secret"], "test-secret")
+            finally:
+                await api.close()
+
+
 class TestRefillInChat(unittest.IsolatedAsyncioTestCase):
     """Refill in chat (15 Nov 2026, feature 3): "refill my last
     order" / "refill order #1841" resolves the caller's own

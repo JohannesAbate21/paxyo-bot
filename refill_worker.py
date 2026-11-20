@@ -112,6 +112,18 @@ CHECK_INTERVAL_SECONDS = 3600  # one hour, the owner's choice
 MAX_REFILLS_PER_TICK = 50  # stale-first list; the next hour gets the rest
 STALE_CLAIM_MINUTES = 30  # server-side, mirrors api-auto-refill.php
 
+# Browser User-Agent (20 Nov 2026, workaround option 1): the Fly
+# worker's hourly tick GET /refills?status=active gets HTTP 403
+# from LiteSpeed/ModSecurity in front of bot.php, while the same
+# call from the server itself returns 200. httpx's default
+# python-httpx User-Agent is one candidate trigger for the WAF
+# rule, so this client identifies as a normal browser instead.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 # ------------------------------------------------------------------ server
 class RefillApi:
@@ -124,7 +136,8 @@ class RefillApi:
         # proxy env vars so the client talks directly to paxyo.et.
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
-            headers={"X-Bot-Secret": BOT_SECRET},
+            headers={"X-Bot-Secret": BOT_SECRET,
+                     "User-Agent": BROWSER_USER_AGENT},
             timeout=30.0,
             trust_env=False,
         )
