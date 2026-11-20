@@ -10987,6 +10987,28 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
     fastest one — by ID, by description, or "same service as last
     time". Blacklisted services are never used."""
 
+    # The live case (20 Nov 2026): the user asked for 1000 YouTube
+    # subscribers with service 5413 (3.78 ETB) and the bot offered
+    # its own #2427 at 92.40 ETB instead. 2427 is faster, so it is
+    # the default pick; 5413 must win when named.
+    YOUTUBE_SERVICES = [
+        {
+            "service": 2427, "name": "Youtube Subscribers | Fast",
+            "category": "Youtube Subscribers", "type": "Default",
+            "rate_etb_per_1000": 92.40, "min": 10, "max": 100000,
+            "average_time": "1 minute", "active": True,
+            "provider_service_id": 2427,
+        },
+        {
+            "service": 5413,
+            "name": "Youtube Subscribers | LQ Accounts | High Drop",
+            "category": "Youtube Subscribers", "type": "Default",
+            "rate_etb_per_1000": 3.78, "min": 1, "max": 100000,
+            "average_time": "1 hour", "active": True,
+            "provider_service_id": 5413,
+        },
+    ]
+
     def setUp(self):
         bot.PENDING.clear()
         bot.PENDING_REFILL.clear()
@@ -11053,6 +11075,39 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bot.extract_service_id("order 1000 instagram followers"))
         self.assertIsNone(bot.extract_service_id("15"))
 
+    def test_extract_service_id_id_word_forms(self):
+        # 20 Nov 2026: "service id 5413" and "id 5413" name the
+        # service too — the user asked for the cheap 5413 service
+        # by its number and the bot must hear it.
+        self.assertEqual(bot.extract_service_id("service id 6139"), 6139)
+        self.assertEqual(bot.extract_service_id("id 6139"), 6139)
+        self.assertEqual(bot.extract_service_id("use service id 6139"), 6139)
+        self.assertEqual(
+            bot.extract_service_id(
+                "I want 1000 YouTube subscribers service id 5413 "
+                "https://www.youtube.com/@johannesabate3089"
+            ),
+            5413,
+        )
+        self.assertEqual(bot.extract_service_id("with service 5413"), 5413)
+        # A quantity after "id" is still a quantity, never an ID.
+        self.assertIsNone(bot.extract_service_id("id 2000"))
+
+    def test_find_service_by_panel_id_field(self):
+        # A panel service ID resolves even when the catalogue row
+        # carries the number under provider_service_id / id rather
+        # than "service".
+        services = [
+            {"service": 9001, "provider_service_id": 5413, "id": 77,
+             "name": "Youtube Subscribers | LQ", "active": True},
+        ]
+        found = bot.find_service_by_id(services, 5413)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["provider_service_id"], 5413)
+        service, error = bot.resolve_named_service(services, 5413)
+        self.assertIsNone(error)
+        self.assertEqual(service["provider_service_id"], 5413)
+
     def test_mentions_same_service(self):
         self.assertTrue(bot.mentions_same_service("use that service again"))
         self.assertTrue(bot.mentions_same_service("same service as last time"))
@@ -11112,6 +11167,67 @@ class TestChosenService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(msg.markups[0])  # the Confirm card
         pending = next(iter(bot.PENDING.values()))
         self.assertEqual(pending["service"]["service"], 1002)
+
+    async def test_service_id_5413_beats_default(self):
+        # The live case (20 Nov 2026): the user asked for 1000
+        # YouTube subscribers with service 5413 and the bot
+        # offered its own #2427 at 92.40 ETB instead. Naming the
+        # ID must use that service at its price. Gemini misses
+        # the ID here on purpose: the local regex must catch it.
+        msg, _ = await self._turns([
+            ("I want 1000 YouTube subscribers service id 5413 "
+             "https://www.youtube.com/@johannesabate3089",
+             intent_of(
+                "order", platform="youtube",
+                service_hint="youtube subscribers",
+                link="https://www.youtube.com/@johannesabate3089",
+                quantity=1000)),
+        ], paxyo=FakePaxyo(services=self.YOUTUBE_SERVICES))
+        self.assertEqual(len(msg.text_sent), 1)
+        card = msg.text_sent[0]
+        self.assertIn("(#5413)", card)
+        self.assertIn("3.78 ETB / 1000", card)
+        self.assertIn("3.78 ETB (estimated)", card)
+        self.assertNotIn("92.40", card)
+        pending = next(iter(bot.PENDING.values()))
+        self.assertEqual(pending["service"]["service"], 5413)
+
+    async def test_no_service_id_uses_default_2427(self):
+        # Control for the case above: with no ID given, the
+        # fastest service (2427 at 92.40 ETB) is still the pick.
+        msg, _ = await self._turns([
+            ("I want 1000 YouTube subscribers "
+             "https://www.youtube.com/@johannesabate3089",
+             intent_of(
+                "order", platform="youtube",
+                service_hint="youtube subscribers",
+                link="https://www.youtube.com/@johannesabate3089",
+                quantity=1000)),
+        ], paxyo=FakePaxyo(services=self.YOUTUBE_SERVICES))
+        self.assertIn("(#2427)", msg.text_sent[0])
+        self.assertIn("92.40 ETB / 1000", msg.text_sent[0])
+
+    async def test_unknown_service_lists_available_services(self):
+        # An unknown ID is refused plainly, the services on offer
+        # for that platform/metric are listed with prices, and no
+        # order is placed. No provider name anywhere in the reply.
+        msg, fake_paxyo = await self._turns([
+            ("order 1000 Instagram followers with service 999999999",
+             intent_of(
+                "order", platform="instagram", service_hint="followers",
+                link="https://instagram.com/p/x", quantity=1000,
+                service_id=999999999)),
+        ])
+        reply = msg.text_sent[0]
+        self.assertIn("couldn't find that service", reply)
+        self.assertIn("Available services:", reply)
+        self.assertIn("(#1001)", reply)
+        self.assertIn("42.00 ETB / 1000", reply)
+        self.assertEqual(bot.PENDING, {})
+        self.assertEqual(fake_paxyo.orders_created, [])
+        for banned in ("godofpanel", "smm", "provider", "supplier",
+                       "wholesale", "resell", "panel"):
+            self.assertNotIn(banned, reply.lower())
 
     async def test_no_service_named_uses_fastest(self):
         msg, _ = await self._turns([
@@ -41196,6 +41312,96 @@ class TestAutoRefillConversation(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(msg.markups[0])  # Confirm/Cancel buttons
         self.assertEqual(paxyo.orders_created, [])
         self.assertEqual(bot.AUTO_REFILL_ACTIVE, {})
+
+    async def test_named_service_id_wins_in_refill_setup(self):
+        # "service id 2006" in the setup message uses the slow
+        # views service, not the fastest pick (2001). Gemini
+        # misses the ID here on purpose: the local regex must
+        # catch it, and it must survive the guards question.
+        services = [dict(s) for s in self.SERVICES] + [
+            {
+                "service": 2006, "name": "TikTok Video Views | Slow",
+                "category": "TikTok Video Views", "type": "Default",
+                "rate_etb_per_1000": 9.0, "min": 10, "max": 1000000,
+                "average_time": "2 hours", "active": True,
+                "provider_service_id": 2006,
+            },
+        ]
+        paxyo = FakePaxyo(services=services)
+        msg = await self._send(
+            "keep my tiktok views above 10k use service id 2006",
+            intent_of("auto_refill", platform="tiktok",
+                      service_hint="tiktok views", link=self.LINK,
+                      target=10000),
+            paxyo=paxyo,
+        )
+        self.assertIn("top it up", msg.text_sent[0])
+        msg = await self._send("ok", intent_of("unclear"), paxyo=paxyo)
+        preview = msg.text_sent[0]
+        self.assertIn("Auto-refill", preview)
+        self.assertIn("(#2006)", preview)
+        self.assertIn("9.00 ETB / 1000", preview)
+        setup = next(iter(bot.PENDING_AUTO_REFILL.values()))
+        self.assertEqual(setup["service"]["service"], 2006)
+
+    async def test_refill_setup_unknown_service_id_refused(self):
+        # An unknown ID in the setup is refused plainly with the
+        # available services listed, and no refill is switched on.
+        msg = await self._send(
+            "keep my tiktok views above 10k use service 999999999",
+            intent_of("auto_refill", platform="tiktok",
+                      service_hint="tiktok views", link=self.LINK,
+                      target=10000),
+        )
+        reply = msg.text_sent[0]
+        self.assertIn("couldn't find that service", reply)
+        self.assertIn("Available services:", reply)
+        self.assertIn("(#2001)", reply)
+        self.assertEqual(bot.PENDING_AUTO_REFILL, {})
+        for banned in ("godofpanel", "smm", "provider", "supplier",
+                       "wholesale", "resell", "panel"):
+            self.assertNotIn(banned, reply.lower())
+
+    async def test_refill_setup_uses_current_order_service(self):
+        # The live bug (20 Nov 2026): the setup guessed TikTok
+        # Followers for a TikTok Video Views order. With the views
+        # order's Confirm card still waiting, the refill must use
+        # that order's service (the slow 2006), not the fastest
+        # pick (2001) — and "ok" to the guards question must not
+        # place the waiting order instead.
+        services = [dict(s) for s in self.SERVICES] + [
+            {
+                "service": 2006, "name": "TikTok Video Views | Slow",
+                "category": "TikTok Video Views", "type": "Default",
+                "rate_etb_per_1000": 9.0, "min": 10, "max": 1000000,
+                "average_time": "2 hours", "active": True,
+                "provider_service_id": 2006,
+            },
+        ]
+        slow = next(s for s in services if s["service"] == 2006)
+        bot.PENDING["card-waiting"] = {
+            "user_id": 1, "service": slow, "link": self.LINK,
+            "quantity": 1000, "total": 9.0, "full_name": False,
+        }
+        paxyo = FakePaxyo(services=services)
+        msg = await self._send(
+            "keep my tiktok views above 10k",
+            intent_of("auto_refill", platform="tiktok",
+                      service_hint="tiktok views", target=10000),
+            paxyo=paxyo,
+        )
+        self.assertIn("top it up", msg.text_sent[0])
+        msg = await self._send("ok", intent_of("unclear"), paxyo=paxyo)
+        preview = msg.text_sent[0]
+        self.assertIn("Auto-refill", preview)
+        self.assertIn("(#2006)", preview)
+        self.assertNotIn("(#2001)", preview)
+        setup = next(iter(bot.PENDING_AUTO_REFILL.values()))
+        self.assertEqual(setup["service"]["service"], 2006)
+        self.assertEqual(setup["link"], self.LINK)
+        # The waiting order was NOT placed by the "ok".
+        self.assertEqual(paxyo.orders_created, [])
+        self.assertEqual(len(bot.PENDING), 1)
 
     async def test_guards_question_offers_defaults(self):
         msg = await self._send(
