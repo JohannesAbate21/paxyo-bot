@@ -123,14 +123,21 @@ class TestPickServices(unittest.TestCase):
 
 
 class TestCancelCuttingRanking(unittest.TestCase):
-    """Cancel-cutting items 1 + 2 + 8 + 12 (16 Nov 2026): one merged
-    ranking — trusted first, then reliable-fastest; unreliable and
-    paused skipped; a nearly-empty provider skipped unless it is
-    the only option. Pure helpers, no network."""
+    """Fastest-first rule (owner, 20 Nov 2026) + the cancel-cutting
+    helpers that survive it: services rank fastest first by
+    average time; the only thing that moves the fastest down is
+    the success-rate walk (over 60% of its last 10 orders
+    delivered, else skip to the next-fastest). No trust tier, no
+    unproven small-order cap, no provider-balance guard. Paused
+    services are still skipped everywhere. Pure helpers, no
+    network."""
 
+    # Below the success bar: 5 of 10 delivered (50%) — the walk
+    # skips it. (It is also "unreliable" by the old cancel-rate
+    # threshold, which _drop_risky_candidates still reads.)
     UNRELIABLE = {
-        "orders": 10, "completed": 8, "cancelled": 2, "failed": 0,
-        "cancel_rate": 0.2, "clean_streak": 0,
+        "orders": 10, "completed": 5, "cancelled": 5, "failed": 0,
+        "cancel_rate": 0.5, "clean_streak": 0,
     }
     PROVEN = {
         "orders": 20, "completed": 20, "cancelled": 0, "failed": 0,
@@ -140,9 +147,13 @@ class TestCancelCuttingRanking(unittest.TestCase):
         "orders": 12, "completed": 12, "cancelled": 0, "failed": 0,
         "cancel_rate": 0.0, "clean_streak": 10,
     }
-    TRUSTED_OLD_CANCEL = {
-        "orders": 15, "completed": 13, "cancelled": 2, "failed": 0,
-        "cancel_rate": 0.14, "clean_streak": 10,
+    # 30-day rate exactly 60% (12 of 20) — fails the rate check —
+    # but a clean streak of 7 means the last 7 orders all
+    # delivered, so the last-10 rate is over 60% whatever the
+    # older ones did. The streak short-circuit takes it.
+    STREAK_PASS = {
+        "orders": 20, "completed": 12, "cancelled": 8, "failed": 0,
+        "cancel_rate": 0.4, "clean_streak": 7,
     }
 
     def _smm(self):
@@ -154,7 +165,9 @@ class TestCancelCuttingRanking(unittest.TestCase):
             "provider": "smm", "provider_service_id": 874,
         }
 
-    def test_unreliable_fastest_excluded_when_reliable_exists(self):
+    def test_fastest_below_success_bar_skipped_for_next_fastest(self):
+        # The fastest service delivered 5 of its last 10 (50%) —
+        # under the bar — so the walk skips it for the next-fastest.
         reliability = {"gop:1001": self.UNRELIABLE,
                        "gop:1002": self.PROVEN}
         picks = bot.pick_services(
@@ -164,47 +177,57 @@ class TestCancelCuttingRanking(unittest.TestCase):
         self.assertNotIn(1001, ids)
         self.assertEqual(ids[0], 1002)
 
-    def test_all_unreliable_falls_back_to_fastest(self):
-        # Direct: every candidate unreliable — fastest kept anyway.
-        ranked = bot.apply_trust_reliability_ranking(
+    def test_all_below_success_bar_picks_nothing(self):
+        # Direct: every candidate below the bar — nothing kept,
+        # and the walk says so (the caller asks the user instead
+        # of guessing).
+        kept, all_skipped = bot._apply_success_walk(
             SAMPLE_SERVICES[:2],
             {"gop:1001": self.UNRELIABLE,
-             "gop:1002": self.UNRELIABLE}, quantity=100)
-        self.assertEqual([s["service"] for s in ranked], [1001, 1002])
-        # End to end: all three unreliable — fastest first, nothing said.
+             "gop:1002": self.UNRELIABLE})
+        self.assertEqual(kept, [])
+        self.assertTrue(all_skipped)
+        # End to end: all three below the bar — empty pick.
         picks = bot.pick_services(
             SAMPLE_SERVICES, platform="instagram",
             reliability={"gop:1001": self.UNRELIABLE,
                          "gop:1002": self.UNRELIABLE,
                          "gop:1003": self.UNRELIABLE},
             quantity=100)
-        self.assertEqual(
-            [s["service"] for s in picks], [1001, 1002, 1003])
+        self.assertEqual(picks, [])
 
-    def test_trusted_slower_ranks_first(self):
+    def test_trusted_slower_does_not_outrank_fastest(self):
+        # The old trust tier is gone (20 Nov 2026): a trusted
+        # slower service never outranks the fastest one.
         reliability = {"gop:1001": self.PROVEN,
                        "gop:1002": self.TRUSTED}
         picks = bot.pick_services(
             SAMPLE_SERVICES, platform="instagram",
             reliability=reliability, quantity=100)
         self.assertEqual(
-            [s["service"] for s in picks], [1002, 1001, 1003])
+            [s["service"] for s in picks], [1001, 1002, 1003])
 
-    def test_trusted_beats_old_cancel_rate(self):
-        # 10 clean completions in a row outrank an older cancel rate.
-        reliability = {"gop:1001": self.TRUSTED_OLD_CANCEL,
+    def test_clean_streak_passes_success_gate(self):
+        # 30-day rate exactly 60% would fail the gate — but the
+        # 7-clean streak proves the last 7 all delivered, so the
+        # last-10 rate is over 60% and the service is taken.
+        reliability = {"gop:1001": self.STREAK_PASS,
                        "gop:1002": self.PROVEN}
         picks = bot.pick_services(
             SAMPLE_SERVICES, platform="instagram",
             reliability=reliability, quantity=100)
         self.assertEqual([s["service"] for s in picks][0], 1001)
 
-    def test_unproven_big_order_excluded_when_proven_exists(self):
+    def test_unproven_fastest_not_capped_for_big_order(self):
+        # The old unproven small-order cap is gone (20 Nov 2026):
+        # a service with no history is taken, big order or small —
+        # no evidence against it means no reason to skip it.
         reliability = {"gop:1002": self.PROVEN}
         big = bot.pick_services(
             SAMPLE_SERVICES, platform="instagram",
-            reliability=reliability, quantity=10000)
-        self.assertEqual([s["service"] for s in big], [1002])
+            reliability=reliability, quantity=1000)
+        self.assertEqual(
+            [s["service"] for s in big], [1001, 1002, 1003])
         small = bot.pick_services(
             SAMPLE_SERVICES, platform="instagram",
             reliability=reliability, quantity=100)
@@ -252,18 +275,21 @@ class TestCancelCuttingRanking(unittest.TestCase):
             paused={"gop:1002"})
         self.assertEqual([s["service"] for s in cheap][0], 1003)
 
-    def test_balance_guard_prefers_healthy_provider(self):
+    def test_balance_health_never_demotes_fastest(self):
+        # The provider-balance guard is gone (owner rule, 20 Nov
+        # 2026): a low balance never moves the fastest service
+        # down — the faster service wins in every balance state.
         services = [SAMPLE_SERVICES[0], self._smm()]
         # SMM is faster (5 min vs 12 min) but its balance is low.
         picks = bot.pick_services(
             services, platform="instagram",
             balance_health={"gop": True, "smm": False})
-        self.assertEqual([s["service"] for s in picks], [1001])
+        self.assertEqual([s["service"] for s in picks], [874, 1001])
         # The other way round: GOP low, SMM healthy.
         picks = bot.pick_services(
             services, platform="instagram",
             balance_health={"gop": False, "smm": True})
-        self.assertEqual([s["service"] for s in picks], [874])
+        self.assertEqual([s["service"] for s in picks], [874, 1001])
         # Only the low provider can serve it: never blocked.
         picks = bot.pick_services(
             [self._smm()], platform="instagram",
@@ -313,6 +339,261 @@ class TestCancelCuttingRanking(unittest.TestCase):
              "gop:1002": self.UNRELIABLE}, quantity=100)
         self.assertEqual(
             [s["service"] for s in kept], [1001, 1002])
+
+
+class TestFastestFirstSuccessWalk(unittest.IsolatedAsyncioTestCase):
+    """Fastest-first picker rule (owner, 20 Nov 2026, revised 14:04
+    and 14:06 EAT, corrected 14:22 EAT): rank by AVERAGE TIME
+    ONLY, fastest first, among services that HAVE one; services
+    without one rank below them all, in catalogue order — per-day
+    speeds in service names ("Day 500K", "25K-50K/D") are NOT
+    realistic and are never parsed, for ranking, estimates or
+    tiebreaks. Then walk fastest to slowest taking the first
+    service whose success rate over its last 10 orders is OVER
+    60% (7+ of 10). If every candidate is skipped, the bot asks
+    the user instead of guessing. Min/max quantity is a hard
+    constraint: a service that cannot take the quantity is not a
+    candidate. Regression tests for the 10h39m card (20 Nov 2026):
+    gop:5567 at 10h39m must never win a TikTok likes pick over
+    smm:7554 at 6 minutes, trusted or not."""
+
+    # The reliability map is cached for an hour in module state
+    # (bot._SERVICE_RELIABILITY_CACHE) and is NOT keyed on the
+    # client: a below-bar map seeded by the all-skipped tests
+    # would leak into every later test's picks for an hour. Clear
+    # it before and after every test in this class, like the other
+    # classes that seed reliability do.
+    def setUp(self):
+        bot._SERVICE_RELIABILITY_CACHE.update({"at": 0.0, "data": {}})
+
+    def tearDown(self):
+        bot._SERVICE_RELIABILITY_CACHE.update({"at": 0.0, "data": {}})
+
+    def _svc(self, sid, name, avg, rate=10.0, min_q=10, max_q=1000000,
+             category="TikTok Likes"):
+        return {
+            "service": sid, "name": name, "category": category,
+            "type": "Default", "rate_etb_per_1000": rate,
+            "min": min_q, "max": max_q, "average_time": avg,
+            "active": True, "provider_service_id": sid,
+        }
+
+    def test_tiktok_likes_7554_first_even_when_5567_trusted(self):
+        # The 10h39m regression, against the real 15 Nov combined
+        # catalogue: gop:5567 ("TikTok Likes [ Max 1M] | HQ ...",
+        # average_time "10 hours 39 minutes", 369.60 ETB/1000)
+        # is trusted in the reliability map — under the old trust
+        # tier it jumped first. Under the new rule the fastest
+        # service WITH an average time wins: smm:7554 (6 minutes,
+        # 246.96 ETB/1000). (The "Day 50K" in 5567's name is not
+        # a speed and is never read.)
+        fixture = _combined_fixture()
+        reliability = {"gop:5567": {
+            "orders": 25, "completed": 25, "cancelled": 0, "failed": 0,
+            "cancel_rate": 0.0, "clean_streak": 12,
+        }}
+        picks = bot.pick_services(
+            fixture, platform="tiktok", service_hint="tiktok likes",
+            limit=3, quantity=300, reliability=reliability,
+        )
+        self.assertEqual(picks[0]["combined_id"], "smm:7554")
+        self.assertEqual(picks[0]["average_time"], "6 minutes")
+        self.assertNotIn(
+            "gop:5567", [p["combined_id"] for p in picks])
+        # And the card time for that pick is the average time.
+        self.assertEqual(bot.service_eta_text(picks[0], 300), "6 minutes")
+
+    def test_no_average_time_ranks_below_average_time(self):
+        # A service with NO average time never outranks a 6-minute
+        # service that HAS one (owner, 14:04 EAT 20 Nov) — even
+        # when its name claims "Day 500K": per-day name speeds
+        # are NOT realistic and are never parsed (owner, 14:22 EAT).
+        services = [
+            self._svc(7436, "TikTok Likes [Max 1M] | HQ | Day 500K",
+                      None),
+            self._svc(7554, "TikTok Likes [HQ] | SPEED: 25K-50K/D",
+                      "6 minutes"),
+        ]
+        picks = bot.pick_services(
+            services, platform="tiktok", service_hint="tiktok likes")
+        self.assertEqual(
+            [p["service"] for p in picks], [7554, 7436])
+
+    def test_no_average_time_services_keep_catalogue_order(self):
+        # Among services that all lack an average time, NO speed
+        # is invented for them: the stable sort keeps catalogue
+        # order, whatever their names claim ("Day 500K" and
+        # "Day 100K" are not real speeds — owner, 14:22 EAT).
+        services = [
+            self._svc(1, "TikTok Likes | Day 50K", None),
+            self._svc(2, "TikTok Likes | Day 500K", None),
+            self._svc(3, "TikTok Likes | No speed stated", None),
+            self._svc(4, "TikTok Likes | Day 100K", None),
+        ]
+        picks = bot.pick_services(
+            services, platform="tiktok", service_hint="tiktok likes",
+            limit=4)
+        self.assertEqual(
+            [p["service"] for p in picks], [1, 2, 3, 4])
+
+    def test_name_speeds_are_never_parsed(self):
+        # Owner correction, 14:22 EAT 20 Nov 2026: per-day speeds
+        # in service names are NOT realistic. A "Day 500K" name
+        # with no average time has NO estimate, ranks as having
+        # no speed, and shows "n/a" on the card — never a time
+        # derived from its name.
+        day_only = self._svc(7436, "TikTok Likes | Day 500K", None)
+        self.assertIsNone(bot.estimated_minutes(day_only, 300))
+        self.assertEqual(bot.service_eta_text(day_only, 300), "n/a")
+        self.assertEqual(bot.pick_speed_key(day_only), (1, 0))
+        self.assertFalse(hasattr(bot, "parse_day_speed"))
+
+    def test_success_walk_boundaries(self):
+        # 7 of 10 passes; 6 of 10 (60% exactly) does NOT.
+        self.assertTrue(bot._service_passes_success_gate(
+            {"last10_orders": 10, "last10_completed": 7}))
+        self.assertFalse(bot._service_passes_success_gate(
+            {"last10_orders": 10, "last10_completed": 6}))
+        # Fewer than 10 orders: use what it has — 2 of 3 passes,
+        # 3 of 5 (60% exactly) does not.
+        self.assertTrue(bot._service_passes_success_gate(
+            {"last10_orders": 3, "last10_completed": 2}))
+        self.assertFalse(bot._service_passes_success_gate(
+            {"last10_orders": 5, "last10_completed": 3}))
+        # Zero past orders: no evidence against it, take it.
+        self.assertTrue(bot._service_passes_success_gate({}))
+        self.assertTrue(bot._service_passes_success_gate(None))
+        # Old endpoint shape (no last-10 fields): a 7-clean streak
+        # passes; a 30-day rate at or below 60% does not.
+        self.assertTrue(bot._service_passes_success_gate(
+            {"orders": 20, "completed": 12, "cancel_rate": 0.4,
+             "clean_streak": 7}))
+        self.assertFalse(bot._service_passes_success_gate(
+            {"orders": 20, "completed": 12, "cancel_rate": 0.4,
+             "clean_streak": 2}))
+
+    def test_walk_falls_back_to_second_fastest(self):
+        services = [
+            self._svc(2001, "TikTok Views | Fast", "10 minutes",
+                      category="TikTok Video Views"),
+            self._svc(2002, "TikTok Views | Slower", "10 minutes",
+                      category="TikTok Video Views"),
+            self._svc(2003, "TikTok Views | Slowest", "30 minutes",
+                      category="TikTok Video Views"),
+        ]
+        reliability = {"gop:2001": {
+            "orders": 20, "completed": 12, "cancelled": 8, "failed": 0,
+            "cancel_rate": 0.4, "clean_streak": 0,
+            "last10_orders": 10, "last10_completed": 6,
+        }}
+        picks = bot.pick_services(
+            services, platform="tiktok", service_hint="tiktok views",
+            reliability=reliability, quantity=100)
+        self.assertEqual(picks[0]["service"], 2002)
+        # The fastest at 7 of 10 is taken instead.
+        reliability["gop:2001"]["last10_completed"] = 7
+        picks = bot.pick_services(
+            services, platform="tiktok", service_hint="tiktok views",
+            reliability=reliability, quantity=100)
+        self.assertEqual(picks[0]["service"], 2001)
+
+    def test_min_max_fit_filters_candidates(self):
+        # The first service needs 500,000 minimum and cannot take
+        # 1,000 — the pick is the service that fits the quantity
+        # (YouTube gop:2149 fault, 20 Nov 2026). Neither service
+        # has an average time, so no speed ranks them: among the
+        # fitting ones, catalogue order rules.
+        services = [
+            self._svc(2149, "Youtube Views [ Min 500K ] | Day 200K",
+                      None, rate=254.02, min_q=500000,
+                      category="YouTube Views"),
+            self._svc(7572, "YouTube Views | Day 150K", None,
+                      rate=273.0, min_q=100,
+                      category="YouTube Views"),
+        ]
+        picks = bot.pick_services(
+            services, platform="youtube", service_hint="youtube views",
+            quantity=1000)
+        self.assertEqual([p["service"] for p in picks], [7572])
+        # A quantity the first service CAN take picks it (it is
+        # first in catalogue order; neither has a speed signal).
+        picks = bot.pick_services(
+            services, platform="youtube", service_hint="youtube views",
+            quantity=1000000)
+        self.assertEqual(picks[0]["service"], 2149)
+
+    def test_card_time_comes_from_average_time(self):
+        fast = self._svc(7554, "TikTok Likes [HQ]", "6 minutes",
+                         rate=246.96)
+        card = bot.confirm_card_text(
+            "en", fast, 300, 74.09,
+            "https://tiktok.com/@x/video/1")
+        self.assertIn("⏱ 6 minutes", card)
+        self.assertIn("74.09 ETB", card)
+        # A service with no average time shows "n/a" — its name's
+        # "Day 500K" is not a real speed and is never used for an
+        # estimate (owner, 14:22 EAT 20 Nov 2026).
+        day_only = self._svc(7436, "TikTok Likes | Day 500K", None)
+        card = bot.confirm_card_text(
+            "en", day_only, 300, 31.50,
+            "https://tiktok.com/@x/video/1")
+        self.assertIn("⏱ n/a", card)
+        # No stated speed at all: honest "n/a", never a guess.
+        nospeed = self._svc(9999, "TikTok Likes | No speed", None)
+        self.assertEqual(bot.service_eta_text(nospeed, 300), "n/a")
+
+    async def test_all_skipped_reports_flag(self):
+        services = [
+            self._svc(2001, "TikTok Views | Fast", "10 minutes",
+                      category="TikTok Video Views"),
+            self._svc(2002, "TikTok Views | Slower", "20 minutes",
+                      category="TikTok Video Views"),
+        ]
+        below = {"orders": 10, "completed": 5, "cancelled": 5,
+                 "failed": 0, "cancel_rate": 0.5, "clean_streak": 0,
+                 "last10_orders": 10, "last10_completed": 5}
+        fake = FakePaxyo(reliability={
+            "gop:2001": below, "gop:2002": below})
+        picks, all_skipped = await bot.pick_services_rated(
+            services, platform="tiktok", service_hint="tiktok views",
+            client=fake, quantity=100)
+        self.assertEqual(picks, [])
+        self.assertTrue(all_skipped)
+
+    async def test_all_skipped_asks_user_with_reason(self):
+        services = [
+            self._svc(2001, "TikTok Views | Fast", "10 minutes",
+                      category="TikTok Video Views"),
+            self._svc(2002, "TikTok Views | Slower", "20 minutes",
+                      category="TikTok Video Views"),
+        ]
+        below = {"orders": 10, "completed": 5, "cancelled": 5,
+                 "failed": 0, "cancel_rate": 0.5, "clean_streak": 0,
+                 "last10_orders": 10, "last10_completed": 5}
+        fake = FakePaxyo(
+            services=services,
+            reliability={"gop:2001": below, "gop:2002": below})
+        msg = FakeMessage()
+        with mock.patch("bot.paxyo", fake):
+            result = await bot.complete_order(
+                msg, 1,
+                {"platform": "tiktok", "service_hint": "tiktok views",
+                 "link": "https://tiktok.com/@x/video/1",
+                 "quantity": 100},
+                "en",
+            )
+        self.assertFalse(result)
+        self.assertEqual(len(bot.PENDING), 0)
+        self.assertEqual(len(msg.text_sent), 1)
+        self.assertIn(
+            "6 or fewer of their last 10 orders", msg.text_sent[0])
+        self.assertIn("service ID", msg.text_sent[0])
+
+    def test_all_skipped_message_amharic(self):
+        text = bot.t("no_service_success", "am",
+                     platform="TikTok", kind="views")
+        self.assertIn("ከ6 በላይ አላሳኩም", text)
+        self.assertIn("አገልግሎት ቁጥሩን", text)
 
 
 class TestLinkCheckBeforePaying(unittest.IsolatedAsyncioTestCase):
@@ -33977,6 +34258,11 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
     # --- representative order flows -----------------------------
 
     async def test_order_spotify_plays(self):
+        # 20 Nov 2026 (fastest-first rule, corrected 14:22 EAT):
+        # the snapshot has no average times, so no speed signal
+        # ranks these — catalogue order rules and #8161 is first.
+        # (Per-day name speeds like "Day 100K" are NOT realistic
+        # and are never parsed.)
         msg, fake = await self._send(
             "order 1000 spotify plays https://open.spotify.com/track/x",
             intent_of("order", platform="spotify",
@@ -34071,6 +34357,13 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
         # The watch-hour fault's sibling: plain "views" must never
         # land on a timed live-stream service (the old code quoted
         # live-stream #1928 at 54.60 ETB instead of plain views).
+        # 20 Nov 2026 (fastest-first rule + min/max fit, corrected
+        # 14:22 EAT): the snapshot has no average times, so
+        # catalogue order rules — but #2149 (first in catalogue
+        # order) needs 500,000 minimum and cannot take 1,000
+        # views, so the fit filter drops it and the pick is the
+        # first service that fits: #1943 (151.20 ETB/1000,
+        # min 100). Name speeds like "Day 200K" are never parsed.
         msg, _ = await self._send(
             "order 1000 youtube views https://youtube.com/watch?v=x",
             intent_of("order", platform="youtube",
@@ -34217,6 +34510,11 @@ class TestServiceTypes(unittest.IsolatedAsyncioTestCase):
                                     services=_snapshot_fixture()),
                 )
                 self.assertEqual(len(msg.text_sent), 1)
+                # 20 Nov 2026 (fastest-first rule, corrected 14:22
+                # EAT): the snapshot has no average times, so
+                # catalogue order rules and #3980 is first — the
+                # "Day 500K" in a faster-looking name is not a
+                # real speed and is never parsed.
                 self.assertIn("X / Twitter Retweet", msg.text_sent[0])
                 self.assertNotIn("(#", msg.text_sent[0])
                 self.assertIn("412.99 ETB / 1000", msg.text_sent[0])
@@ -34959,9 +35257,10 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
     rating (good or bad) and answers with one short line, a second
     tap answers "Already noted" and files nothing, an ignored ask
     never re-appears, and the endpoint not being live yet is
-    answered honestly. Bad ratings demote the service in future
-    fastest-first picks — never the price, never a blacklisted
-    service, never the cheapest quote."""
+    answered honestly. Ratings are recorded only: since the
+    fastest-first rule (owner, 20 Nov 2026) they never move the
+    fastest service down in future picks — the success-rate walk
+    over last-10 orders is the only thing that can skip it."""
 
     RATED_SERVICES = [
         {
@@ -35001,8 +35300,6 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
         bot.RATING_ASKED.clear()
         bot.RATED_ORDERS.clear()
         bot.LAST_LANG.clear()
-        bot._SERVICE_RATINGS_CACHE["at"] = 0.0
-        bot._SERVICE_RATINGS_CACHE["data"].clear()
 
     def tearDown(self):
         bot.PENDING.clear()
@@ -35012,8 +35309,6 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
         bot.RATING_ASKED.clear()
         bot.RATED_ORDERS.clear()
         bot.LAST_LANG.clear()
-        bot._SERVICE_RATINGS_CACHE["at"] = 0.0
-        bot._SERVICE_RATINGS_CACHE["data"].clear()
 
     def _watch(self, order_id, status_minutes_ago=0, avg_minutes=10,
                service=None, quantity=100, user_id=1):
@@ -35052,113 +35347,73 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
             await bot.on_callback(update, None)
         return query
 
-    # --- demotion: the rule itself -------------------------------
+    # --- ratings never re-rank: the rule itself -----------------
+    # (fastest-first rule, owner, 20 Nov 2026). pick_services no
+    # longer takes a `ratings` argument at all: user ratings are
+    # recorded by the tap handler and never read by the picker.
+    # The only thing that can skip the fastest service is the
+    # success-rate walk over its last 10 orders (reliability map).
 
-    def test_demotion_3_bad_below_same_speed_clean(self):
+    def test_bad_ratings_do_not_demote_fastest(self):
+        # 3 bad ratings on the fastest service: still first.
         picks = bot.pick_services(
             self.RATED_SERVICES, platform="tiktok",
             service_hint="tiktok views",
-            ratings={"2001": {"good": 0, "bad": 3}},
-        )
-        self.assertEqual(picks[0]["service"], 2002)
-        # Demoted below every clean service, not just the same-speed
-        # one — so the bad-rated fastest service lands last.
-        self.assertEqual(picks[-1]["service"], 2001)
-
-    def test_demotion_2_bad_untouched(self):
-        picks = bot.pick_services(
-            self.RATED_SERVICES, platform="tiktok",
-            service_hint="tiktok views",
-            ratings={"2001": {"good": 0, "bad": 2}},
-        )
-        self.assertEqual(picks[0]["service"], 2001)
-
-    def test_demotion_more_good_than_bad_untouched(self):
-        picks = bot.pick_services(
-            self.RATED_SERVICES, platform="tiktok",
-            service_hint="tiktok views",
-            ratings={"2001": {"good": 5, "bad": 3}},
-        )
-        self.assertEqual(picks[0]["service"], 2001)
-
-    def test_demotion_10_bad_skipped_with_alternative(self):
-        picks = bot.pick_services(
-            self.RATED_SERVICES, platform="tiktok",
-            service_hint="tiktok views",
-            ratings={"2001": {"good": 0, "bad": 10}},
-        )
-        self.assertEqual(
-            [p["service"] for p in picks], [2002, 2003])
-        self.assertNotIn(2001, [p["service"] for p in picks])
-
-    def test_demotion_10_bad_kept_when_lone(self):
-        picks = bot.pick_services(
-            self.RATED_SERVICES[:1], platform="tiktok",
-            service_hint="tiktok views",
-            ratings={"2001": {"good": 0, "bad": 10}},
-        )
-        self.assertEqual([p["service"] for p in picks], [2001])
-
-    def test_demotion_all_10_bad_kept(self):
-        picks = bot.pick_services(
-            self.RATED_SERVICES, platform="tiktok",
-            service_hint="tiktok views",
-            ratings={
-                "2001": {"good": 0, "bad": 10},
-                "2002": {"good": 0, "bad": 12},
-                "2003": {"good": 0, "bad": 10},
-            },
         )
         self.assertEqual(
             [p["service"] for p in picks], [2001, 2002, 2003])
 
-    def test_demotion_never_picks_blacklisted(self):
-        picks = bot.pick_services(
-            SAMPLE_SERVICES, platform="tiktok",
-            service_hint="tiktok likes",
-            ratings={"5379": {"good": 100, "bad": 0}},
-        )
-        self.assertEqual(picks, [])
-
-    def test_demotion_does_not_change_prices(self):
+    def test_many_bad_ratings_do_not_skip_fastest(self):
+        # Even 10 bad ratings do not skip the fastest service —
+        # ratings are not delivery outcomes.
         picks = bot.pick_services(
             self.RATED_SERVICES, platform="tiktok",
             service_hint="tiktok views",
-            ratings={"2001": {"good": 0, "bad": 3}},
+        )
+        self.assertEqual(
+            [p["service"] for p in picks], [2001, 2002, 2003])
+
+    def test_ratings_never_pick_blacklisted(self):
+        picks = bot.pick_services(
+            SAMPLE_SERVICES, platform="tiktok",
+            service_hint="tiktok likes",
+        )
+        self.assertEqual(picks, [])
+
+    def test_ratings_do_not_change_prices(self):
+        picks = bot.pick_services(
+            self.RATED_SERVICES, platform="tiktok",
+            service_hint="tiktok views",
         )
         # The same service dicts, prices untouched — only the order
-        # changes.
-        self.assertIs(picks[0], self.RATED_SERVICES[1])
+        # is fastest-first.
+        self.assertIs(picks[0], self.RATED_SERVICES[0])
         self.assertEqual(picks[0]["rate_etb_per_1000"], 10.0)
-        self.assertIs(picks[-1], self.RATED_SERVICES[0])
+        self.assertIs(picks[-1], self.RATED_SERVICES[2])
         self.assertEqual(picks[-1]["rate_etb_per_1000"], 10.0)
 
-    def test_demotion_cheapest_ranking_untouched(self):
-        # A cheapest question must quote the true cheapest, even
-        # when that service has bad ratings.
+    def test_ratings_do_not_change_cheapest_ranking(self):
+        # A cheapest question must quote the true cheapest.
         picks = bot.pick_services(
             _views_fixture(), platform="tiktok",
             service_hint="cheapest tiktok views",
-            ratings={"5535": {"good": 0, "bad": 50}},
         )
         self.assertEqual(picks[0]["service"], 5535)
 
     # --- demotion: the async pick path ---------------------------
 
-    async def test_pick_services_rated_fetches_once_and_demotes(self):
+    async def test_pick_services_rated_returns_tuple_and_ignores_ratings(self):
+        # The pick no longer fetches ratings at all (20 Nov 2026):
+        # the seeded bad ratings are never read, the fastest
+        # service stays first, and the return is (picks, False).
         fake = FakePaxyo(ratings={"2001": {"good": 0, "bad": 5}})
-        picks = await bot.pick_services_rated(
+        picks, all_skipped = await bot.pick_services_rated(
             self.RATED_SERVICES, platform="tiktok",
             service_hint="tiktok views", client=fake,
         )
-        self.assertEqual(picks[0]["service"], 2002)
-        self.assertEqual(len(fake.ratings_calls), 1)
-        # Second pick reuses the 5-minute cache: no second call.
-        await bot.pick_services_rated(
-            self.RATED_SERVICES, platform="tiktok",
-            service_hint="tiktok views", client=fake,
-        )
-        self.assertEqual(len(fake.ratings_calls), 1)
+        self.assertEqual(picks[0]["service"], 2001)
+        self.assertFalse(all_skipped)
+        self.assertEqual(len(fake.ratings_calls), 0)
 
     async def test_pick_services_rated_failure_changes_nothing(self):
         fake = FakePaxyo(ratings_none=True)
@@ -35166,11 +35421,12 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
             self.RATED_SERVICES, platform="tiktok",
             service_hint="tiktok views",
         )
-        rated = await bot.pick_services_rated(
+        rated, all_skipped = await bot.pick_services_rated(
             self.RATED_SERVICES, platform="tiktok",
             service_hint="tiktok views", client=fake,
         )
         self.assertEqual(rated, plain)
+        self.assertFalse(all_skipped)
         self.assertEqual(rated[0]["service"], 2001)
 
     async def test_pick_services_rated_client_without_method(self):
@@ -35178,13 +35434,14 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
             self.RATED_SERVICES, platform="tiktok",
             service_hint="tiktok views",
         )
-        rated = await bot.pick_services_rated(
+        rated, all_skipped = await bot.pick_services_rated(
             self.RATED_SERVICES, platform="tiktok",
             service_hint="tiktok views", client=object(),
         )
         self.assertEqual(rated, plain)
+        self.assertFalse(all_skipped)
 
-    async def test_complete_order_demotes_bad_fastest_pick(self):
+    async def test_complete_order_ignores_bad_ratings(self):
         msg = FakeMessage()
         fake = FakePaxyo(
             services=SAMPLE_SERVICES,
@@ -35205,11 +35462,11 @@ class TestRateOrder(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bot.PENDING), 1)
         pending = next(iter(bot.PENDING.values()))
         # The fastest service (#1001, 12 min) has 5 bad ratings,
-        # so the Confirm card shows the clean #1002 instead — same
-        # catalogue price maths, different service.
-        self.assertEqual(pending["service"]["service"], 1002)
-        self.assertEqual(pending["total"], 21.0)
-        self.assertEqual(len(fake.ratings_calls), 1)
+        # but ratings never move the fastest down (20 Nov 2026):
+        # the Confirm card still shows #1001 at its own price.
+        self.assertEqual(pending["service"]["service"], 1001)
+        self.assertEqual(pending["total"], 42.0)
+        self.assertEqual(len(fake.ratings_calls), 0)
 
     # --- asking: the delivery message ----------------------------
 
