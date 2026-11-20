@@ -18,6 +18,9 @@ primary_region = "iad"
   # (20 Nov 2026: refill_worker.py-only change — browser User-Agent
   # on the server API client — needs this fly.toml touch to trigger
   # the deploy workflow, whose path filter does not cover it.)
+  # (20 Nov 2026: refill-worker tick interval now reads
+  # REFILL_TICK_SECONDS (default 3600s); temporary 300s test
+  # cadence is set as a Fly secret, not in this file.)
   worker = "python refill_worker.py --loop"
 
 [env]

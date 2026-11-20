@@ -45,8 +45,9 @@ idempotency key replays a crash-retry to the same order.
 RUNNING IT (see INSTALL.md for the full steps):
   Fly (primary): a second process in fly.toml ("worker") running
     `python refill_worker.py --loop` — one always-on small machine
-    that ticks, sleeps 3600s, ticks again. A deploy updates it
-    with the bot, so it can never go stale.
+    that ticks, sleeps CHECK_INTERVAL_SECONDS (3600s by default),
+    ticks again. A deploy updates it with the bot, so it can
+    never go stale.
   Fly (cheaper alternative): a scheduled machine running
     `python refill_worker.py --once` every hour.
   By hand: `python refill_worker.py --once` (one tick, exits),
@@ -65,6 +66,9 @@ hard-coded here, and no token is ever logged):
                       but logs that it could not notify
   ENSEMBLEDATA_API_TOKEN  optional (absent = that provider skipped)
   SCRAPEEVERYTHING_API_KEY, YOUTUBE_API_KEY  optional, same rule
+  REFILL_TICK_SECONDS  optional: seconds between loop ticks
+                      (default 3600; 300 = temporary 5-minute
+                      test cadence until the refill succeeds)
   COUNT_PROXY_URL     optional (Decodo residential proxy for the
                       own scraper; absent = direct fetching only)
 
@@ -107,7 +111,24 @@ log = logging.getLogger("refill_worker")
 API_BASE = os.environ.get("PAXYO_API_BASE", "https://paxyo.et/api/bot").rstrip("/")
 BOT_SECRET = (os.environ.get("BOT_API_SECRET") or "").strip()
 TELEGRAM_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-CHECK_INTERVAL_SECONDS = 3600  # one hour, the owner's choice
+def _tick_interval_seconds():
+    """Seconds between loop ticks.
+
+    REFILL_TICK_SECONDS overrides the 3600s default. Temporary
+    5-minute test cadence (20 Nov 2026): REFILL_TICK_SECONDS=300
+    on Fly until the auto-refill succeeds, then back to 3600.
+    A missing, blank, or non-numeric value falls back to 3600;
+    the floor is 1s so a bad value can never spin the loop."""
+    raw = (os.environ.get("REFILL_TICK_SECONDS") or "").strip()
+    if not raw:
+        return 3600
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 3600
+
+
+CHECK_INTERVAL_SECONDS = _tick_interval_seconds()  # one hour, the owner's choice
 MAX_REFILLS_PER_TICK = 50  # stale-first list; the next hour gets the rest
 STALE_CLAIM_MINUTES = 30  # server-side, mirrors api-auto-refill.php
 
@@ -493,6 +514,7 @@ async def _amain(args):
     api = RefillApi()
     try:
         if args.loop:
+            log.info("loop interval: %ss", CHECK_INTERVAL_SECONDS)
             while True:
                 try:
                     await run_tick(api, dry_run=args.dry_run,
