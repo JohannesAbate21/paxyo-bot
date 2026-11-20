@@ -17539,19 +17539,28 @@ def confirm_card_text(lang: str, service, quantity, total, link,
     top (a quantity change, a doubled usual, a link warning). The
     service name is SHORT by default (owner, 13 Nov 2026); the full
     long name is shown only when the user entered a service ID
-    (full_name=True). A public-account reminder is always on the
+    (full_name=True). The service NUMBER is shown only then too
+    (owner, 20 Nov 2026): when the user gave no service ID, the
+    card shows the name only and no number anywhere — the bot
+    still picks its own service internally, it just does not
+    display the number. A public-account reminder is always on the
     card: a private account can't receive the order."""
     name = (
         clean_service_name(service.get("name"))
         if full_name
         else short_service_name(service.get("name"))
     )
+    service_line = (
+        f"{name} (#{service.get('service')})"
+        if full_name
+        else name
+    )
     lines = [t("confirm_title", lang), ""]
     if note:
         lines.append(note)
         lines.append("")
     lines.extend([
-        f"{name} (#{service.get('service')})",
+        service_line,
         f"⏱ {service.get('average_time') or 'n/a'}",
         f"💰 {format_money(service.get('rate_etb_per_1000', 0))} ETB / 1000",
         f"🔢 {quantity}",
@@ -26321,10 +26330,21 @@ async def handle_auto_refill_text(update, text, intent, lang, voice=False):
         f"{auto_refill_limit_text(merged.get('daily_cap'), lang)} "
         "You can stop it any time — just say 'stop auto refill'."
     )
+    # The service number shows only when the user named a service
+    # ID in this setup (owner, 20 Nov 2026) — same rule as the
+    # order Confirm card. A refill for an existing order uses
+    # that order's service, but the user gave no ID here, so the
+    # preview shows the name only.
+    _service_line = (
+        f"{short_service_name(service.get('name'))} "
+        f"(#{service.get('service')})"
+        if merged.get("service_id") is not None
+        else short_service_name(service.get("name"))
+    )
     _preview = _strip_dashes("\n".join([
         t("confirm_title", lang), "",
         _note, "",
-        f"{short_service_name(service.get('name'))} (#{service.get('service')})",
+        _service_line,
         f"⏱ {service.get('average_time') or 'n/a'}",
         f"💰 {format_money(service.get('rate_etb_per_1000', 0))} ETB / 1000",
         f"🔗 {merged['link']}",
