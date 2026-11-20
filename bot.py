@@ -10143,6 +10143,171 @@ def simple_chat_intent(text: str):
     return local
 
 
+# Chat training data (20 Nov 2026): 300 owner-approved question /
+# answer entries in training_data.json, loaded once at startup. The
+# matcher answers informational questions from the trained data
+# BEFORE any AI call, inside the chat-answer paths
+# (answer_paxyo_question and answer_general_question) — so a
+# trained question costs no AI call and always gets the same
+# answer. It runs AFTER intent classification on purpose: the
+# classifier and the deterministic handlers still own every order,
+# deposit, cancel, balance, refill and Confirm, and a message the
+# classifier reads as an action never reaches the matcher. The
+# matcher itself also refuses anything that could be an order,
+# money or state (a link, a service id, any digit, a phone number,
+# a method word or an interval / delay), and it never fires for
+# kind "action" entries — those document a capability the
+# deterministic handlers own (balance, orders, cancel, deposit
+# status, refill setup...), so the handler still does the work
+# and answers with live data. Only kind "answer" entries can
+# reply here. Money steps stay deterministic code, never AI and
+# never this matcher.
+_TRAINING_DATA_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "training_data.json"
+)
+_TRAINING_MATCH_MIN_COVERAGE = 0.6
+
+
+def load_training_data(path=None):
+    """Load the training entries from training_data.json.
+
+    Returns the entry list, or [] when the file is missing or
+    broken — the bot then behaves exactly as before, with no
+    trained answers. Entries without patterns or an English
+    answer are dropped, so a bad row can never reply.
+    """
+    try:
+        with open(path or _TRAINING_DATA_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        log.warning("training data not loaded: %s", type(exc).__name__)
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        log.warning("training data has no entries list")
+        return []
+    clean = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        patterns = entry.get("patterns")
+        answer = entry.get("answer")
+        if not isinstance(patterns, list) or not patterns:
+            continue
+        if not isinstance(answer, dict) or not answer.get("en"):
+            continue
+        clean.append(entry)
+    return clean
+
+
+TRAINING_ENTRIES = load_training_data()
+
+# Words that carry no topic on their own: stripped before token
+# scoring, so "what is my balance?" cannot match "balance is
+# finished" on the shared words "balance" and "is". "not" and "no"
+# are NOT stripped: negation is meaning ("order did not go
+# through" must not match "did my deposit go through"). Exact
+# pattern matches still work on the full normalised text, so short
+# messages like "how do i deposit" or "why" keep matching.
+_TRAINING_STOPWORDS = frozenset((
+    "a", "an", "the", "is", "are", "was", "were", "be", "been",
+    "am", "do", "does", "did", "can", "could", "will", "would",
+    "should", "how", "what", "when", "where", "which", "who",
+    "why", "my", "your", "his", "her", "its", "our", "their",
+    "me", "you", "he", "she", "we", "they", "it", "this", "that",
+    "these", "those", "there", "here", "to", "for", "of", "in",
+    "on", "at", "by", "with", "from", "and", "or", "but", "so",
+    "if", "then", "than", "as", "just", "please",
+    "pls", "i", "im", "ive", "id", "dont", "want", "need", "get",
+    "got", "give", "show", "tell", "say", "ask", "know", "about",
+    "per", "much", "many", "more", "most", "some", "any", "all",
+    "very", "really", "still", "yet", "already", "ever", "never",
+    # "today" and "now" are NOT stripped: time words carry meaning
+    # ("tired today", "orders today", "deliver now").
+    # Contraction fragments left over when punctuation is stripped
+    # ("i'm" -> "i m", "don't" -> "don t"): meaningless on their own.
+    "m", "s", "t", "d", "re", "ve", "ll",
+))
+
+
+def _training_tokens(text: str):
+    """Message text -> content-word set for matching: normalised
+    (typos fixed, lowercased) with punctuation and stopwords
+    stripped. Ge'ez letters are word characters, so Amharic /
+    Tigrinya match the same way; emoji are stripped here, so a
+    bare-emoji message matches only by exact pattern equality,
+    never by token overlap.
+    """
+    cleaned = re.sub(r"[^\w\s]", " ", normalize_text(text or ""))
+    return {
+        word for word in cleaned.split()
+        if word not in _TRAINING_STOPWORDS
+    }
+
+
+def match_training_answer(text: str, lang: str = "en"):
+    """Trained answer for a message, or None.
+
+    Scores every entry by how much of its best pattern the message
+    covers (shared content words / pattern content words). A match
+    needs pattern coverage >= 0.6 with at least 2 shared content
+    words, AND message coverage >= 0.5 — the pattern must also
+    cover at least half the message, so a multi-topic message
+    ("I'm tired today, I need views for my new video") does not
+    match a pattern that is only a small part of it ("views for my
+    video"). An exact normalised match with a pattern bypasses
+    both (which is how a one-word message like "ok" or a bare
+    emoji matches). The best coverage wins; ties go to the most
+    shared words, then the earliest entry. The answer is returned
+    only when the best match is a kind "answer" entry: when an
+    action entry matches best ("cancel my order", "what is my
+    balance?"), the message is left to the deterministic handler
+    that does the work and answers with live data. The answer is
+    picked in the user's language when the entry has one, else
+    English, and dash-stripped like every user-facing reply.
+    """
+    if not text or not TRAINING_ENTRIES:
+        return None
+    if extract_links(text):
+        return None
+    if extract_service_id(text) is not None:
+        return None
+    if re.search(r"\d", text):
+        return None
+    normalised = " ".join(normalize_text(text).split())
+    tokens = _training_tokens(text)
+    best = None
+    best_key = None
+    for entry in TRAINING_ENTRIES:
+        for pattern in entry.get("patterns") or []:
+            p_normalised = " ".join(normalize_text(pattern).split())
+            if normalised and (
+                normalised.rstrip(".!?") == p_normalised.rstrip(".!?")
+            ):
+                shared = len(_training_tokens(pattern))
+                key = (2.0, shared)
+            else:
+                p_tokens = _training_tokens(pattern)
+                if not p_tokens or not tokens:
+                    continue
+                shared = len(tokens & p_tokens)
+                if shared < 2:
+                    continue
+                coverage = shared / len(p_tokens)
+                if coverage < _TRAINING_MATCH_MIN_COVERAGE:
+                    continue
+                if shared / len(tokens) < 0.5:
+                    continue
+                key = (coverage, shared)
+            if best_key is None or key > best_key:
+                best = entry
+                best_key = key
+    if best is None or best.get("kind") != "answer":
+        return None
+    answer = best.get("answer") or {}
+    return _strip_dashes(answer.get(lang) or answer.get("en") or "")
+
+
 # Strict-mode extraction (smart-loop round 2, 14 Nov 2026): the
 # classifier's JSON is validated before anything downstream trusts
 # it. Before this, an AI-hallucinated intent ("buy_now"), an
@@ -10381,6 +10546,11 @@ async def answer_paxyo_question(text: str, lang: str, user_id: int = None) -> st
     to a short canned line when neither has an answer. Never mentions
     the provider or costs.
     """
+    # Trained answer first (20 Nov 2026): a question the owner
+    # trained gets its trained answer, before any AI call.
+    trained = match_training_answer(text, lang)
+    if trained is not None:
+        return trained
     system = (
         PAXYO_KNOWLEDGE
         + "\nAnswer the user's question using only these facts, in "
@@ -15939,6 +16109,11 @@ async def answer_general_question(text: str, lang: str):
     (owner, 14 Nov 2026): the prompt forbids it and the reply is
     sanitized, so a warning the AI writes anyway never reaches the
     user."""
+    # Trained answer first (20 Nov 2026): a question the owner
+    # trained gets its trained answer, before any AI call.
+    trained = match_training_answer(text, lang)
+    if trained is not None:
+        return trained
     system = (
         "Answer briefly (1-2 short sentences) from your own general "
         "knowledge, in "
