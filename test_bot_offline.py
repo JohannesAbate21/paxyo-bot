@@ -34255,14 +34255,45 @@ class TestFridayPatterns(_SmartLoopBase):
             all("usually order" in text for text in msg.text_sent)
         )
 
-    async def test_offer_in_amharic(self):
+    async def test_amharic_greeting_not_hijacked_by_friday_offer(self):
+        # Live bug, 20 Nov 2026: bare "ሰላም" on a Friday got the
+        # English order offer ("You usually order 200 TikTok Video
+        # Views on Fridays...") instead of the trained Amharic
+        # greeting. A greeting in the user's own language is never
+        # hijacked by the Friday offer: it gets its short trained
+        # greeting in Ge'ez script. (This test used to assert the
+        # Amharic offer fired here; that was the bug.)
         msg, _ = await self._turns(
             [("ሰላም", intent_of("greeting"))],
             paxyo=FakePaxyo(recent=self._pattern_orders()),
         )
+        self.assertEqual(
+            msg.text_sent, ["ሰላም! እንዴት ልረዳዎት እችላለሁ?"]
+        )
+        self.assertNotIn("usually order", msg.text_sent[0])
+        self.assertNotIn("ያዝዛሉ", msg.text_sent[0])
+
+    async def test_amharic_greeting_without_patterns(self):
+        # No Friday pattern at all: the bare greeting still gets
+        # its trained answer, not the stock intro.
+        msg, _ = await self._turns(
+            [("ሰላም", intent_of("greeting"))],
+            paxyo=FakePaxyo(recent=[]),
+        )
+        self.assertEqual(
+            msg.text_sent, ["ሰላም! እንዴት ልረዳዎት እችላለሁ?"]
+        )
+
+    async def test_english_greeting_still_gets_friday_offer(self):
+        # The fix is scoped to non-English greetings: an English
+        # greeting on the user's order weekday still gets the
+        # Friday offer, as before.
+        msg, _ = await self._turns(
+            [("Hello", intent_of("greeting"))],
+            paxyo=FakePaxyo(recent=self._pattern_orders()),
+        )
         self.assertEqual(len(msg.text_sent), 1)
-        self.assertIn("ያዝዛሉ", msg.text_sent[0])
-        self.assertIn("1000", msg.text_sent[0])
+        self.assertIn("usually order", msg.text_sent[0])
 
     # -- accepting ----------------------------------------------------------
 
