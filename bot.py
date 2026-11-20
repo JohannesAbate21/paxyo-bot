@@ -1211,6 +1211,14 @@ TEXT = {
         "am": "depositዎን እጀምራለሁ — ትንሽ ይጠብቁ።",
         "en": "Starting your deposit, one moment…",
     },
+    # Order Confirm double-tap (owner, 20 Nov 2026): the first
+    # tap shows this at once, so the user sees the order is
+    # being placed instead of a frozen card — and a second tap
+    # while it is placing gets this again, never "Order cancelled".
+    "order_confirm_processing": {
+        "am": "ትእዛዝዎን እያስገባሁ ነው, ትንሽ ይጠብቁ።",
+        "en": "Placing your order, one moment…",
+    },
     # Embedded deposit (owner, 15 Nov 2026): the USSD push could not
     # be sent (Chapa Direct Charge is off for this account), so the
     # user deposits on the Paxyo page inside Telegram instead. The
@@ -11035,6 +11043,15 @@ PENDING_DEPOSIT = {}
 # message instead, and only one start_deposit ever runs per tap.
 # Keys are confirm ids; the retry button uses "retry:<user_id>".
 DEPOSIT_CONFIRM_IN_FLIGHT = {}
+# Order Confirms in flight (owner, 20 Nov 2026): confirm_id ->
+# user_id while place_pending_order is running for that tap. The
+# first tap pops the pending order and then waits on slow server
+# calls (ban check, balance, create order), so a second tap in
+# that window used to find nothing and fall through to "Order
+# cancelled" — even though the order was being placed. A second
+# tap on an id here gets the processing message instead, and
+# only one place_pending_order ever runs per tap.
+ORDER_CONFIRM_IN_FLIGHT = {}
 # Most recent deposit created in this session: telegram_id ->
 # deposit_id. The recheck prefers this id; after a restart the list
 # endpoint is the fallback, so "did my deposit go through?" still
@@ -32113,10 +32130,23 @@ async def handle_order_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # the waiting order and the refill dies. The follow-up routing
     # below sends it to the setup instead.
     if is_acceptance(text) and not _is_auto_refill_followup(text, user.id):
+        # A "yes" while a Confirm tap is still placing the order
+        # (20 Nov 2026): the button tap already popped the entry,
+        # so this check must come before the lookup — say it is
+        # placing, never start it twice.
+        if user.id in ORDER_CONFIRM_IN_FLIGHT.values():
+            await update.message.reply_text(
+                t("order_confirm_processing", lang)
+            )
+            return
         confirm_id, pending = pending_for_user(user.id)
         if pending is not None:
             PENDING.pop(confirm_id, None)
-            await send_order_result(update.message, lang, pending, user.id)
+            ORDER_CONFIRM_IN_FLIGHT[confirm_id] = user.id
+            try:
+                await send_order_result(update.message, lang, pending, user.id)
+            finally:
+                ORDER_CONFIRM_IN_FLIGHT.pop(confirm_id, None)
             return
         # A "yes" can also confirm a repeating-order plan awaiting
         # Confirm: create the schedule and answer with a short text
@@ -35921,6 +35951,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Single order first, then a repeating-order plan: both use the
     # same Confirm/Cancel buttons, distinguished by which store holds
     # the id.
+    if ORDER_CONFIRM_IN_FLIGHT.get(arg) == user.id:
+        # Double tap (20 Nov 2026): the first tap is still placing
+        # the order — the pending entry is already popped, but the
+        # order is NOT cancelled. Say it is placing instead of
+        # falling through to "Order cancelled" below.
+        await query.edit_message_text(t("order_confirm_processing", lang))
+        return
     pending = PENDING.pop(arg, None)
     if pending is not None:
         if pending["user_id"] != user.id:
@@ -35957,85 +35994,96 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Button tap: place the order and replace the Confirm card with
         # the full order summary IN TEXT — the same summary a voice
         # acceptance gets as a new message (see send_order_result).
-        result, error = await place_pending_order(pending, user.id)
-        if error:
-            key = error[0]
-            if key == "insufficient":
-                await query.edit_message_text(
-                    t(
-                        "insufficient",
-                        lang,
-                        balance=format_money(error[1]),
-                        total=format_money(error[2]),
-                    ),
-                    reply_markup=deposit_webapp_keyboard(lang),
-                )
-            elif key == "bad_link":
-                # Link check (item 5): do not place — the card is
-                # replaced with the right-link question, and the
-                # draft (minus the bad link) is restored so the
-                # user can continue by sending just the link.
-                _platform, _hint = _restore_draft_after_bad_link(
-                    pending, user.id
-                )
-                await query.edit_message_text(
-                    ask_link_text(_platform, _hint, lang)
-                )
-            elif key == "bad_quantity":
-                _svc = pending.get("service") or {}
-                await query.edit_message_text(
-                    t(
-                        "bad_quantity", lang,
-                        service=short_service_name(_svc.get("name")),
-                        min=_svc.get("min"), max=_svc.get("max"),
+        # Confirm tap: mark it in flight BEFORE the slow
+        # place_pending_order calls, and tell the user at once that
+        # it is placing — the card used to sit unchanged until the
+        # server answered, which read as lag and invited a second
+        # tap. The finally clears the flag whatever happens, so a
+        # later tap is never stuck on "processing".
+        ORDER_CONFIRM_IN_FLIGHT[arg] = user.id
+        try:
+            await query.edit_message_text(t("order_confirm_processing", lang))
+            result, error = await place_pending_order(pending, user.id)
+            if error:
+                key = error[0]
+                if key == "insufficient":
+                    await query.edit_message_text(
+                        t(
+                            "insufficient",
+                            lang,
+                            balance=format_money(error[1]),
+                            total=format_money(error[2]),
+                        ),
+                        reply_markup=deposit_webapp_keyboard(lang),
                     )
-                )
-            else:
-                await query.edit_message_text(t(key, lang))
-            return
-        summary = t(
-            "order_summary",
-            lang,
-            service=result["service"],
-            quantity=result["quantity"],
-            link=result["link"],
-            total=format_money(result["total"]),
-            order_id=result["order_id"],
-            status=result["status"],
-        )
-        # Split-test (15 Nov 2026): same note as the
-        # text-acceptance summary above.
-        if result.get("split_test"):
-            summary += "\n" + t(
-                "order_split_test_placed", lang,
-                test_quantity=result["test_quantity"],
+                elif key == "bad_link":
+                    # Link check (item 5): do not place — the card is
+                    # replaced with the right-link question, and the
+                    # draft (minus the bad link) is restored so the
+                    # user can continue by sending just the link.
+                    _platform, _hint = _restore_draft_after_bad_link(
+                        pending, user.id
+                    )
+                    await query.edit_message_text(
+                        ask_link_text(_platform, _hint, lang)
+                    )
+                elif key == "bad_quantity":
+                    _svc = pending.get("service") or {}
+                    await query.edit_message_text(
+                        t(
+                            "bad_quantity", lang,
+                            service=short_service_name(_svc.get("name")),
+                            min=_svc.get("min"), max=_svc.get("max"),
+                        )
+                    )
+                else:
+                    await query.edit_message_text(t(key, lang))
+                return
+            summary = t(
+                "order_summary",
+                lang,
+                service=result["service"],
                 quantity=result["quantity"],
+                link=result["link"],
+                total=format_money(result["total"]),
+                order_id=result["order_id"],
+                status=result["status"],
             )
-        # Drip-feed (19 Nov 2026): same note as the
-        # text-acceptance summary above.
-        _drip_line = _drip_summary_line(lang, result.get("drip") or {})
-        if _drip_line:
-            summary += "\n" + _drip_line
-        # Auto-repeat (#16, customizations, 15 Nov 2026): same
-        # hook as the text-acceptance summary — a standing repeat
-        # for this order type starts now, once.
-        if await _maybe_start_auto_repeat(user.id, pending):
-            repeat = get_pref(user.id, "pref_auto_repeat") or {}
-            summary += (
-                "\nRepeating every "
-                f"{format_interval(repeat.get('interval_minutes', 0))} "
-                "from now on."
-            )
-        # Per-user personality (feature 5, 15 Nov 2026): the same
-        # tone shaping as the text-acceptance summary — brief gets
-        # the summary alone, chatty one warm line, formal a polite
-        # opening. No learned tone -> summary + humour, as before.
-        shaped = tone_order_summary(user.id, lang, summary)
-        if user_tone(user.id) != "brief":
-            shaped += "\n" + humor_line(user.id, lang)
-        # No long dash in any reply (owner, 17 Nov 2026): the humour
-        # line can carry one, and this edit bypasses reply_message.
-        await query.edit_message_text(_strip_dashes(shaped))
+            # Split-test (15 Nov 2026): same note as the
+            # text-acceptance summary above.
+            if result.get("split_test"):
+                summary += "\n" + t(
+                    "order_split_test_placed", lang,
+                    test_quantity=result["test_quantity"],
+                    quantity=result["quantity"],
+                )
+            # Drip-feed (19 Nov 2026): same note as the
+            # text-acceptance summary above.
+            _drip_line = _drip_summary_line(lang, result.get("drip") or {})
+            if _drip_line:
+                summary += "\n" + _drip_line
+            # Auto-repeat (#16, customizations, 15 Nov 2026): same
+            # hook as the text-acceptance summary — a standing repeat
+            # for this order type starts now, once.
+            if await _maybe_start_auto_repeat(user.id, pending):
+                repeat = get_pref(user.id, "pref_auto_repeat") or {}
+                summary += (
+                    "\nRepeating every "
+                    f"{format_interval(repeat.get('interval_minutes', 0))} "
+                    "from now on."
+                )
+            # Per-user personality (feature 5, 15 Nov 2026): the same
+            # tone shaping as the text-acceptance summary — brief gets
+            # the summary alone, chatty one warm line, formal a polite
+            # opening. No learned tone -> summary + humour, as before.
+            shaped = tone_order_summary(user.id, lang, summary)
+            if user_tone(user.id) != "brief":
+                shaped += "\n" + humor_line(user.id, lang)
+            # No long dash in any reply (owner, 17 Nov 2026): the humour
+            # line can carry one, and this edit bypasses reply_message.
+            await query.edit_message_text(_strip_dashes(shaped))
+        finally:
+            ORDER_CONFIRM_IN_FLIGHT.pop(arg, None)
         return
 
     rec_draft = PENDING_RECURRING.pop(arg, None)

@@ -2696,8 +2696,11 @@ class TestReplyRules(unittest.IsolatedAsyncioTestCase):
         with mock.patch("bot.paxyo", FakePaxyo()):
             await bot.on_callback(update, None)
         self.assertTrue(query.answered)
-        self.assertEqual(len(query.edited), 1)
-        summary = query.edited[0]
+        self.assertEqual(len(query.edited), 2)
+        self.assertEqual(
+            query.edited[0], "Placing your order, one moment…"
+        )
+        summary = query.edited[1]
         for fragment in (
             "Order placed!", "Instagram Followers", "1000",
             "https://instagram.com/someuser", "42.00", "1827", "pending",
@@ -3425,9 +3428,9 @@ class TestRecurringPlans(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             paxyo.order_split_kwargs, [{"runs": 10, "interval": 180}])
         self.assertEqual(bot.PENDING, {})
-        self.assertIn("Order placed!", query.edited[0])
-        self.assertIn("Drip-feed: 10 runs", query.edited[0])
-        self.assertIn("10000", query.edited[0])
+        self.assertIn("Order placed!", query.edited[-1])
+        self.assertIn("Drip-feed: 10 runs", query.edited[-1])
+        self.assertIn("10000", query.edited[-1])
 
     async def test_cancel_button_creates_nothing(self):
         paxyo = FakePaxyo(dripfeed_live=True)
@@ -6545,6 +6548,176 @@ class TestDepositBundle(unittest.IsolatedAsyncioTestCase):
             "https://t.me/paxyo_bot\nFor support, contact us here. "
             "t.me/paxyo",
         )
+
+
+class TestOrderConfirmDoubleTap(unittest.IsolatedAsyncioTestCase):
+    """Order Confirm double-tap (owner, 20 Nov 2026): the first tap
+    showed nothing while place_pending_order ran its slow server
+    calls, so the user tapped again — and the second tap found the
+    pending entry already popped and fell through to "Order
+    cancelled", even though the order was being placed. The first
+    tap must answer at once and show it is placing; a second tap
+    while it is placing gets the same line, never a cancel; the
+    order is placed exactly once."""
+
+    def setUp(self):
+        bot.PENDING.clear()
+        bot.ORDER_CONFIRM_IN_FLIGHT.clear()
+
+    def tearDown(self):
+        bot.PENDING.clear()
+        bot.ORDER_CONFIRM_IN_FLIGHT.clear()
+
+    def _placed(self):
+        return (
+            {
+                "order_id": 777,
+                "status": "pending",
+                "service": "Instagram Followers",
+                "quantity": 1000,
+                "link": "https://instagram.com/someuser",
+                "total": 42.0,
+            },
+            None,
+        )
+
+    async def test_double_tap_confirm_places_once(self):
+        bot.PENDING["ord-1"] = make_pending()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def slow_place(pending, user_id):
+            calls.append((pending, user_id))
+            started.set()
+            await release.wait()
+            return self._placed()
+
+        query1 = FakeQuery(
+            "confirm:ord-1", message_text="Please confirm:"
+        )
+        query2 = FakeQuery(
+            "confirm:ord-1", message_text="Please confirm:"
+        )
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake), \
+             mock.patch(
+                 "bot.place_pending_order",
+                 new=mock.AsyncMock(side_effect=slow_place),
+             ):
+            task1 = asyncio.create_task(
+                bot.on_callback(FakeCallbackUpdate(query1), None)
+            )
+            await started.wait()
+            # The first tap answered at once and showed the
+            # processing line while the order places.
+            self.assertTrue(query1.answered)
+            self.assertIn("ord-1", bot.ORDER_CONFIRM_IN_FLIGHT)
+            self.assertEqual(
+                query1.edited[0], "Placing your order, one moment…"
+            )
+            await bot.on_callback(FakeCallbackUpdate(query2), None)
+            # The second tap is told it is placing — never
+            # "Order cancelled" — and the order started once.
+            self.assertEqual(
+                query2.edited, ["Placing your order, one moment…"]
+            )
+            self.assertEqual(len(calls), 1)
+            release.set()
+            await task1
+        # The first tap ends with the order summary; the flag is
+        # cleared afterwards.
+        self.assertIn("Order placed!", query1.edited[-1])
+        self.assertEqual(bot.ORDER_CONFIRM_IN_FLIGHT, {})
+        self.assertEqual(bot.PENDING, {})
+        # A later tap on the same, now stale, card still says
+        # cancelled — the guard only covers a tap in flight.
+        query3 = FakeQuery(
+            "confirm:ord-1", message_text="Please confirm:"
+        )
+        with mock.patch("bot.paxyo", fake):
+            await bot.on_callback(FakeCallbackUpdate(query3), None)
+        self.assertEqual(query3.edited, ["Order cancelled."])
+
+    async def test_cancel_tap_while_placing_is_not_a_cancel(self):
+        bot.PENDING["ord-1"] = make_pending()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def slow_place(pending, user_id):
+            calls.append((pending, user_id))
+            started.set()
+            await release.wait()
+            return self._placed()
+
+        query1 = FakeQuery(
+            "confirm:ord-1", message_text="Please confirm:"
+        )
+        query_cancel = FakeQuery(
+            "cancel:ord-1", message_text="Please confirm:"
+        )
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake), \
+             mock.patch(
+                 "bot.place_pending_order",
+                 new=mock.AsyncMock(side_effect=slow_place),
+             ):
+            task1 = asyncio.create_task(
+                bot.on_callback(FakeCallbackUpdate(query1), None)
+            )
+            await started.wait()
+            await bot.on_callback(
+                FakeCallbackUpdate(query_cancel), None
+            )
+            # A Cancel tap while the order is already being placed
+            # is not a cancel — the order is on its way.
+            self.assertEqual(
+                query_cancel.edited,
+                ["Placing your order, one moment…"],
+            )
+            self.assertEqual(len(calls), 1)
+            release.set()
+            await task1
+        self.assertIn("Order placed!", query1.edited[-1])
+        self.assertEqual(bot.ORDER_CONFIRM_IN_FLIGHT, {})
+
+    async def test_single_confirm_shows_processing_then_summary(self):
+        bot.PENDING["ord-1"] = make_pending()
+        query = FakeQuery(
+            "confirm:ord-1", message_text="Please confirm:"
+        )
+        fake = FakePaxyo()
+        with mock.patch("bot.paxyo", fake), \
+             mock.patch(
+                 "bot.place_pending_order",
+                 new=mock.AsyncMock(return_value=self._placed()),
+             ):
+            await bot.on_callback(FakeCallbackUpdate(query), None)
+        self.assertTrue(query.answered)
+        self.assertEqual(
+            query.edited[0], "Placing your order, one moment…"
+        )
+        self.assertIn("Order placed!", query.edited[-1])
+        self.assertEqual(bot.ORDER_CONFIRM_IN_FLIGHT, {})
+        self.assertEqual(bot.PENDING, {})
+
+    async def test_yes_while_placing_is_ignored(self):
+        bot.PENDING["ord-1"] = make_pending()
+        bot.ORDER_CONFIRM_IN_FLIGHT["ord-1"] = 1
+        msg = FakeMessage()
+        update = FakeUpdate(msg)
+        fake = FakePaxyo()
+        with mock.patch("bot.extract_intent",
+                        new=mock.AsyncMock(
+                            return_value=intent_of("unclear"))), \
+             mock.patch("bot.paxyo", fake), \
+             mock.patch("bot.speak_reply"):
+            await bot.handle_order_text(update, None, "yes")
+        self.assertEqual(
+            msg.text_sent, ["Placing your order, one moment…"]
+        )
+        self.assertEqual(fake.orders_created, [])
 
 
 class TestEmbeddedDeposit(unittest.IsolatedAsyncioTestCase):
@@ -13950,7 +14123,10 @@ class TestInterruptionKeepsState(unittest.IsolatedAsyncioTestCase):
             await bot.on_callback(update, None)
         self.assertEqual(
             query.edited,
-            ["The order could not be placed. Please try again."],
+            [
+                "Placing your order, one moment…",
+                "The order could not be placed. Please try again.",
+            ],
         )
 
 
@@ -33215,7 +33391,7 @@ class TestAbandonedNudge(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(paxyo.orders_created), 1)
         self.assertEqual(bot.PENDING, {})
-        self.assertIn("1827", query.edited[0])
+        self.assertIn("1827", query.edited[-1])
         app = await self._cycle(paxyo=paxyo)
         self.assertEqual(app.bot.sent, [])
 
@@ -33544,7 +33720,7 @@ class TestPerUserPersonality(_SmartLoopBase):
             fake.orders_created,
             [(2001, "https://vt.tiktok.com/ZSpQWTSmH/", 1000)],
         )
-        self.assertIn("Order placed!", query.edited[0])
+        self.assertIn("Order placed!", query.edited[-1])
 
     async def test_second_same_order_establishes_usual_and_saves(self):
         await self._place_views_order()
@@ -33560,7 +33736,7 @@ class TestPerUserPersonality(_SmartLoopBase):
             "usual_quantity": 1000,
             "usual_service_id": "gop:2001",
         })
-        self.assertIn("Order placed!", query.edited[0])
+        self.assertIn("Order placed!", query.edited[-1])
 
     async def test_different_metric_does_not_establish(self):
         _, views_fake = await self._place_views_order()
@@ -33760,7 +33936,7 @@ class TestPerUserPersonality(_SmartLoopBase):
         ], paxyo=fake)
         self.assertEqual(bot.USER_TRAITS[1].get("tone"), "brief")
         query, _ = await self._place_views_order(paxyo=fake)
-        summary = query.edited[0]
+        summary = query.edited[-1]
         self.assertIn("Order placed!", summary)
         self.assertIn("18.90", summary)
         # Brief: the summary alone — no humour line.
@@ -33776,7 +33952,7 @@ class TestPerUserPersonality(_SmartLoopBase):
         ], paxyo=fake)
         self.assertEqual(bot.USER_TRAITS[1].get("tone"), "chatty")
         query, _ = await self._place_views_order(paxyo=fake)
-        summary = query.edited[0]
+        summary = query.edited[-1]
         self.assertIn("Order placed!", summary)
         self.assertIn('Thanks so much, enjoy the boost!', summary)
         # Chatty keeps the humour line too.
@@ -33794,7 +33970,7 @@ class TestPerUserPersonality(_SmartLoopBase):
         ], paxyo=fake)
         self.assertEqual(bot.USER_TRAITS[1].get("tone"), "formal")
         query, _ = await self._place_views_order(paxyo=fake)
-        summary = query.edited[0]
+        summary = query.edited[-1]
         self.assertTrue(summary.startswith("Thank you for your order."))
         self.assertIn("Order placed!", summary)
         self.assertIn("18.90", summary)
@@ -35751,7 +35927,7 @@ class TestLowBalanceWarning(unittest.IsolatedAsyncioTestCase):
         with mock.patch("bot.paxyo", paxyo):
             await bot.on_callback(update, None)
         self.assertEqual(paxyo.orders_created, [(1001, "https://instagram.com/someuser", 1000)])
-        self.assertIn("Order placed!", query.edited[0])
+        self.assertIn("Order placed!", query.edited[-1])
 
     async def test_no_warning_when_balance_suffices(self):
         paxyo = FakePaxyo(balance=1000.0, traits=self._usual_traits())
@@ -36371,8 +36547,8 @@ class TestRefillInChat(unittest.IsolatedAsyncioTestCase):
             paxyo.orders_created,
             [(1001, "https://instagram.com/someuser", 1000)],
         )
-        self.assertIn("Order placed!", query2.edited[0])
-        self.assertNotIn("Refill started", query2.edited[0])
+        self.assertIn("Order placed!", query2.edited[-1])
+        self.assertNotIn("Refill started", query2.edited[-1])
         self.assertEqual(bot.PENDING_REFILL, {})
 
     async def test_short_delivery_complaint_keeps_old_flow(self):
