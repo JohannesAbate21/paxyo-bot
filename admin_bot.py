@@ -107,12 +107,17 @@ set, free-form gets a short "I didn't understand — try
 ..." reply, never silence. No Groq: the user bot already uses
 Groq, and the admin bot must not share its free-tier quota.
 
-TECHNICAL — polling, not webhook (simplest on Render free, and no
-webhook conflict with @paxorder_bot since this is a different bot /
-token). python-telegram-bot, same library as bot.py; no new
-dependency (requirements.txt is unchanged). A tiny health-check HTTP
-server answers GET / with "ok" on $PORT so a Render free web service
-stays up while polling. No Render service is created by this file.
+TECHNICAL — webhook when ADMIN_WEBHOOK_URL is set, polling otherwise
+(22 Nov 2026: polling cannot wake a sleeping Render free service —
+a Telegram message cannot wake it, only an HTTP hit can — so the bot
+only answered when Muse pinged it. A webhook POST from Telegram
+wakes the service, so the bot answers by itself; first reply after
+sleep takes ~30s cold start. No webhook conflict with @paxorder_bot
+since this is a different bot / token). python-telegram-bot, same
+library as bot.py; no new dependency (requirements.txt is
+unchanged). In polling mode a tiny health-check HTTP server answers
+GET / with "ok" on $PORT; in webhook mode the webhook server owns
+$PORT instead. No Render service is created by this file.
 
 Env vars (values NEVER recorded — only names):
   ADMIN_BOT_TOKEN   (required) — this bot's Telegram token, from BotFather
@@ -122,6 +127,9 @@ Env vars (values NEVER recorded — only names):
   ADMIN_BOT_PASSWORD (optional) — first-use password; when set, an
     allowlisted user must enter it once per process run before any
     command is answered (unset/empty = gate off, allowlist only)
+  ADMIN_WEBHOOK_URL (optional) — Render service URL, e.g.
+    https://atlas-desk-bot.onrender.com; when set, the bot runs in
+    webhook mode, when unset it polls (default)
   DEEPSEEK_API_KEY  (optional) — free-form answers only
   DEEPSEEK_MODEL    (default deepseek-chat)
   GEMINI_API_KEY    (optional) — free-form answers only, after DeepSeek
@@ -5033,6 +5041,18 @@ def _ensure_event_loop():
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def _webhook_config():
+    """Webhook mode (22 Nov 2026): when ADMIN_WEBHOOK_URL is set,
+    return (webhook_url, url_path) for run_webhook(); when unset,
+    return None (polling mode, as before). The url_path is the bot
+    token, so only Telegram (which holds the token) can POST updates
+    to it. The full URL is never logged — main() logs the base only."""
+    base = (os.environ.get("ADMIN_WEBHOOK_URL", "") or "").rstrip("/")
+    if not base:
+        return None
+    return (f"{base}/{ADMIN_BOT_TOKEN}", ADMIN_BOT_TOKEN)
+
+
 def main():
     missing = [
         name
@@ -5055,16 +5075,36 @@ def main():
     admin_api = AdminPaxyoClient()
     app = build_application()
 
-    # Render sets $PORT; the health server answers it so the free
-    # web service stays up while the bot polls Telegram.
+    # Render sets $PORT; the webhook server owns it in webhook mode,
+    # the health server in polling mode.
     port = int(os.environ.get("PORT", "8080") or 8080)
+    _ensure_event_loop()
+    webhook = _webhook_config()
+    if webhook is not None:
+        webhook_url, url_path = webhook
+        log.info(
+            "Paxyo admin bot starting (webhook %s, AI %s)",
+            webhook_url.rsplit("/", 1)[0],
+            "DeepSeek" if DEEPSEEK_API_KEY else ("Gemini" if GEMINI_API_KEY else "none"),
+        )
+        # drop_pending_updates: messages sent while the bot slept
+        # under polling were never fetched; answering them all at
+        # once after the switch would be stale noise — the user
+        # re-sends anything that matters.
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=url_path,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+        return
     start_health_server(port)
     log.info(
         "Paxyo admin bot starting (polling, health on :%s, AI %s)",
         port,
         "DeepSeek" if DEEPSEEK_API_KEY else ("Gemini" if GEMINI_API_KEY else "none"),
     )
-    _ensure_event_loop()
     app.run_polling()
 
 
