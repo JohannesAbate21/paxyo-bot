@@ -2827,6 +2827,39 @@ class TestEnsureEventLoop(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TestWebhookConfig(unittest.TestCase):
+    """Webhook mode (22 Nov 2026): ADMIN_WEBHOOK_URL set -> the bot
+    runs run_webhook so a Telegram message wakes a sleeping Render
+    free service by itself; unset -> polling, as before."""
+
+    def test_unset_means_polling(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ADMIN_WEBHOOK_URL", None)
+            self.assertIsNone(admin_bot._webhook_config())
+
+    def test_set_returns_webhook_url_and_path(self):
+        with mock.patch.dict(
+            os.environ,
+            {"ADMIN_WEBHOOK_URL": "https://atlas-desk-bot.onrender.com/"},
+        ):
+            config = admin_bot._webhook_config()
+            self.assertIsNotNone(config)
+            webhook_url, url_path = config
+            self.assertEqual(
+                webhook_url,
+                "https://atlas-desk-bot.onrender.com/" + admin_bot.ADMIN_BOT_TOKEN,
+            )
+            self.assertEqual(url_path, admin_bot.ADMIN_BOT_TOKEN)
+
+    def test_trailing_slashes_stripped(self):
+        with mock.patch.dict(
+            os.environ,
+            {"ADMIN_WEBHOOK_URL": "https://atlas-desk-bot.onrender.com///"},
+        ):
+            webhook_url, _ = admin_bot._webhook_config()
+            self.assertFalse(webhook_url.endswith("//"))
+
+
 # ------------------------------------------------------- round 3 (15 Nov 2026) ---
 
 DISPUTES = [
