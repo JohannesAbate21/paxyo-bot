@@ -390,6 +390,42 @@ class AdminPaxyoClient:
             raise
         return data if isinstance(data, dict) else None
 
+    async def admin_users_count(self):
+        """GET /admin/users-count — the total number of Paxyo users
+        (rows in auth), no window. 404 -> None (endpoint not live
+        yet). Any other error raises."""
+        try:
+            data = await self._send(
+                build_api_request("GET", "/admin/users-count")
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning(
+                    "GET /admin/users-count returned 404 "
+                    "(endpoint not live yet)"
+                )
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def admin_top_balances(self, limit: int = 5):
+        """GET /admin/top-balances?limit=N — users with the largest
+        Paxyo balances, highest first. -> {"users":
+        [{telegram_id, username, first_name, balance}], "limit": N}.
+        404 -> None (endpoint not live yet)."""
+        path = (
+            "/admin/top-balances?limit="
+            f"{max(1, min(10, int(limit)))}"
+        )
+        try:
+            data = await self._send(build_api_request("GET", path))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                log.warning("GET %s returned 404 (endpoint not live yet)", path)
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
     async def winback_audience(self, days: int = 14):
         """GET /winbacks/audience?days=N — users with >=1 order
         whose most recent order is more than N days ago, excluding
@@ -1030,7 +1066,8 @@ def parse_days(text: str) -> int:
 
 def parse_stats_question(text: str):
     """Deterministic stats-question parser. Returns
-    {"kind": revenue|profit|users|orders|deposits|top_service|summary,
+    {"kind": revenue|profit|users|total_users|orders|deposits|
+     top_service|summary,
      "days": N, "yesterday": bool} or None when the message is not
     a stats question. "Yesterday" is recognised but NOT supported
     by the endpoint (windows end today) — the answer says so."""
@@ -1077,6 +1114,26 @@ def parse_stats_question(text: str):
         or "top seller" in s
     ):
         return {"kind": "top_service", "days": days, "yesterday": yesterday}
+    # Total (overall) users, not new users in a window (22 Nov 2026):
+    # "how many users do i have" asked for the total and got "Today:
+    # 0 new users". A total question names no window ("today",
+    # "last 7 days", "this month") and no "new"/"joined"; anything
+    # with a window falls through to the new-users rule below.
+    if (
+        "how many users" in s
+        or "total users" in s
+        or "overall users" in s
+        or "users in total" in s
+    ) and (
+        "new" not in s
+        and "joined" not in s
+        and "today" not in s
+        and "yesterday" not in s
+        and "last" not in s
+        and "this week" not in s
+        and "this month" not in s
+    ):
+        return {"kind": "total_users", "days": 1, "yesterday": False}
     if "how many users" in s or "new users" in s or "how many new" in s:
         return {"kind": "users", "days": days, "yesterday": yesterday}
     if "how many orders" in s:
@@ -1102,6 +1159,30 @@ def parse_stats_question(text: str):
         or "how much money" in s
     ):
         return {"kind": "revenue", "days": days, "yesterday": yesterday}
+    return None
+
+
+def parse_top_balances_question(text: str):
+    """Deterministic biggest-balance parser. "Who has the biggest
+    balance", "largest balance", "top 5 balances", "highest
+    balance" — the admin-panel list in chat, from
+    GET /admin/top-balances. Returns {} when it matches, else
+    None. A single user's balance ("What is the balance of
+    779060335?") is NOT a match — that is the balance lookup."""
+    s = _normalize_admin_text(re.sub(r"\s+", " ", (text or "").lower()).strip())
+    if not s:
+        return None
+    if "richest user" in s or "richest users" in s:
+        return {}
+    if "balance" in s and (
+        "biggest" in s
+        or "largest" in s
+        or "highest" in s
+        or "top" in s
+        or "most" in s
+        or "big" in s
+    ):
+        return {}
     return None
 
 
@@ -3035,6 +3116,13 @@ def answer_stats(stats, question: dict) -> str:
         )
     if kind == "users":
         return f"{label}: {new_users} new users."
+    if kind == "total_users":
+        if "total_users" not in stats:
+            return (
+                "The total user count is not available yet — the "
+                "server does not report it."
+            )
+        return f"You have {int(stats.get('total_users') or 0)} users in total."
     if kind == "orders":
         return f"{label}: {orders} orders ({completed} completed)."
     if kind == "deposits":
@@ -3077,6 +3165,24 @@ def answer_stats(stats, question: dict) -> str:
         lines.append(
             f"Top service: {top} ×{int(stats.get('top_quantity') or 0)}"
         )
+    return "\n".join(lines)
+
+
+def format_top_balances(users) -> str:
+    """Biggest balances, one line each: rank, name (@username or
+    Telegram id), balance in ETB. The admin's own data, shown only
+    in the allowlisted admin chat."""
+    lines = ["Biggest balances:"]
+    for i, user in enumerate(users, 1):
+        user = user or {}
+        name = str(user.get("first_name") or "").strip() or "Unknown"
+        username = str(user.get("username") or "").strip()
+        if username:
+            who = f"{name} (@{username})"
+        else:
+            who = f"{name} ({user.get('telegram_id')})"
+        balance = float(user.get("balance") or 0)
+        lines.append(f"{i}. {who} - {format_money(balance)} ETB")
     return "\n".join(lines)
 
 
@@ -4431,7 +4537,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     question = parse_stats_question(text)
     if question is not None:
         try:
-            stats = await admin_api.admin_stats(days=question["days"])
+            if question["kind"] == "total_users":
+                # The total lives on /admin/users-count, not /admin/stats.
+                stats = await admin_api.admin_users_count()
+            else:
+                stats = await admin_api.admin_stats(days=question["days"])
         except Exception as exc:
             log.warning("admin_stats failed: %s", exc)
             stats = None
@@ -4442,6 +4552,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await update.message.reply_text(answer_stats(stats, question))
+        return
+
+    # 1b. Biggest balances — deterministic, from /admin/top-balances.
+    if parse_top_balances_question(text) is not None:
+        try:
+            data = await admin_api.admin_top_balances()
+        except Exception as exc:
+            log.warning("admin_top_balances failed: %s", exc)
+            data = None
+        if data is None:
+            await update.message.reply_text(
+                "The biggest-balance lookup is not connected yet — the "
+                "top-balances endpoint is not live on the server."
+            )
+            return
+        users = data.get("users") or []
+        if not users:
+            await update.message.reply_text("No users with a balance yet.")
+            return
+        await update.message.reply_text(format_top_balances(users))
         return
 
     # 2. Targeted broadcasts — deterministic, Confirm required.
