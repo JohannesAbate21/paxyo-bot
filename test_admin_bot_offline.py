@@ -271,7 +271,9 @@ class FakeAdminPaxyo:
                  price_set_error_body=None,
                  price_clear_result=None, price_clear_error=None,
                  price_clear_error_body=None,
-                 usernames=None, username_lookup_none=False):
+                 usernames=None, username_lookup_none=False,
+                 users_count=None, users_count_none=False,
+                 top_balances=None, top_balances_none=False):
         self._stats = stats
         self._stats_none = stats_none
         self._stats_by_days = dict(stats_by_days or {})
@@ -382,6 +384,13 @@ class FakeAdminPaxyo:
         self.ban_calls = []
         self.price_set_calls = []
         self.price_clear_calls = []
+        # Total users / biggest balances (22 Nov 2026): seeded
+        # records; *_none mirrors the real client's 404 (endpoint
+        # not live yet).
+        self._users_count = users_count
+        self._users_count_none = users_count_none
+        self._top_balances = top_balances
+        self._top_balances_none = top_balances_none
 
     async def admin_stats(self, days=1, day=None):
         self.stats_days_seen.append(days)
@@ -391,6 +400,16 @@ class FakeAdminPaxyo:
         if days in self._stats_by_days:
             return self._stats_by_days[days]
         return self._stats
+
+    async def admin_users_count(self):
+        if self._users_count_none:
+            return None
+        return self._users_count
+
+    async def admin_top_balances(self, limit=5):
+        if self._top_balances_none:
+            return None
+        return self._top_balances
 
     async def broadcast_audience(self, segment, service_id=None):
         if self._audience_none:
@@ -826,6 +845,33 @@ class TestStatsParsing(unittest.TestCase):
             30,
         )
 
+    def test_total_users(self):
+        # No window word and no "new"/"joined": the overall count,
+        # not new users in a window (22 Nov 2026).
+        for text in (
+            "How many users do we have",
+            "How many users are there",
+            "How many users i do have",
+            "No overall users",
+            "total users",
+        ):
+            self.assertEqual(
+                admin_bot.parse_stats_question(text),
+                {"kind": "total_users", "days": 1, "yesterday": False},
+                text,
+            )
+
+    def test_window_users_stay_new_users(self):
+        for text in (
+            "How many users today",
+            "How many users last month",
+            "How many users joined today",
+            "How many new users do we have",
+        ):
+            self.assertEqual(
+                admin_bot.parse_stats_question(text)["kind"], "users", text
+            )
+
     def test_this_week_is_7_days(self):
         self.assertEqual(
             admin_bot.parse_stats_question("How many users this week?")["days"], 7
@@ -954,12 +1000,90 @@ class TestStatsAnswers(AdminBotBase):
         self.assertIn("not connected yet", message.text_sent[0])
         self.assertNotIn("486", message.text_sent[0])
 
+    async def test_total_users(self):
+        fake = FakeAdminPaxyo(users_count={"total_users": 42})
+        message = await self._text("How many users do we have?", fake=fake)
+        self.assertEqual(message.text_sent, ["You have 42 users in total."])
+        # The total comes from /admin/users-count, not /admin/stats.
+        self.assertEqual(fake.stats_days_seen, [])
+
+    async def test_total_users_not_live_is_honest(self):
+        fake = FakeAdminPaxyo(users_count_none=True)
+        message = await self._text("How many users do we have?", fake=fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+        self.assertNotIn("42", message.text_sent[0])
+
     async def test_yesterday_is_not_available(self):
         message = await self._text(
             "How much did we make yesterday?",
             fake=FakeAdminPaxyo(stats=STATS),
         )
         self.assertIn("yesterday on its own is not available yet", message.text_sent[0])
+
+
+class TestTopBalances(AdminBotBase):
+    # Biggest balances in chat (22 Nov 2026): "Who has most biggest
+    # balance" went to the AI, which said it cannot list users.
+    TOP = {
+        "users": [
+            {"telegram_id": 779060335, "username": "Paxyo",
+             "first_name": "William", "balance": 1234.50},
+            {"telegram_id": 2, "username": "",
+             "first_name": "Abel", "balance": 500.00},
+        ],
+        "limit": 5,
+    }
+
+    def test_parsing(self):
+        for text in (
+            "Who has most biggest balance",
+            "who has the biggest balance",
+            "who has the largest balance",
+            "show me the top 5 balances",
+            "who has the highest balance",
+        ):
+            self.assertIsNotNone(
+                admin_bot.parse_top_balances_question(text), text
+            )
+
+    def test_single_balance_is_not_top_balances(self):
+        for text in (
+            "What is the balance of 779060335?",
+            "What is the balance of @paxyo?",
+            "most profitable services",
+        ):
+            self.assertIsNone(
+                admin_bot.parse_top_balances_question(text), text
+            )
+
+    def test_formatting(self):
+        self.assertEqual(
+            admin_bot.format_top_balances(self.TOP["users"]),
+            "Biggest balances:\n"
+            "1. William (@Paxyo) - 1,234.50 ETB\n"
+            "2. Abel (2) - 500.00 ETB",
+        )
+
+    async def test_handler_replies_with_list(self):
+        fake = FakeAdminPaxyo(top_balances=self.TOP)
+        message = await self._text("Who has most biggest balance", fake=fake)
+        self.assertEqual(
+            message.text_sent,
+            ["Biggest balances:\n"
+             "1. William (@Paxyo) - 1,234.50 ETB\n"
+             "2. Abel (2) - 500.00 ETB"],
+        )
+
+    async def test_handler_not_live_is_honest(self):
+        fake = FakeAdminPaxyo(top_balances_none=True)
+        message = await self._text("Who has most biggest balance", fake=fake)
+        self.assertIn("not connected yet", message.text_sent[0])
+        self.assertNotIn("1,234", message.text_sent[0])
+
+    async def test_handler_empty_list(self):
+        fake = FakeAdminPaxyo(top_balances={"users": [], "limit": 5})
+        message = await self._text("Who has most biggest balance", fake=fake)
+        self.assertEqual(message.text_sent, ["No users with a balance yet."])
 
 
 class TestBroadcastParsing(unittest.TestCase):
@@ -3320,6 +3444,7 @@ def _no_admin_parser_matches(text):
         and admin_bot.parse_order_status_command(text) is None
         and admin_bot.parse_admin_report_command(text) is None
         and admin_bot.parse_capability_question(text) is None
+        and admin_bot.parse_top_balances_question(text) is None
     )
 
 
@@ -3739,7 +3864,7 @@ class TestAdminDataset(unittest.TestCase):
                 )
             elif section == "Users":
                 ok = (
-                    (stats is not None and stats["kind"] == "users")
+                    (stats is not None and stats["kind"] in ("users", "total_users"))
                     or _no_admin_parser_matches(text)
                 )
             elif section == "Services":
